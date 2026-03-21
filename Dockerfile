@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the release binary
 # ---------------------------------------------------------------------------
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 
 # Install build dependencies for aws-lc-rs (used by rustls).
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -21,24 +21,26 @@ Five Rust crates, `#![forbid(unsafe_code)]` on all of them, ~11,000 lines of cod
 
 ## How It Works
 
-```
- You (Host)                   Your Server                  Friends
- ┌────────┐                  ┌────────────┐               ┌────────┐
- │        │  1. Deploy       │            │               │        │
- │        │  Docker ──────►  │  StealthOS │               │        │
- │        │                  │   Relay    │               │        │
- │        │  2. Scan QR      │            │               │        │
- │        │  from logs ───►  │  ✓ Claimed │               │        │
- │        │                  │            │               │        │
- │        │  3. Create       │            │  4. Share     │        │
- │        │  invitation ──►  │            │  link/QR ──►  │        │
- │        │                  │            │               │        │
- │        │  5. Approve      │            │  ◄── Join     │        │
- │        │  join ─────────► │  Routes    │  request      │        │
- │        │                  │  messages  │               │        │
- │        │ ◄── E2E encrypted messages ──────────────── ► │        │
- │        │    (server sees only opaque blobs)            │        │
- └────────┘                  └────────────┘               └────────┘
+```mermaid
+sequenceDiagram
+    participant Host as You - Host
+    participant Server as Your Server
+    participant Friends as Friends
+
+    Host->>Server: 1. Deploy Docker
+    Host->>Server: 2. Scan QR from logs
+    Note over Server: Server claimed
+
+    Host->>Server: 3. Create invitation
+    Server->>Friends: 4. Share link/QR
+
+    Friends->>Server: Join request
+    Server->>Host: 5. Approve join
+    Host->>Server: Approved
+
+    Host--)Friends: E2E encrypted messages
+    Friends--)Host: E2E encrypted messages
+    Note over Server: Server sees only opaque blobs
 ```
 
 ## Features
@@ -77,36 +79,20 @@ Five Rust crates, `#![forbid(unsafe_code)]` on all of them, ~11,000 lines of cod
 
 ## Architecture
 
-```
-                        StealthRelay Workspace
-┌──────────────────────────────────────────────────────────────────┐
-│                                                                  │
-│  ┌──────────────────────┐    CLI binary, TOML config loading,   │
-│  │  stealthos-server    │    WebSocket message handler, server  │
-│  │                      │    claiming, join approval routing    │
-│  └──────────┬───────────┘                                       │
-│             │                                                    │
-│  ┌──────────▼───────────┐    Pool registry, peer routing,       │
-│  │  stealthos-core      │    invitation lifecycle, rate          │
-│  │                      │    limiting, server frame types       │
-│  └──────────┬───────────┘                                       │
-│             │                                                    │
-│  ┌──────────▼───────────┐    Ed25519 identity, X25519 key       │
-│  │  stealthos-crypto    │    exchange, ChaCha20-Poly1305,       │
-│  │                      │    HKDF, PoW challenge/verify         │
-│  └──────────┬───────────┘                                       │
-│             │                                                    │
-│  ┌──────────▼───────────┐    WebSocket listener, connection     │
-│  │  stealthos-transport │    actors, backpressure, rustls TLS   │
-│  │                      │    termination, connection registry   │
-│  └──────────┬───────────┘                                       │
-│             │                                                    │
-│  ┌──────────▼───────────┐    Structured logging (tracing),      │
-│  │ stealthos-observability│   Prometheus metrics exporter,      │
-│  │                      │    health/readiness HTTP endpoints    │
-│  └──────────────────────┘                                       │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Workspace["StealthRelay Workspace"]
+        Server["stealthos-server\nCLI binary, TOML config loading\nWebSocket message handler\nserver claiming, join approval routing"]
+        Core["stealthos-core\nPool registry, peer routing\ninvitation lifecycle, rate limiting\nserver frame types"]
+        Crypto["stealthos-crypto\nEd25519 identity, X25519 key exchange\nChaCha20-Poly1305, HKDF\nPoW challenge/verify"]
+        Transport["stealthos-transport\nWebSocket listener, connection actors\nbackpressure, rustls TLS termination\nconnection registry"]
+        Observability["stealthos-observability\nStructured logging via tracing\nPrometheus metrics exporter\nhealth/readiness HTTP endpoints"]
+
+        Server --> Core
+        Core --> Crypto
+        Crypto --> Transport
+        Transport --> Observability
+    end
 ```
 
 ## Security
@@ -164,20 +150,21 @@ Token comparison uses constant-time equality to prevent timing side-channels.
 
 The handshake follows the Noise NK pattern where the client knows the server's static X25519 public key (obtained via invitation or out-of-band):
 
-```
-Step 1 (Client -> Server):
-  client generates ephemeral X25519 keypair
-  shared_es = X25519(client_ephemeral_sk, server_static_pk)
-  sends: { client_ephemeral_pk, client_ed25519_pk, timestamp, signature }
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
 
-Step 2 (Server -> Client):
-  server generates ephemeral X25519 keypair
-  shared_ee = X25519(server_ephemeral_sk, client_ephemeral_pk)
-  sends: { server_ephemeral_pk, timestamp, signature }
+    Note over Client: Generate ephemeral X25519 keypair
+    Note over Client: shared_es = X25519(client_ephemeral_sk, server_static_pk)
+    Client->>Server: client_ephemeral_pk, client_ed25519_pk, timestamp, signature
 
-Step 3 (Both):
-  ikm = shared_es || shared_ee
-  session_keys = HKDF-SHA256(ikm, salt, info, 96)
+    Note over Server: Generate ephemeral X25519 keypair
+    Note over Server: shared_ee = X25519(server_ephemeral_sk, client_ephemeral_pk)
+    Server->>Client: server_ephemeral_pk, timestamp, signature
+
+    Note over Client,Server: ikm = shared_es || shared_ee
+    Note over Client,Server: session_keys = HKDF-SHA256(ikm, salt, info, 96)
 ```
 
 This provides forward secrecy via ephemeral keys, server authentication via the static key (NK pattern), and client authentication via Ed25519 signature over the handshake transcript. All ephemeral secrets are zeroized after key derivation.

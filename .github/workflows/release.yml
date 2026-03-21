@@ -119,6 +119,7 @@ jobs:
       - name: Sign container image
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          cosign sign --yes \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+          IMAGE_LOWER=$(echo "$IMAGE_REF" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes "${IMAGE_LOWER}@${DIGEST}"

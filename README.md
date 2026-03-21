@@ -6,7 +6,7 @@ Used in [StealthOS](https://www.stealthos.app) — The privacy-focused operating
 
 ---
 
-[![Rust 2024 Edition](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.93+](https://img.shields.io/badge/Rust-1.93%2B-orange.svg)](https://www.rust-lang.org)
 [![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Folib--ai%2Fstealth--relay-blue.svg)](https://ghcr.io/olib-ai/stealth-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![ConnectionPool Client](https://img.shields.io/badge/Client-ConnectionPool-purple.svg)](https://github.com/Olib-AI/ConnectionPool)

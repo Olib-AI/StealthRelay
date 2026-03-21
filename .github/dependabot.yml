@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # Rust (Cargo) dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    reviewers:
+      - "Olib-AI"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 10
+
+  # Docker base images
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    reviewers:
+      - "Olib-AI"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    reviewers:
+      - "Olib-AI"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5

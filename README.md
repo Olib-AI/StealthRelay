@@ -17,7 +17,7 @@ StealthRelay is a self-hosted Rust relay server that routes WebSocket messages b
 
 The relay operates on a zero-knowledge model: deploy it on your own infrastructure, claim ownership via a one-time QR code, and invite friends through cryptographically signed invitation URLs. The server authenticates hosts with Ed25519 signatures and protects against abuse with adaptive proof-of-work, per-IP rate limiting, and progressive blocking.
 
-Five Rust crates, `#![forbid(unsafe_code)]` on all of them, ~11,000 lines of code, 82 unit tests, 30 E2E tests, and 5 security audit laps with 30+ hardening fixes.
+Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 162 unit tests, and 30 E2E tests.
 
 ## How It Works
 

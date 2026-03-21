@@ -33,6 +33,10 @@ RUN cargo build --release --locked -p stealthos-server
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim
 
+LABEL org.opencontainers.image.source="https://github.com/Olib-AI/StealthRelay"
+LABEL org.opencontainers.image.description="Zero-knowledge WebSocket relay server for E2E encrypted peer connections"
+LABEL org.opencontainers.image.licenses="MIT"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \

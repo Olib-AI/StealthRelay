@@ -1,0 +1,14 @@
+/Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/deps/serde-72478f9fddd00f22.d: /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/build/serde-1d84d94038952bdb/out/private.rs
+
+/Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/deps/libserde-72478f9fddd00f22.rlib: /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/build/serde-1d84d94038952bdb/out/private.rs
+
+/Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/deps/libserde-72478f9fddd00f22.rmeta: /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/build/serde-1d84d94038952bdb/out/private.rs
+
+/Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/ahstanin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/build/serde-1d84d94038952bdb/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/ahstanin/GitHub/Olib-AI/StealthOS/StealthRelay/target/debug/build/serde-1d84d94038952bdb/out

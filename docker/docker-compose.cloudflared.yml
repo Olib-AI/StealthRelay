@@ -1,0 +1,53 @@
+# =============================================================================
+# StealthOS Relay Server — Cloudflare Tunnel Sidecar
+# =============================================================================
+#
+# Override file that adds a cloudflared container for exposing the relay
+# through a Cloudflare Tunnel (Zero Trust). This eliminates the need to
+# open inbound ports or manage TLS certificates.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml \
+#                  -f docker/docker-compose.cloudflared.yml up -d
+#
+# Prerequisites:
+#   1. Create a tunnel: cloudflared tunnel create stealth-relay
+#   2. Set CLOUDFLARED_TOKEN in .env or environment.
+#   3. Configure DNS route in Cloudflare dashboard.
+
+services:
+  stealth-relay:
+    # Remove public port binding — all traffic goes through the tunnel.
+    ports: !override
+      - "127.0.0.1:${STEALTH_METRICS_PORT:-9091}:9091"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2025.4.0
+    container_name: stealth-relay-tunnel
+    restart: unless-stopped
+    depends_on:
+      stealth-relay:
+        condition: service_healthy
+
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARED_TOKEN}
+
+    # Security hardening.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

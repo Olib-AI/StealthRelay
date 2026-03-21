@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: stealth-relay
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: STEALTH_SERVER__WS_BIND
+        value: "0.0.0.0:9090"
+      - key: STEALTH_SERVER__METRICS_BIND
+        value: "0.0.0.0:9091"
+      - key: STEALTH_LOGGING__LEVEL
+        value: info
+      - key: STEALTH_LOGGING__FORMAT
+        value: json
+    disk:
+      name: stealth-keys
+      mountPath: /var/stealth-relay/keys
+      sizeGB: 1

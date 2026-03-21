@@ -1,0 +1,27 @@
+[package]
+name = "stealthos-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebSocket transport layer for StealthOS Relay — connection management, backpressure, TLS"
+
+[dependencies]
+stealthos-core.workspace = true
+# stealthos-crypto.workspace = true  # TODO: re-enable once stealthos-crypto compiles
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+futures-util = "0.3"
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

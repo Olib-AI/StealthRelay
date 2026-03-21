@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stealthos-server",
+    "crates/stealthos-core",
+    "crates/stealthos-crypto",
+    "crates/stealthos-transport",
+    "crates/stealthos-observability",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Olib-AI/StealthRelay"
+authors = ["Olib AI <dev@olib.ai>"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+rustls-pemfile = "2"
+
+# WebSocket
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# Cryptographic primitives
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["hazmat", "rand_core"] }
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+blake2 = "0.10"
+subtle = "2.6"
+rand = "0.8"
+rand_chacha = "0.3"
+zeroize = { version = "1.8", features = ["derive"] }
+qrcode = "0.14"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"
+base64ct = { version = "1.7", features = ["std"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Utilities
+bytes = "1.9"
+dashmap = "6.1"
+uuid = { version = "1.11", features = ["v7", "serde"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP for health/metrics endpoints
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+
+# Internal crates
+stealthos-core = { path = "crates/stealthos-core" }
+stealthos-crypto = { path = "crates/stealthos-crypto" }
+stealthos-transport = { path = "crates/stealthos-transport" }
+stealthos-observability = { path = "crates/stealthos-observability" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,44 @@
+[package]
+name = "stealthos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "StealthOS Relay Server — secure WebSocket relay for Connection Pool"
+
+[[bin]]
+name = "stealth-relay"
+path = "src/main.rs"
+
+[lib]
+name = "stealthos_server"
+path = "src/lib.rs"
+
+[dependencies]
+stealthos-core.workspace = true
+stealthos-crypto.workspace = true
+stealthos-transport.workspace = true
+stealthos-observability.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+axum.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+base64ct.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+blake2.workspace = true
+qrcode.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
+tower = { workspace = true }
+tempfile = "3"

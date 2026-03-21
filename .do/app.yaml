@@ -1,0 +1,29 @@
+spec:
+  name: stealth-relay
+  services:
+    - name: stealth-relay
+      dockerfile_path: Dockerfile
+      github:
+        repo: Olib-AI/StealthRelay
+        branch: main
+        deploy_on_push: true
+      instance_count: 1
+      instance_size_slug: basic-xxs
+      http_port: 9090
+      health_check:
+        http_path: /health
+        port: 9091
+        initial_delay_seconds: 10
+        period_seconds: 30
+        timeout_seconds: 5
+        success_threshold: 1
+        failure_threshold: 3
+      envs:
+        - key: STEALTH_SERVER__WS_BIND
+          value: "0.0.0.0:9090"
+        - key: STEALTH_SERVER__METRICS_BIND
+          value: "0.0.0.0:9091"
+        - key: STEALTH_LOGGING__LEVEL
+          value: info
+        - key: STEALTH_LOGGING__FORMAT
+          value: json

@@ -1,0 +1,27 @@
+# Arch Linux variant for x86_64 production deployments.
+# Use: docker build -f Dockerfile.archlinux -t stealth-relay .
+FROM archlinux:base-devel AS builder
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm rustup cmake perl ca-certificates && \
+    rustup-init -y --default-toolchain stable && \
+    pacman -Scc --noconfirm
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+RUN cargo build --release --locked -p stealthos-server
+FROM archlinux:base
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm ca-certificates && \
+    pacman -Scc --noconfirm && \
+    useradd -r -s /usr/bin/nologin stealthos && \
+    mkdir -p /var/stealth-relay/keys && \
+    chown stealthos:stealthos /var/stealth-relay/keys
+COPY --from=builder /build/target/release/stealth-relay /usr/local/bin/stealth-relay
+COPY config/default.toml /etc/stealth-relay/config.toml
+USER stealthos
+EXPOSE 9090 9091
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/stealth-relay", "healthcheck", "--url", "http://127.0.0.1:9091/health"]
+ENTRYPOINT ["/usr/local/bin/stealth-relay"]
+CMD ["serve", "--config", "/etc/stealth-relay/config.toml"]

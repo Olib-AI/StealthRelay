@@ -1,0 +1,82 @@
+# =============================================================================
+# StealthOS Relay Server — Docker Compose
+# =============================================================================
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml logs -f stealth-relay
+#
+# With Cloudflare Tunnel:
+#   docker compose -f docker/docker-compose.yml \
+#                  -f docker/docker-compose.cloudflared.yml up -d
+
+services:
+  stealth-relay:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ghcr.io/olib-ai/stealth-relay:latest
+    container_name: stealth-relay
+    restart: unless-stopped
+
+    ports:
+      - "${STEALTH_WS_PORT:-9090}:9090"
+      # Metrics port exposed only on localhost by default.
+      - "127.0.0.1:${STEALTH_METRICS_PORT:-9091}:9091"
+
+    volumes:
+      # Persistent host identity keys.
+      - stealth-keys:/var/stealth-relay/keys
+      # Bind-mount config (read-only).
+      - ../config/default.toml:/etc/stealth-relay/config.toml:ro
+
+    environment:
+      - STEALTH_SERVER__WS_BIND=0.0.0.0:9090
+      # SECURITY: S7 - The metrics endpoint exposes connection counts and
+      # pool counts which can be used for server fingerprinting. It must be
+      # bound to 0.0.0.0 inside the container for the Docker port mapping
+      # to function (Docker forwards to the container's eth0, not loopback).
+      # Host-side access is restricted by the "127.0.0.1:" prefix in the
+      # ports section above. If this service runs on a shared Docker network,
+      # consider adding network isolation or a dedicated metrics network.
+      - STEALTH_SERVER__METRICS_BIND=0.0.0.0:9091
+      - STEALTH_LOGGING__LEVEL=${STEALTH_LOG_LEVEL:-info}
+      - STEALTH_LOGGING__FORMAT=${STEALTH_LOG_FORMAT:-json}
+
+    # Security hardening.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+
+    # Resource limits.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "2.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    # Health check.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/stealth-relay", "healthcheck", "--url", "http://127.0.0.1:9091/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # Logging limits to prevent disk exhaustion.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  stealth-keys:
+    driver: local

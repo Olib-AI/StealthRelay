@@ -1,0 +1,97 @@
+# ============================================================================
+# StealthOS Relay Server — Default Configuration
+# ============================================================================
+#
+# This file contains all configuration options with their default values.
+# Copy this to your deployment and override only the values you need.
+#
+# Environment variables override file values. Use the STEALTH_ prefix with
+# double-underscore for nesting:
+#   STEALTH_SERVER__WS_BIND=0.0.0.0:443
+#   STEALTH_LOGGING__LEVEL=debug
+
+# ----------------------------------------------------------------------------
+# Server — network and resource limits
+# ----------------------------------------------------------------------------
+[server]
+# Address the WebSocket listener binds to.
+ws_bind = "0.0.0.0:9090"
+
+# Address for the internal health/metrics HTTP endpoint.
+# Keep this on localhost or an internal network — do NOT expose publicly.
+metrics_bind = "127.0.0.1:9091"
+
+# Maximum number of concurrent WebSocket connections.
+max_connections = 500
+
+# Maximum size of a single WebSocket message in bytes (64 KiB).
+max_message_size = 65536
+
+# Seconds of inactivity before a connection is closed (10 minutes).
+idle_timeout = 600
+
+# Seconds allowed for a client to complete the WebSocket handshake.
+handshake_timeout = 10
+
+# ----------------------------------------------------------------------------
+# Pool — connection pool limits
+# ----------------------------------------------------------------------------
+[pool]
+# Maximum number of active pools on this relay.
+max_pools = 100
+
+# Maximum peers allowed in a single pool.
+max_pool_size = 16
+
+# Seconds of pool inactivity before automatic cleanup (5 minutes).
+pool_idle_timeout = 300
+
+# ----------------------------------------------------------------------------
+# Transport — TLS termination (optional)
+# ----------------------------------------------------------------------------
+# Uncomment and set both paths to enable native TLS on the WebSocket listener.
+# When both are set, the server terminates TLS directly instead of relying on
+# a reverse proxy. When behind Cloudflare Tunnel or another TLS-terminating
+# proxy, leave these commented out.
+[transport]
+# tls_cert_path = "/etc/stealth-relay/tls/fullchain.pem"
+# tls_key_path  = "/etc/stealth-relay/tls/privkey.pem"
+
+# ----------------------------------------------------------------------------
+# Crypto — host identity and key management
+# ----------------------------------------------------------------------------
+[crypto]
+# Directory for host identity key files (Ed25519 seed + X25519 static key).
+key_dir = "/var/stealth-relay/keys"
+
+# Automatically generate a host keypair on first start if none exists.
+auto_generate_keys = true
+
+# ----------------------------------------------------------------------------
+# Logging — structured output configuration
+# ----------------------------------------------------------------------------
+[logging]
+# Tracing filter directive. Examples:
+#   "info"                          — all crates at info level
+#   "stealthos_server=debug"        — server crate at debug, rest at default
+#   "stealthos_server=trace,tower=warn" — fine-grained control
+level = "info"
+
+# Output format: "json" for production (log aggregators), "pretty" for dev.
+format = "json"
+
+# ----------------------------------------------------------------------------
+# Rate Limiting — abuse prevention
+# ----------------------------------------------------------------------------
+[rate_limit]
+# Maximum new connections per IP per minute.
+connections_per_minute = 30
+
+# Maximum messages per connection per second.
+messages_per_second = 60
+
+# Maximum failed authentication attempts per IP before temporary block.
+max_failed_auth = 5
+
+# Duration in seconds an IP stays blocked after exceeding limits (10 minutes).
+block_duration_secs = 600

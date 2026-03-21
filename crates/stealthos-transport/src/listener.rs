@@ -355,6 +355,7 @@ async fn ws_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     // Callback that rejects permessage-deflate compression extensions and
     // strips any Sec-WebSocket-Extensions from the response to ensure the
     // server never negotiates compression.
+    #[allow(clippy::result_large_err)]
     let reject_compression =
         |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
          response: tokio_tungstenite::tungstenite::handshake::server::Response|

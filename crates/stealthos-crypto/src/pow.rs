@@ -16,7 +16,7 @@
 //!
 //! - The challenge includes a timestamp to prevent pre-computation.
 //! - Challenges should be verified within a time window.
-//! - The PoW is memory-hard in the sense that BLAKE2b uses 1KB state,
+//! - The `PoW` is memory-hard in the sense that `BLAKE2b` uses 1KB state,
 //!   but is primarily CPU-bound.
 
 use rand::RngCore;
@@ -42,15 +42,15 @@ pub struct PowSolution {
     pub solution: [u8; 8],
 }
 
-/// Domain separator for PoW hashing.
+/// Domain separator for `PoW` hashing.
 const POW_PREFIX: &[u8] = b"STEALTH_POW";
 
-/// Compute the PoW hash: `SHA-256(POW_PREFIX || challenge || solution)`.
+/// Compute the `PoW` hash: `SHA-256(POW_PREFIX || challenge || solution)`.
 ///
-/// Uses SHA-256 for cross-platform compatibility (Apple CryptoKit on iOS,
+/// Uses SHA-256 for cross-platform compatibility (Apple `CryptoKit` on iOS,
 /// ring/sha2 on server). Both client and server can compute identical hashes
-/// without requiring BLAKE2b support.
-fn pow_hash(challenge: &[u8; 32], solution: &[u8; 8]) -> [u8; 32] {
+/// without requiring `BLAKE2b` support.
+fn pow_hash(challenge: &[u8; 32], solution: [u8; 8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -117,7 +117,7 @@ impl PowChallenge {
         let mut nonce = 0u64;
         loop {
             let solution = nonce.to_be_bytes();
-            let hash = pow_hash(&self.challenge, &solution);
+            let hash = pow_hash(&self.challenge, solution);
             if leading_zero_bits(&hash) >= u32::from(self.difficulty) {
                 return PowSolution { solution };
             }
@@ -137,7 +137,7 @@ impl PowChallenge {
     /// Returns [`CryptoError::PowFailed`] if the solution does not meet
     /// the difficulty requirement.
     pub fn verify(&self, solution: &PowSolution) -> Result<()> {
-        let hash = pow_hash(&self.challenge, &solution.solution);
+        let hash = pow_hash(&self.challenge, solution.solution);
         if leading_zero_bits(&hash) >= u32::from(self.difficulty) {
             Ok(())
         } else {
@@ -157,7 +157,7 @@ impl PowChallenge {
     }
 }
 
-/// Recommend a PoW difficulty based on the current request rate.
+/// Recommend a `PoW` difficulty based on the current request rate.
 ///
 /// # Difficulty Tiers
 ///
@@ -171,7 +171,7 @@ impl PowChallenge {
 ///
 /// - Higher difficulty makes denial-of-service attacks more expensive.
 /// - The thresholds are tuned for typical relay server load patterns.
-pub fn recommended_difficulty(requests_per_minute: u32) -> u8 {
+pub const fn recommended_difficulty(requests_per_minute: u32) -> u8 {
     if requests_per_minute > 200 {
         26
     } else if requests_per_minute > 50 {
@@ -295,8 +295,8 @@ mod tests {
     fn pow_hash_deterministic() {
         let challenge = [42u8; 32];
         let solution = [7u8; 8];
-        let h1 = pow_hash(&challenge, &solution);
-        let h2 = pow_hash(&challenge, &solution);
+        let h1 = pow_hash(&challenge, solution);
+        let h2 = pow_hash(&challenge, solution);
         assert_eq!(h1, h2);
     }
 
@@ -305,6 +305,6 @@ mod tests {
         let challenge = [42u8; 32];
         let s1 = [0u8; 8];
         let s2 = [1u8; 8];
-        assert_ne!(pow_hash(&challenge, &s1), pow_hash(&challenge, &s2));
+        assert_ne!(pow_hash(&challenge, s1), pow_hash(&challenge, s2));
     }
 }

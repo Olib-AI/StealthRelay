@@ -43,6 +43,7 @@ impl PoolRegistry {
     ///
     /// Fails with `MaxPoolsReached` if the registry is at capacity.
     /// Fails with `PoolAlreadyExists` if a pool with the given ID already exists.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_pool(
         &self,
         id: PoolId,

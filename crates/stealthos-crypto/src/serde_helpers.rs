@@ -5,7 +5,7 @@
 //! `[u8; 64]` using base64 encoding.
 
 /// Serde helper for `[u8; 64]` — serializes as a base64 string.
-pub(crate) mod bytes64 {
+pub mod bytes64 {
     use base64ct::{Base64, Encoding};
     use serde::{Deserialize, Deserializer, Serializer};
 

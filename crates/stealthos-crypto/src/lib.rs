@@ -1,6 +1,6 @@
-//! # StealthOS Crypto
+//! # `StealthOS` Crypto
 //!
-//! Cryptographic primitives for the StealthOS relay server. This crate provides:
+//! Cryptographic primitives for the `StealthOS` relay server. This crate provides:
 //!
 //! - **Host identity** — Ed25519 signing + X25519 key agreement, with
 //!   fingerprinting and persistent seed storage.

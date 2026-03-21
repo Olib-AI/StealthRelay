@@ -122,11 +122,11 @@ fn counter_to_nonce(counter: u64) -> chacha20poly1305::Nonce {
 }
 
 /// Maximum nonce counter value. We reserve the last 2^20 values as a safety
-/// margin, forcing a rekey or session termination well before u64::MAX.
+/// margin, forcing a rekey or session termination well before `u64::MAX`.
 /// This prevents nonce reuse even under pathological conditions.
 const MAX_COUNTER: u64 = u64::MAX - (1 << 20);
 
-/// Build the full AAD: version_byte || counter_be8 || user_aad.
+/// Build the full AAD: `version_byte` || `counter_be8` || `user_aad`.
 ///
 /// Uses a stack buffer for the common case (AAD <= 128 bytes) to avoid
 /// heap allocation in the hot path.
@@ -205,7 +205,7 @@ impl SessionCipher {
     /// - Client and server use different keys for each direction, preventing
     ///   reflection attacks.
     /// - The rekey seed is shared and used for symmetric ratcheting.
-    pub fn new(session_keys: SessionKeys, is_server: bool) -> Self {
+    pub const fn new(session_keys: &SessionKeys, is_server: bool) -> Self {
         let (write_key, read_key) = if is_server {
             (session_keys.server_write_key, session_keys.client_write_key)
         } else {
@@ -219,6 +219,7 @@ impl SessionCipher {
             read_counter: 0,
             read_window: 0,
             rekey_seed: session_keys.rekey_seed,
+
             send_since_rekey: 0,
             recv_since_rekey: 0,
             is_server,
@@ -385,7 +386,7 @@ impl SessionCipher {
     }
 
     /// Check whether a counter value is valid (not replayed, not too old).
-    fn check_replay(&self, counter: u64) -> Result<()> {
+    const fn check_replay(&self, counter: u64) -> Result<()> {
         if self.read_counter == 0 && self.read_window == 0 && counter == 0 {
             // First message ever — always accept counter 0
             return Ok(());
@@ -415,7 +416,7 @@ impl SessionCipher {
     }
 
     /// Update the sliding window after successful decryption.
-    fn update_window(&mut self, counter: u64) {
+    const fn update_window(&mut self, counter: u64) {
         if counter > self.read_counter {
             // Shift window by the difference
             let shift = counter - self.read_counter;
@@ -433,22 +434,22 @@ impl SessionCipher {
     }
 
     /// Return the current write counter value (useful for diagnostics).
-    pub fn write_counter(&self) -> u64 {
+    pub const fn write_counter(&self) -> u64 {
         self.write_counter
     }
 
     /// Return the current read counter value (useful for diagnostics).
-    pub fn read_counter(&self) -> u64 {
+    pub const fn read_counter(&self) -> u64 {
         self.read_counter
     }
 
     /// Return the number of messages sent since the last rekey.
-    pub fn send_since_rekey(&self) -> u32 {
+    pub const fn send_since_rekey(&self) -> u32 {
         self.send_since_rekey
     }
 
     /// Return the number of messages received since the last rekey.
-    pub fn recv_since_rekey(&self) -> u32 {
+    pub const fn recv_since_rekey(&self) -> u32 {
         self.recv_since_rekey
     }
 }
@@ -470,14 +471,14 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let keys = make_test_keys();
         let mut client = SessionCipher::new(
-            SessionKeys {
+            &SessionKeys {
                 client_write_key: keys.client_write_key,
                 server_write_key: keys.server_write_key,
                 rekey_seed: keys.rekey_seed,
             },
             false,
         );
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let plaintext = b"hello, stealth world!";
         let aad = b"pool-id-123";
@@ -489,8 +490,8 @@ mod tests {
 
     #[test]
     fn server_to_client_roundtrip() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let plaintext = b"server message";
         let aad = b"";
@@ -502,8 +503,8 @@ mod tests {
 
     #[test]
     fn replay_detected() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let envelope = client.encrypt(b"msg1", b"").unwrap();
         server.decrypt(&envelope, b"").unwrap();
@@ -515,8 +516,8 @@ mod tests {
 
     #[test]
     fn counter_too_old() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         // Send 65 messages to advance the window past counter 0
         let mut envelopes = Vec::new();
@@ -540,8 +541,8 @@ mod tests {
 
     #[test]
     fn out_of_order_within_window() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let env0 = client.encrypt(b"msg0", b"").unwrap();
         let env1 = client.encrypt(b"msg1", b"").unwrap();
@@ -555,8 +556,8 @@ mod tests {
 
     #[test]
     fn wrong_aad_fails() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let envelope = client.encrypt(b"secret", b"correct-aad").unwrap();
         let result = server.decrypt(&envelope, b"wrong-aad");
@@ -565,8 +566,8 @@ mod tests {
 
     #[test]
     fn manual_rekey() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         // Send a message before rekey
         let env1 = client.encrypt(b"before rekey", b"").unwrap();
@@ -584,15 +585,15 @@ mod tests {
 
     #[test]
     fn debug_redacts_keys() {
-        let cipher = SessionCipher::new(make_test_keys(), false);
+        let cipher = SessionCipher::new(&make_test_keys(), false);
         let debug = format!("{cipher:?}");
         assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
     fn rekey_triggered_on_send_count() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         // Force send_since_rekey to just below threshold.
         client.send_since_rekey = REKEY_INTERVAL - 1;
@@ -615,8 +616,8 @@ mod tests {
 
     #[test]
     fn rekey_triggered_on_recv_count() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         // Simulate server having received many messages (via its recv counter).
         // When server encrypts, it checks both send and recv counters.
@@ -631,7 +632,7 @@ mod tests {
 
     #[test]
     fn nonce_uniqueness_across_messages() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
 
         let env0 = client.encrypt(b"msg0", b"").unwrap();
         let env1 = client.encrypt(b"msg1", b"").unwrap();
@@ -645,8 +646,8 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_fails() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let mut envelope = client.encrypt(b"authentic", b"").unwrap();
         // Flip a bit in the ciphertext.
@@ -659,8 +660,8 @@ mod tests {
 
     #[test]
     fn bidirectional_communication() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         // Client -> Server
         let env1 = client.encrypt(b"hello server", b"").unwrap();
@@ -680,8 +681,8 @@ mod tests {
 
     #[test]
     fn write_and_read_counters_track_correctly() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         assert_eq!(client.write_counter(), 0);
         assert_eq!(server.read_counter(), 0);
@@ -699,8 +700,8 @@ mod tests {
 
     #[test]
     fn empty_plaintext_round_trip() {
-        let mut client = SessionCipher::new(make_test_keys(), false);
-        let mut server = SessionCipher::new(make_test_keys(), true);
+        let mut client = SessionCipher::new(&make_test_keys(), false);
+        let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let env = client.encrypt(b"", b"").unwrap();
         let pt = server.decrypt(&env, b"").unwrap();

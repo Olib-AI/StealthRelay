@@ -366,15 +366,14 @@ async fn ws_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             // simply do not echo the extension back — the upgrade proceeds
             // without compression. tungstenite 0.26 already ignores unknown
             // extensions, but being explicit prevents regressions.
-            if let Some(ext) = request.headers().get("Sec-WebSocket-Extensions") {
-                if let Ok(ext_str) = ext.to_str() {
-                    if ext_str.contains("permessage-deflate") {
-                        debug!(
-                            %connection_id,
-                            "rejecting permessage-deflate extension from client"
-                        );
-                    }
-                }
+            if let Some(ext) = request.headers().get("Sec-WebSocket-Extensions")
+                && let Ok(ext_str) = ext.to_str()
+                && ext_str.contains("permessage-deflate")
+            {
+                debug!(
+                    %connection_id,
+                    "rejecting permessage-deflate extension from client"
+                );
             }
             // Return the response as-is (without adding any extensions).
             Ok(response)

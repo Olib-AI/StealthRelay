@@ -1,4 +1,4 @@
-//! StealthOS Relay Server — library entry point.
+//! `StealthOS` Relay Server — library entry point.
 //!
 //! This crate is primarily a binary (`stealth-relay`). The library target
 //! re-exports modules needed by integration tests and downstream tooling.

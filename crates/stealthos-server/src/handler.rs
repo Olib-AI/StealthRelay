@@ -69,17 +69,17 @@ const MAX_PENDING_JOINS_PER_POOL: usize = 16;
 /// Maximum age of a pending join request before it is purged (60 seconds).
 const PENDING_JOIN_TTL_SECS: u64 = 60;
 
-/// Default PoW difficulty (leading zero bits). ~50ms on a single core.
+/// Default `PoW` difficulty (leading zero bits). ~50ms on a single core.
 /// See `stealthos_crypto::pow::recommended_difficulty` for adaptive tiers.
 const POW_DEFAULT_DIFFICULTY: u8 = 18;
 
-/// Maximum age of a PoW challenge before it is considered stale (120 seconds).
+/// Maximum age of a `PoW` challenge before it is considered stale (120 seconds).
 const POW_CHALLENGE_MAX_AGE_SECS: i64 = 120;
 
-/// Maximum number of outstanding PoW challenges to prevent memory exhaustion.
+/// Maximum number of outstanding `PoW` challenges to prevent memory exhaustion.
 const MAX_PENDING_POW_CHALLENGES: usize = 10_000;
 
-/// State for a pending PoW challenge issued to a connection.
+/// State for a pending `PoW` challenge issued to a connection.
 struct PendingPowChallenge {
     /// The cryptographic challenge the client must solve.
     challenge: PowChallenge,
@@ -119,15 +119,15 @@ pub struct MessageHandler {
     pending_joins: DashMap<String, PendingJoin>,
     /// Default server address used for invitation URL generation.
     server_addr: String,
-    /// Per-pool host-provided server URL (overrides server_addr for invitation generation).
-    /// Keyed by PoolId so multiple pools on the same server do not conflict.
+    /// Per-pool host-provided server URL (overrides `server_addr` for invitation generation).
+    /// Keyed by `PoolId` so multiple pools on the same server do not conflict.
     host_server_urls: DashMap<PoolId, String>,
     /// Maximum peers per pool.
     max_pool_size: usize,
-    /// Maps token_id (16 bytes) to pool_id for invitation lookup.
+    /// Maps `token_id` (16 bytes) to `pool_id` for invitation lookup.
     token_to_pool: DashMap<[u8; 16], PoolId>,
-    /// Outstanding PoW challenges keyed by connection ID.
-    /// A client that sends a JoinRequest without a PoW solution receives a
+    /// Outstanding `PoW` challenges keyed by connection ID.
+    /// A client that sends a `JoinRequest` without a `PoW` solution receives a
     /// challenge; on the next attempt they must include the solution.
     pending_pow_challenges: DashMap<ConnectionId, PendingPowChallenge>,
     /// Server claim state -- determines whether a host is bound.
@@ -138,9 +138,9 @@ pub struct MessageHandler {
     claim_state: Mutex<ClaimState>,
     /// Key directory path, used for persisting claim bindings.
     key_dir: PathBuf,
-    /// Maps pool_id to the host's session token. Generated at pool creation
-    /// and required for all privileged host operations (CreateInvitation,
-    /// KickPeer, ClosePool, Forward, JoinApproval, RevokeInvitation).
+    /// Maps `pool_id` to the host's session token. Generated at pool creation
+    /// and required for all privileged host operations (`CreateInvitation`,
+    /// `KickPeer`, `ClosePool`, `Forward`, `JoinApproval`, `RevokeInvitation`).
     host_session_tokens: DashMap<PoolId, String>,
     /// Per-connection session ciphers established via Noise NK handshake.
     /// Keyed by `ConnectionId`. The `Mutex` is `std::sync::Mutex` because
@@ -220,16 +220,14 @@ impl MessageHandler {
             .pool_registry
             .get_pool_for_connection(connection_id)
             .is_some();
-        if !is_authenticated {
-            if let Err(e) = self.rate_limiter.check_rate(remote_addr.ip()) {
-                self.metrics.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
-                warn!(
-                    connection = %connection_id,
-                    remote = %remote_addr,
-                    "message rate limited: {e}"
-                );
-                return Err(anyhow::anyhow!("rate limited"));
-            }
+        if !is_authenticated && let Err(e) = self.rate_limiter.check_rate(remote_addr.ip()) {
+            self.metrics.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                connection = %connection_id,
+                remote = %remote_addr,
+                "message rate limited: {e}"
+            );
+            return Err(anyhow::anyhow!("rate limited"));
         }
 
         // SECURITY: S5 - Enforce JSON nesting depth limit to prevent stack
@@ -486,6 +484,8 @@ impl MessageHandler {
         server_url: Option<String>,
         display_name: Option<String>,
     ) -> Result<(), anyhow::Error> {
+        const HOST_AUTH_PREFIX: &[u8] = b"STEALTH_HOST_AUTH_V1:";
+
         // Rate limit: check IP-level rate.
         if let Err(e) = self.rate_limiter.check_rate(remote_addr.ip()) {
             self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
@@ -591,7 +591,6 @@ impl MessageHandler {
         // protocol context (e.g., handshake transcript) if the byte layout
         // happened to collide. The client MUST use the same prefix when
         // constructing the signed message.
-        const HOST_AUTH_PREFIX: &[u8] = b"STEALTH_HOST_AUTH_V1:";
         let mut sign_msg = Vec::with_capacity(HOST_AUTH_PREFIX.len() + 24);
         sign_msg.extend_from_slice(HOST_AUTH_PREFIX);
         sign_msg.extend_from_slice(pool_id.as_bytes());
@@ -655,15 +654,14 @@ impl MessageHandler {
         self.metrics.pools_active.fetch_add(1, Ordering::Relaxed);
 
         // Create the pool and register the host connection.
-        let host_peer_id = PeerId(host_public_key.clone());
+        let host_peer_id = PeerId(host_public_key);
         let core_pool_id = PoolId(pool_id);
 
         // SECURITY: S3 - Pool creation uses atomic entry() API in
         // PoolRegistry::create_pool to prevent TOCTOU races. If a pool
         // with this ID already exists, create_pool returns PoolAlreadyExists.
-        let host_name = display_name
-            .map(|n| sanitize_display_name(&n))
-            .unwrap_or_else(|| "Host".to_owned());
+        let host_name =
+            display_name.map_or_else(|| "Host".to_owned(), |n| sanitize_display_name(&n));
 
         if let Err(e) = self.pool_registry.create_pool(
             core_pool_id,
@@ -997,75 +995,72 @@ impl MessageHandler {
         if let Some(solution) = pow_solution {
             // Verify the provided solution against the stored challenge.
             let pending = self.pending_pow_challenges.remove(&connection_id);
-            match pending {
-                Some((_, pending_challenge)) => {
-                    // Verify freshness first.
-                    if !pending_challenge
-                        .challenge
-                        .is_fresh(POW_CHALLENGE_MAX_AGE_SECS)
-                    {
-                        warn!(
-                            connection = %connection_id,
-                            "PoW challenge expired, issuing new one"
-                        );
-                        self.issue_pow_challenge(connection_id)?;
-                        return Ok(());
-                    }
-
-                    // Decode the solution bytes from base64.
-                    let solution_bytes = match Base64::decode_vec(&solution.solution) {
-                        Ok(b) if b.len() == 8 => {
-                            let mut arr = [0u8; 8];
-                            arr.copy_from_slice(&b);
-                            arr
-                        }
-                        _ => {
-                            warn!(
-                                connection = %connection_id,
-                                "PoW solution has invalid format"
-                            );
-                            let error_frame = ServerFrame::Error {
-                                code: 400,
-                                message: "invalid PoW solution format".to_owned(),
-                            };
-                            self.send_to_connection(connection_id, &error_frame)?;
-                            return Ok(());
-                        }
-                    };
-
-                    let pow_solution_obj = stealthos_crypto::pow::PowSolution {
-                        solution: solution_bytes,
-                    };
-
-                    if let Err(_e) = pending_challenge.challenge.verify(&pow_solution_obj) {
-                        warn!(
-                            connection = %connection_id,
-                            "PoW verification failed — solution does not meet difficulty"
-                        );
-                        self.rate_limiter.record_failure(remote_addr.ip());
-                        let error_frame = ServerFrame::Error {
-                            code: 403,
-                            message: "proof-of-work verification failed".to_owned(),
-                        };
-                        self.send_to_connection(connection_id, &error_frame)?;
-                        return Ok(());
-                    }
-
-                    debug!(
-                        connection = %connection_id,
-                        "PoW verification succeeded"
-                    );
-                }
-                None => {
-                    // Client sent a solution but we have no record of a challenge.
-                    // Could be a replay or the challenge expired and was cleaned up.
+            if let Some((_, pending_challenge)) = pending {
+                // Verify freshness first.
+                if !pending_challenge
+                    .challenge
+                    .is_fresh(POW_CHALLENGE_MAX_AGE_SECS)
+                {
                     warn!(
                         connection = %connection_id,
-                        "PoW solution received but no pending challenge found"
+                        "PoW challenge expired, issuing new one"
                     );
                     self.issue_pow_challenge(connection_id)?;
                     return Ok(());
                 }
+
+                // Decode the solution bytes from base64.
+                let solution_bytes = match Base64::decode_vec(&solution.solution) {
+                    Ok(b) if b.len() == 8 => {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => {
+                        warn!(
+                            connection = %connection_id,
+                            "PoW solution has invalid format"
+                        );
+                        let error_frame = ServerFrame::Error {
+                            code: 400,
+                            message: "invalid PoW solution format".to_owned(),
+                        };
+                        self.send_to_connection(connection_id, &error_frame)?;
+                        return Ok(());
+                    }
+                };
+
+                let pow_solution_obj = stealthos_crypto::pow::PowSolution {
+                    solution: solution_bytes,
+                };
+
+                if let Err(_e) = pending_challenge.challenge.verify(&pow_solution_obj) {
+                    warn!(
+                        connection = %connection_id,
+                        "PoW verification failed — solution does not meet difficulty"
+                    );
+                    self.rate_limiter.record_failure(remote_addr.ip());
+                    let error_frame = ServerFrame::Error {
+                        code: 403,
+                        message: "proof-of-work verification failed".to_owned(),
+                    };
+                    self.send_to_connection(connection_id, &error_frame)?;
+                    return Ok(());
+                }
+
+                debug!(
+                    connection = %connection_id,
+                    "PoW verification succeeded"
+                );
+            } else {
+                // Client sent a solution but we have no record of a challenge.
+                // Could be a replay or the challenge expired and was cleaned up.
+                warn!(
+                    connection = %connection_id,
+                    "PoW solution received but no pending challenge found"
+                );
+                self.issue_pow_challenge(connection_id)?;
+                return Ok(());
             }
         } else {
             // No PoW solution provided — issue a challenge.
@@ -1092,18 +1087,18 @@ impl MessageHandler {
         // Look up which pool this token belongs to by scanning all pools.
         // The token_id is base64-encoded; decode to the 16-byte form.
         let token_id_bytes = Base64::decode_vec(&token_id).ok();
-        let mut target_pool: Option<(Arc<Pool>, PoolId)> = None;
-
-        if let Some(ref id_bytes) = token_id_bytes {
-            if id_bytes.len() == 16 {
-                let mut tid = [0u8; 16];
-                tid.copy_from_slice(id_bytes);
-                // Try to consume the invitation in each pool.
-                // This is a scan, but pool counts are small (max ~100).
-                // A production optimization would be a token_id -> pool_id index.
-                target_pool = self.find_pool_for_token(&tid);
-            }
-        }
+        let target_pool: Option<(Arc<Pool>, PoolId)> = if let Some(ref id_bytes) = token_id_bytes
+            && id_bytes.len() == 16
+        {
+            let mut tid = [0u8; 16];
+            tid.copy_from_slice(id_bytes);
+            // Try to consume the invitation in each pool.
+            // This is a scan, but pool counts are small (max ~100).
+            // A production optimization would be a token_id -> pool_id index.
+            self.find_pool_for_token(&tid)
+        } else {
+            None
+        };
 
         let Some((pool, pool_id)) = target_pool else {
             warn!(
@@ -1307,14 +1302,14 @@ impl MessageHandler {
             let accepted_frame = ServerFrame::JoinAccepted {
                 session_token: peer_session_token,
                 peer_id: peer_id.0.clone(),
-                peers: peers.clone(),
+                peers,
                 pool_info,
             };
             self.send_to_connection(pending.connection_id, &accepted_frame)?;
 
             // Broadcast PeerJoined to all other pool members.
             let new_peer_info = PeerInfo {
-                peer_id: peer_id.0.clone(),
+                peer_id: peer_id.0,
                 display_name: pending.display_name,
                 public_key: client_public_key,
                 connected_at: 0,
@@ -1356,20 +1351,22 @@ impl MessageHandler {
         // target_peer_ids, each triggering a DashMap lookup and potential
         // buffer_message call.
         const MAX_FORWARD_TARGETS: usize = 64;
-        if let Some(ref targets) = target_peer_ids {
-            if targets.len() > MAX_FORWARD_TARGETS {
-                warn!(
-                    connection = %connection_id,
-                    target_count = targets.len(),
-                    "forward rejected: too many target_peer_ids"
-                );
-                let error_frame = ServerFrame::Error {
-                    code: 400,
-                    message: "too many target peers".to_owned(),
-                };
-                self.send_to_connection(connection_id, &error_frame)?;
-                return Ok(());
-            }
+        const MAX_FORWARD_DATA_LEN: usize = 65_536; // 64 KiB
+
+        if let Some(ref targets) = target_peer_ids
+            && targets.len() > MAX_FORWARD_TARGETS
+        {
+            warn!(
+                connection = %connection_id,
+                target_count = targets.len(),
+                "forward rejected: too many target_peer_ids"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 400,
+                message: "too many target peers".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
         }
 
         // SECURITY: Validate data payload size at the handler level.
@@ -1378,7 +1375,6 @@ impl MessageHandler {
         // still be very large (up to max_message_size minus JSON overhead).
         // We enforce a tighter limit here to prevent one peer from relaying
         // excessively large payloads that consume memory across all recipients.
-        const MAX_FORWARD_DATA_LEN: usize = 65_536; // 64 KiB
         if data.len() > MAX_FORWARD_DATA_LEN {
             warn!(
                 connection = %connection_id,
@@ -1431,13 +1427,12 @@ impl MessageHandler {
         // If the sender is the pool host, validate the session token.
         // Guest peers are authenticated by their connection mapping and
         // do not need to provide a session token for Forward frames.
-        if pool.is_host(connection_id) {
-            if self
+        if pool.is_host(connection_id)
+            && self
                 .validate_session_token(connection_id, pool.id, session_token.as_deref())
                 .is_err()
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
 
         // SECURITY: Resolve the sender's peer_id from the authoritative
@@ -1621,8 +1616,7 @@ impl MessageHandler {
             pool.id.0,
             self.host_server_urls
                 .get(&pool.id)
-                .map(|entry| entry.value().clone())
-                .unwrap_or_else(|| self.server_addr.clone()),
+                .map_or_else(|| self.server_addr.clone(), |entry| entry.value().clone()),
             ttl_secs,
             max_uses,
         );
@@ -1687,13 +1681,13 @@ impl MessageHandler {
         // SECURITY: Without cleaning token_to_pool, revoked tokens would still
         // map to pool IDs, leaking memory and potentially allowing stale lookups
         // if pool IDs were ever reused.
-        if let Ok(id_bytes) = Base64::decode_vec(&token_id) {
-            if id_bytes.len() == 16 {
-                let mut tid = [0u8; 16];
-                tid.copy_from_slice(&id_bytes);
-                pool.revoke_invitation(&tid);
-                self.token_to_pool.remove(&tid);
-            }
+        if let Ok(id_bytes) = Base64::decode_vec(&token_id)
+            && id_bytes.len() == 16
+        {
+            let mut tid = [0u8; 16];
+            tid.copy_from_slice(&id_bytes);
+            pool.revoke_invitation(&tid);
+            self.token_to_pool.remove(&tid);
         }
 
         Ok(())
@@ -1874,7 +1868,7 @@ impl MessageHandler {
         };
 
         // Create a server-side SessionCipher from the derived keys.
-        let cipher = SessionCipher::new(session_keys, true);
+        let cipher = SessionCipher::new(&session_keys, true);
         self.session_ciphers
             .insert(connection_id, Mutex::new(cipher));
 
@@ -2032,7 +2026,7 @@ impl MessageHandler {
     /// Resolve a connection's peer ID within a pool.
     ///
     /// Uses the `PoolRegistry`'s authoritative `connection_to_pool` mapping
-    /// (O(1) DashMap lookup) instead of iterating the pool's peer list.
+    /// (O(1) `DashMap` lookup) instead of iterating the pool's peer list.
     /// Returns `None` if the connection has no registered peer identity,
     /// which prevents spoofed `from_peer_id` in forwarded messages.
     fn get_peer_id_for_connection(
@@ -2051,7 +2045,7 @@ impl MessageHandler {
     /// Purge pending join requests older than `PENDING_JOIN_TTL_SECS`.
     ///
     /// This prevents memory exhaustion from an attacker sending thousands of
-    /// JoinRequest frames with valid-looking tokens that the host never
+    /// `JoinRequest` frames with valid-looking tokens that the host never
     /// responds to.
     fn purge_expired_pending_joins(&self) {
         let now = Instant::now();
@@ -2060,7 +2054,7 @@ impl MessageHandler {
             .retain(|_, pending| now.duration_since(pending.created_at) < ttl);
     }
 
-    /// Purge PoW challenges older than `POW_CHALLENGE_MAX_AGE_SECS`.
+    /// Purge `PoW` challenges older than `POW_CHALLENGE_MAX_AGE_SECS`.
     fn purge_expired_pow_challenges(&self) {
         let now = Instant::now();
         let ttl = std::time::Duration::from_secs(
@@ -2070,9 +2064,9 @@ impl MessageHandler {
             .retain(|_, challenge| now.duration_since(challenge.created_at) < ttl);
     }
 
-    /// Generate a PoW challenge for the given connection and send it.
+    /// Generate a `PoW` challenge for the given connection and send it.
     ///
-    /// Returns early if the pending challenge table is full (DoS protection).
+    /// Returns early if the pending challenge table is full (`DoS` protection).
     fn issue_pow_challenge(&self, connection_id: ConnectionId) -> Result<(), anyhow::Error> {
         // Cap the number of outstanding challenges to prevent memory exhaustion.
         if self.pending_pow_challenges.len() >= MAX_PENDING_POW_CHALLENGES {

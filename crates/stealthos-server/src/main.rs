@@ -1,6 +1,6 @@
-//! StealthOS Relay Server
+//! `StealthOS` Relay Server
 //!
-//! A zero-knowledge WebSocket relay for the StealthOS Connection Pool.
+//! A zero-knowledge WebSocket relay for the `StealthOS` Connection Pool.
 //! The server routes encrypted messages between peers without ever
 //! seeing plaintext content.
 
@@ -9,7 +9,10 @@
 #![allow(
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
-    clippy::missing_errors_doc
+    clippy::missing_errors_doc,
+    clippy::unused_async,
+    clippy::too_many_lines,
+    clippy::significant_drop_tightening
 )]
 
 mod app;
@@ -34,7 +37,7 @@ use tracing::{error, info, warn};
 use crate::app::AppState;
 use crate::config::ServerConfig;
 
-/// StealthOS Relay Server -- zero-knowledge WebSocket relay.
+/// `StealthOS` Relay Server -- zero-knowledge WebSocket relay.
 #[derive(Parser)]
 #[command(name = "stealth-relay", version, about, long_about = None)]
 struct Cli {
@@ -119,10 +122,10 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // 2b. Check claim state and print QR banner BEFORE any logging starts.
     let claim_state = claim::ClaimState::load_or_create(&key_dir);
-    if !claim_state.is_claimed() {
-        if let Some(secret) = claim_state.claim_secret() {
-            claim::print_claim_banner(secret);
-        }
+    if !claim_state.is_claimed()
+        && let Some(secret) = claim_state.claim_secret()
+    {
+        claim::print_claim_banner(secret);
     }
 
     // 3. NOW initialize structured logging (after QR banner is fully printed).
@@ -370,7 +373,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let drain_timeout = Duration::from_secs(10);
     tokio::select! {
-        _ = tokio::time::sleep(drain_timeout) => {
+        () = tokio::time::sleep(drain_timeout) => {
             warn!("drain timeout exceeded, forcing shutdown");
         }
         _ = listener_handle => {

@@ -1,4 +1,4 @@
-//! Cryptographic error types for StealthOS.
+//! Cryptographic error types for `StealthOS`.
 //!
 //! All error variants are designed to avoid leaking secret material.
 //! Error messages are intentionally vague about *which* key or *what* value
@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-/// Unified error type for all cryptographic operations in the StealthOS relay.
+/// Unified error type for all cryptographic operations in the `StealthOS` relay.
 ///
 /// # Security Properties
 ///

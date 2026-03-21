@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use stealthos_core::ratelimit::RateLimitConfig;
 
 /// Top-level server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
     pub server: ServerSection,
@@ -118,31 +118,31 @@ fn default_ws_bind() -> String {
 fn default_metrics_bind() -> String {
     "127.0.0.1:9091".to_owned()
 }
-fn default_max_connections() -> usize {
+const fn default_max_connections() -> usize {
     500
 }
-fn default_max_message_size() -> usize {
+const fn default_max_message_size() -> usize {
     65_536
 }
-fn default_idle_timeout() -> u64 {
+const fn default_idle_timeout() -> u64 {
     600
 }
-fn default_handshake_timeout() -> u64 {
+const fn default_handshake_timeout() -> u64 {
     10
 }
-fn default_max_pools() -> usize {
+const fn default_max_pools() -> usize {
     100
 }
-fn default_max_pool_size() -> usize {
+const fn default_max_pool_size() -> usize {
     16
 }
-fn default_pool_idle_timeout() -> u64 {
+const fn default_pool_idle_timeout() -> u64 {
     300
 }
 fn default_key_dir() -> String {
     "/var/stealth-relay/keys".to_owned()
 }
-fn default_auto_generate() -> bool {
+const fn default_auto_generate() -> bool {
     true
 }
 fn default_log_level() -> String {
@@ -151,35 +151,22 @@ fn default_log_level() -> String {
 fn default_log_format() -> String {
     "json".to_owned()
 }
-fn default_connections_per_minute() -> u32 {
+const fn default_connections_per_minute() -> u32 {
     30
 }
-fn default_messages_per_second() -> u32 {
+const fn default_messages_per_second() -> u32 {
     60
 }
-fn default_max_failed_auth() -> u32 {
+const fn default_max_failed_auth() -> u32 {
     5
 }
-fn default_block_duration() -> u64 {
+const fn default_block_duration() -> u64 {
     600
 }
 
 // ---------------------------------------------------------------------------
 // Default impls
 // ---------------------------------------------------------------------------
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerSection::default(),
-            pool: PoolSection::default(),
-            transport: TransportSection::default(),
-            crypto: CryptoSection::default(),
-            logging: LogSection::default(),
-            rate_limit: RateLimitSection::default(),
-        }
-    }
-}
 
 impl Default for ServerSection {
     fn default() -> Self {
@@ -239,7 +226,7 @@ impl RateLimitSection {
     /// Derived fields (`escalation_block_secs`, `failed_attempt_penalty`,
     /// `global_max_per_minute`) are computed from the base values so there
     /// is exactly one source of truth for these formulas.
-    pub fn to_rate_limit_config(&self) -> RateLimitConfig {
+    pub const fn to_rate_limit_config(&self) -> RateLimitConfig {
         RateLimitConfig {
             connections_per_minute: self.connections_per_minute,
             messages_per_second: self.messages_per_second,
@@ -301,40 +288,40 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("STEALTH_SERVER__METRICS_BIND") {
             self.server.metrics_bind = v;
         }
-        if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_CONNECTIONS") {
-            if let Ok(n) = v.parse() {
-                self.server.max_connections = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_CONNECTIONS")
+            && let Ok(n) = v.parse()
+        {
+            self.server.max_connections = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_MESSAGE_SIZE") {
-            if let Ok(n) = v.parse() {
-                self.server.max_message_size = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_MESSAGE_SIZE")
+            && let Ok(n) = v.parse()
+        {
+            self.server.max_message_size = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_SERVER__IDLE_TIMEOUT") {
-            if let Ok(n) = v.parse() {
-                self.server.idle_timeout = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__IDLE_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.server.idle_timeout = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_SERVER__HANDSHAKE_TIMEOUT") {
-            if let Ok(n) = v.parse() {
-                self.server.handshake_timeout = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__HANDSHAKE_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.server.handshake_timeout = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_POOL__MAX_POOLS") {
-            if let Ok(n) = v.parse() {
-                self.pool.max_pools = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_POOL__MAX_POOLS")
+            && let Ok(n) = v.parse()
+        {
+            self.pool.max_pools = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_POOL__MAX_POOL_SIZE") {
-            if let Ok(n) = v.parse() {
-                self.pool.max_pool_size = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_POOL__MAX_POOL_SIZE")
+            && let Ok(n) = v.parse()
+        {
+            self.pool.max_pool_size = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_POOL__POOL_IDLE_TIMEOUT") {
-            if let Ok(n) = v.parse() {
-                self.pool.pool_idle_timeout = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_POOL__POOL_IDLE_TIMEOUT")
+            && let Ok(n) = v.parse()
+        {
+            self.pool.pool_idle_timeout = n;
         }
         if let Ok(v) = std::env::var("STEALTH_TRANSPORT__TLS_CERT_PATH") {
             self.transport.tls_cert_path = Some(v);
@@ -345,10 +332,10 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("STEALTH_CRYPTO__KEY_DIR") {
             self.crypto.key_dir = v;
         }
-        if let Ok(v) = std::env::var("STEALTH_CRYPTO__AUTO_GENERATE_KEYS") {
-            if let Ok(b) = v.parse() {
-                self.crypto.auto_generate_keys = b;
-            }
+        if let Ok(v) = std::env::var("STEALTH_CRYPTO__AUTO_GENERATE_KEYS")
+            && let Ok(b) = v.parse()
+        {
+            self.crypto.auto_generate_keys = b;
         }
         if let Ok(v) = std::env::var("STEALTH_LOGGING__LEVEL") {
             self.logging.level = v;
@@ -356,25 +343,25 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("STEALTH_LOGGING__FORMAT") {
             self.logging.format = v;
         }
-        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__CONNECTIONS_PER_MINUTE") {
-            if let Ok(n) = v.parse() {
-                self.rate_limit.connections_per_minute = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__CONNECTIONS_PER_MINUTE")
+            && let Ok(n) = v.parse()
+        {
+            self.rate_limit.connections_per_minute = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__MESSAGES_PER_SECOND") {
-            if let Ok(n) = v.parse() {
-                self.rate_limit.messages_per_second = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__MESSAGES_PER_SECOND")
+            && let Ok(n) = v.parse()
+        {
+            self.rate_limit.messages_per_second = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__MAX_FAILED_AUTH") {
-            if let Ok(n) = v.parse() {
-                self.rate_limit.max_failed_auth = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__MAX_FAILED_AUTH")
+            && let Ok(n) = v.parse()
+        {
+            self.rate_limit.max_failed_auth = n;
         }
-        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__BLOCK_DURATION_SECS") {
-            if let Ok(n) = v.parse() {
-                self.rate_limit.block_duration_secs = n;
-            }
+        if let Ok(v) = std::env::var("STEALTH_RATE_LIMIT__BLOCK_DURATION_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.rate_limit.block_duration_secs = n;
         }
     }
 }

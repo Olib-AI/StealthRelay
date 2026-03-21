@@ -1,6 +1,6 @@
 //! # stealthos-observability
 //!
-//! Observability layer for the StealthOS Relay Server: structured logging,
+//! Observability layer for the `StealthOS` Relay Server: structured logging,
 //! atomic metrics counters, and health-check HTTP endpoints.
 
 #![forbid(unsafe_code)]

@@ -2,7 +2,7 @@
 //!
 //! On first boot (no host bound), the server generates a one-time claim secret
 //! and displays it as an ASCII banner in the logs. The server operator copies
-//! this code into the StealthOS app to claim ownership.
+//! this code into the `StealthOS` app to claim ownership.
 //!
 //! After a successful claim the secret is zeroized from memory and the binding
 //! is persisted to `host_binding.json`. All future `HostAuth` frames must come
@@ -66,7 +66,7 @@ impl std::fmt::Display for ClaimError {
 }
 
 /// Tracks rate-limiting state for claim attempts.
-pub(crate) struct ClaimRateLimiter {
+pub struct ClaimRateLimiter {
     /// Number of failed attempts since last reset.
     failed_attempts: u32,
     /// When the cooldown started (if active).
@@ -104,7 +104,7 @@ impl ClaimRateLimiter {
     }
 
     /// Reset on successful claim.
-    fn reset(&mut self) {
+    const fn reset(&mut self) {
         self.failed_attempts = 0;
         self.cooldown_start = None;
     }
@@ -365,7 +365,7 @@ pub fn print_ready_banner(host_key_hex: &str) {
 fn save_binding(key_dir: &Path, binding: &HostBinding) -> Result<(), ClaimError> {
     let binding_path = key_dir.join(BINDING_FILENAME);
     let json = serde_json::to_string_pretty(binding)
-        .map_err(|e| ClaimError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| ClaimError::Io(std::io::Error::other(e)))?;
 
     std::fs::write(&binding_path, json.as_bytes()).map_err(ClaimError::Io)?;
 
@@ -393,7 +393,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 
 /// Decode a hex string into bytes. Returns `None` on invalid input.
 pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
@@ -411,13 +411,13 @@ pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 ///
 /// Single char per module, half-blocks for vertical compression.
 /// Inverted: dark = space, light = block.
+#[allow(clippy::cast_possible_wrap)]
 fn render_qr_to_string(data: &str) -> String {
     use qrcode::{EcLevel, QrCode};
     use std::fmt::Write;
 
-    let code = match QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L) {
-        Ok(c) => c,
-        Err(_) => return String::from("    [QR generation failed]\n"),
+    let Ok(code) = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L) else {
+        return String::from("    [QR generation failed]\n");
     };
 
     let w = code.width();
@@ -435,7 +435,6 @@ fn render_qr_to_string(data: &str) -> String {
     };
 
     let mut r: isize = -q;
-    #[allow(clippy::cast_possible_wrap)]
     while r < (w as isize) + q {
         let _ = write!(out, "    ");
         for c in -q..(w as isize) + q {

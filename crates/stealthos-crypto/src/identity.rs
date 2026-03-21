@@ -89,6 +89,8 @@ pub struct HostPublicKeys {
 impl fmt::Debug for HostPublicKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostPublicKeys")
+            .field("ed25519", &"[32 bytes]")
+            .field("x25519", &"[32 bytes]")
             .field("fingerprint", &hex_short(&self.fingerprint))
             .finish()
     }
@@ -247,14 +249,14 @@ impl HostIdentity {
     /// Return the 32-byte fingerprint of this identity.
     ///
     /// The fingerprint is `SHA-256(ed25519_pub || x25519_pub)`.
-    pub fn fingerprint(&self) -> [u8; 32] {
+    pub const fn fingerprint(&self) -> [u8; 32] {
         self.fingerprint_bytes
     }
 
     /// Borrow the X25519 static secret — used during handshake.
     ///
     /// This is `pub(crate)` to prevent leaking the secret outside the crate.
-    pub(crate) fn x25519_secret(&self) -> &x25519_dalek::StaticSecret {
+    pub(crate) const fn x25519_secret(&self) -> &x25519_dalek::StaticSecret {
         &self.x25519_secret
     }
 

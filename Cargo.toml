@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-rust-version = "1.93"
 members = [
     "crates/stealthos-server",
     "crates/stealthos-core",
@@ -12,6 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.93"
 license = "MIT"
 repository = "https://github.com/Olib-AI/StealthRelay"
 authors = ["Olib AI <dev@olib.ai>"]

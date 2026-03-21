@@ -4,7 +4,7 @@
 
 //! # stealthos-transport
 //!
-//! WebSocket transport layer for the StealthOS Relay Server.
+//! WebSocket transport layer for the `StealthOS` Relay Server.
 //!
 //! Provides a per-connection actor model with bounded backpressure,
 //! heartbeat/idle detection, and slow-consumer eviction. The transport

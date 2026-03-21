@@ -152,7 +152,7 @@ impl ConnectionActor {
     }
 
     /// The core select loop. Returns the disconnection reason.
-    #[allow(clippy::cognitive_complexity)] // Inherent complexity of a 4-arm select loop
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)] // Inherent complexity of a 4-arm select loop
     async fn event_loop<S>(
         &mut self,
         mut ws_sink: SplitSink<WebSocketStream<S>, WsMessage>,
@@ -217,15 +217,12 @@ impl ConnectionActor {
                                         );
                                     }
                                     // Convert binary to text and route it.
-                                    let text = match String::from_utf8(data.to_vec()) {
-                                        Ok(t) => t,
-                                        Err(_) => {
-                                            debug!(
-                                                connection_id = %self.connection_id,
-                                                "non-UTF8 binary frame dropped",
-                                            );
-                                            continue;
-                                        }
+                                    let Ok(text) = String::from_utf8(data.to_vec()) else {
+                                        debug!(
+                                            connection_id = %self.connection_id,
+                                            "non-UTF8 binary frame dropped",
+                                        );
+                                        continue;
                                     };
                                     last_activity = Instant::now();
                                     if self.emit_message_received(text).await.is_err() {
@@ -260,33 +257,30 @@ impl ConnectionActor {
 
                 // ---- Outbound to client ----
                 msg = self.outbound_rx.recv() => {
-                    match msg {
-                        Some(outbound) => {
-                            let ws_msg = match outbound {
-                                OutboundMessage::Text(t) => WsMessage::text(t),
-                                OutboundMessage::Binary(b) => WsMessage::binary(b),
-                                OutboundMessage::Close(code, reason) => {
-                                    let _ = send_close(
-                                        &mut ws_sink,
-                                        CloseCode::from(code),
-                                        &reason,
-                                    ).await;
-                                    return format!("server close: {reason}");
-                                }
-                            };
-                            if ws_sink.send(ws_msg).await.is_err() {
-                                return "failed to send outbound frame".to_owned();
+                    if let Some(outbound) = msg {
+                        let ws_msg = match outbound {
+                            OutboundMessage::Text(t) => WsMessage::text(t),
+                            OutboundMessage::Binary(b) => WsMessage::binary(b),
+                            OutboundMessage::Close(code, reason) => {
+                                let _ = send_close(
+                                    &mut ws_sink,
+                                    CloseCode::from(code),
+                                    &reason,
+                                ).await;
+                                return format!("server close: {reason}");
                             }
+                        };
+                        if ws_sink.send(ws_msg).await.is_err() {
+                            return "failed to send outbound frame".to_owned();
                         }
-                        None => {
-                            // The server dropped our outbound sender — shut down.
-                            let _ = send_close(
-                                &mut ws_sink,
-                                CloseCode::Away,
-                                "server shutting down",
-                            ).await;
-                            return "outbound channel closed".to_owned();
-                        }
+                    } else {
+                        // The server dropped our outbound sender — shut down.
+                        let _ = send_close(
+                            &mut ws_sink,
+                            CloseCode::Away,
+                            "server shutting down",
+                        ).await;
+                        return "outbound channel closed".to_owned();
                     }
                 }
 

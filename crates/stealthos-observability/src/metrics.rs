@@ -38,7 +38,7 @@ pub struct ServerMetrics {
 
 impl ServerMetrics {
     /// Create a new zeroed metrics set.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             connections_total: AtomicU64::new(0),
             connections_active: AtomicU64::new(0),

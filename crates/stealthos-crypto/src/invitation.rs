@@ -7,10 +7,10 @@
 //! # Token Flow
 //!
 //! 1. **Host generates** an `InvitationToken` containing a random `token_secret`.
-//! 2. **Host computes** a `TokenCommitment` (BLAKE2b hash of HKDF-derived key)
+//! 2. **Host computes** a `TokenCommitment` (`BLAKE2b` hash of HKDF-derived key)
 //!    and sends it to the server.
 //! 3. **Host shares** the token URL with the invitee (out-of-band).
-//! 4. **Invitee presents** a `JoinProof` (HMAC over pool_id + nonce) to the host.
+//! 4. **Invitee presents** a `JoinProof` (HMAC over `pool_id` + nonce) to the host.
 //! 5. **Host verifies** the proof against the commitment.
 //!
 //! # Security Properties
@@ -78,9 +78,11 @@ impl fmt::Debug for InvitationToken {
             .field("token_id", &hex_encode(&self.token_id))
             .field("token_secret", &"[REDACTED]")
             .field("pool_id", &self.pool_id)
+            .field("host_fingerprint", &hex_encode(&self.host_fingerprint))
             .field("expires_at", &self.expires_at)
             .field("max_uses", &self.max_uses)
             .field("server_address", &self.server_address)
+            .field("signature", &"[64 bytes]")
             .finish()
     }
 }
@@ -104,7 +106,9 @@ impl fmt::Debug for JoinProof {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JoinProof")
             .field("token_id", &hex_encode(&self.token_id))
+            .field("proof", &"[32 bytes]")
             .field("timestamp", &self.timestamp)
+            .field("nonce", &"[32 bytes]")
             .finish()
     }
 }
@@ -129,6 +133,7 @@ impl fmt::Debug for TokenCommitment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TokenCommitment")
             .field("token_id", &hex_encode(&self.token_id))
+            .field("commitment", &"[32 bytes]")
             .field("expires_at", &self.expires_at)
             .field("max_uses", &self.max_uses)
             .finish()
@@ -137,7 +142,13 @@ impl fmt::Debug for TokenCommitment {
 
 /// Minimal hex encoding for debug output.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 /// Build the message that gets signed by the host for a token.
@@ -368,7 +379,7 @@ impl InvitationToken {
     ///
     /// # Security Properties
     ///
-    /// - The proof is an HMAC-SHA256 over "JOIN" || pool_id || timestamp || nonce,
+    /// - The proof is an HMAC-SHA256 over "JOIN" || `pool_id` || timestamp || nonce,
     ///   keyed with the verification key derived from the token secret.
     /// - The proof is bound to the current timestamp and the provided nonce.
     /// - The verification key is zeroized after computing the HMAC.
@@ -422,7 +433,7 @@ impl InvitationToken {
     }
 
     /// Return the Ed25519 signature over this token.
-    pub fn signature(&self) -> &[u8; 64] {
+    pub const fn signature(&self) -> &[u8; 64] {
         &self.signature
     }
 }

@@ -174,8 +174,8 @@ async fn full_crypto_lifecycle() {
     );
 
     // Create session ciphers.
-    let mut client_cipher = SessionCipher::new(client_keys, false);
-    let mut server_cipher = SessionCipher::new(server_keys, true);
+    let mut client_cipher = SessionCipher::new(&client_keys, false);
+    let mut server_cipher = SessionCipher::new(&server_keys, true);
 
     let aad = b"pool-context";
 

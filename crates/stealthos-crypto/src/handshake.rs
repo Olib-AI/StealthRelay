@@ -103,6 +103,7 @@ impl fmt::Debug for HandshakeMessage {
             .field("ephemeral_pk", &"[32 bytes]")
             .field("has_ed25519_pk", &self.ed25519_pk.is_some())
             .field("timestamp", &self.timestamp)
+            .field("signature", &"[64 bytes]")
             .finish()
     }
 }
@@ -163,9 +164,9 @@ fn derive_session_keys(
 
 /// Build the transcript bytes that get signed during handshake.
 ///
-/// The pool_id is included in every transcript to prevent cross-pool replay
+/// The `pool_id` is included in every transcript to prevent cross-pool replay
 /// attacks. A server response from one pool cannot be accepted in another
-/// pool context because the pool_id differs.
+/// pool context because the `pool_id` differs.
 /// Domain separator prefixes for handshake transcript signatures.
 ///
 /// These ensure that a signature over a handshake init transcript can never
@@ -230,7 +231,10 @@ pub struct HandshakeInitiator {
 impl fmt::Debug for HandshakeInitiator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HandshakeInitiator")
+            .field("peer_identity", &"[REDACTED]")
+            .field("server_static_pk", &"[32 bytes]")
             .field("ephemeral_secret", &"[REDACTED]")
+            .field("ephemeral_public", &"[32 bytes]")
             .field("pool_id_len", &self.pool_id.len())
             .finish()
     }
@@ -336,7 +340,7 @@ impl HandshakeInitiatorAwaitingResponse {
     /// # Security Properties
     ///
     /// - Verifies the server's Ed25519 signature over the response transcript
-    ///   (which includes pool_id to prevent cross-pool replay).
+    ///   (which includes `pool_id` to prevent cross-pool replay).
     /// - Computes two real DH operations:
     ///   - `shared_es = X25519(client_ephemeral_sk, server_static_pk)`
     ///   - `shared_ee = X25519(client_ephemeral_sk, server_ephemeral_pk)`
@@ -424,7 +428,7 @@ pub struct HandshakeResponder<'a> {
     pool_id: Vec<u8>,
 }
 
-impl<'a> fmt::Debug for HandshakeResponder<'a> {
+impl fmt::Debug for HandshakeResponder<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HandshakeResponder")
             .field("host_identity", &"[REDACTED]")
@@ -440,7 +444,7 @@ impl<'a> HandshakeResponder<'a> {
     ///
     /// - `host_identity`: The server's long-term identity (Ed25519 + X25519).
     /// - `pool_id`: The pool identifier for domain separation.
-    pub fn new(host_identity: &'a HostIdentity, pool_id: Vec<u8>) -> Self {
+    pub const fn new(host_identity: &'a HostIdentity, pool_id: Vec<u8>) -> Self {
         Self {
             host_identity,
             pool_id,
@@ -452,13 +456,13 @@ impl<'a> HandshakeResponder<'a> {
     /// # Security Properties
     ///
     /// - Verifies the client's Ed25519 signature over the init transcript
-    ///   (which includes pool_id for domain separation).
+    ///   (which includes `pool_id` for domain separation).
     /// - Generates fresh ephemeral X25519 keys from `OsRng` using `StaticSecret`
     ///   to enable two real DH operations.
     /// - Computes two DH operations:
     ///   - `shared_es = X25519(server_static_sk, client_ephemeral_pk)`
     ///   - `shared_ee = X25519(server_ephemeral_sk, client_ephemeral_pk)`
-    /// - Signs the response transcript (including pool_id) with the server's Ed25519 key.
+    /// - Signs the response transcript (including `pool_id`) with the server's Ed25519 key.
     /// - All ephemeral secrets are zeroized after key derivation.
     #[allow(clippy::similar_names)] // shared_es/shared_ee are standard Noise NK terminology
     pub fn process_init_message(

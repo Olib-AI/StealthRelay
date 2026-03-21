@@ -63,7 +63,14 @@ impl fmt::Debug for PeerPublicKey {
 /// Minimal hex encoder for debug output (avoids pulling in the `hex` crate).
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+        use std::fmt::Write;
+        let bytes = bytes.as_ref();
+        bytes
+            .iter()
+            .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            })
     }
 }
 
@@ -124,7 +131,7 @@ impl PeerPublicKey {
     }
 
     /// Construct from raw 32-byte public key.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self { bytes }
     }
 

@@ -71,12 +71,10 @@ pub fn health_router(state: Arc<HealthState>) -> Router {
 async fn health_handler(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
     // Saturating conversion from u64 to usize. On 32-bit targets the value
     // clamps to usize::MAX, which is acceptable for a display-only gauge.
-    let active_conns =
-        usize::try_from(state.metrics.connections_active.load(Ordering::Relaxed))
-            .unwrap_or(usize::MAX);
+    let active_conns = usize::try_from(state.metrics.connections_active.load(Ordering::Relaxed))
+        .unwrap_or(usize::MAX);
     let active_pools =
-        usize::try_from(state.metrics.pools_active.load(Ordering::Relaxed))
-            .unwrap_or(usize::MAX);
+        usize::try_from(state.metrics.pools_active.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
     let uptime = state.start_time.elapsed().as_secs();
 
     let status = if active_conns <= state.max_connections {

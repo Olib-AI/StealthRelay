@@ -703,9 +703,7 @@ mod tests {
         assert!(state.claim_secret().is_some());
 
         let secret = *state.claim_secret().unwrap();
-        state
-            .try_claim(&secret, &[1u8; 32], key_dir, "fp")
-            .unwrap();
+        state.try_claim(&secret, &[1u8; 32], key_dir, "fp").unwrap();
 
         assert!(state.claim_secret().is_none());
     }

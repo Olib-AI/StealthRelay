@@ -663,10 +663,7 @@ mod tests {
 
         let responder = HandshakeResponder::new(&host, pool_id);
         let result = responder.process_init_message(&init_msg);
-        assert!(
-            result.is_err(),
-            "init without ed25519_pk must be rejected"
-        );
+        assert!(result.is_err(), "init without ed25519_pk must be rejected");
     }
 
     #[test]
@@ -682,14 +679,18 @@ mod tests {
         let responder_a = HandshakeResponder::new(&host, pool_a);
         let (resp_a, server_keys_a) = responder_a.process_init_message(&init_a).unwrap();
         let server_ed25519 = host.public_keys().ed25519;
-        let client_keys_a = awaiting_a.process_response(&resp_a, &server_ed25519).unwrap();
+        let client_keys_a = awaiting_a
+            .process_response(&resp_a, &server_ed25519)
+            .unwrap();
 
         let peer_b = PeerIdentity::generate();
         let initiator_b = HandshakeInitiator::new(peer_b, server_x25519_pk, pool_b.clone());
         let (init_b, awaiting_b) = initiator_b.create_init_message();
         let responder_b = HandshakeResponder::new(&host, pool_b);
         let (resp_b, server_keys_b) = responder_b.process_init_message(&init_b).unwrap();
-        let client_keys_b = awaiting_b.process_response(&resp_b, &server_ed25519).unwrap();
+        let client_keys_b = awaiting_b
+            .process_response(&resp_b, &server_ed25519)
+            .unwrap();
 
         // Different pool IDs must produce different session keys.
         assert_ne!(

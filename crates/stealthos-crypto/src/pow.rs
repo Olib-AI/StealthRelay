@@ -51,7 +51,7 @@ const POW_PREFIX: &[u8] = b"STEALTH_POW";
 /// ring/sha2 on server). Both client and server can compute identical hashes
 /// without requiring BLAKE2b support.
 fn pow_hash(challenge: &[u8; 32], solution: &[u8; 8]) -> [u8; 32] {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(POW_PREFIX);

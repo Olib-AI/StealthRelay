@@ -247,9 +247,7 @@ impl SessionCipher {
         // identical key material regardless of which counter reached the
         // threshold first. Checking both counters here ensures the sending
         // side rekeys even when it has been mostly receiving.
-        if self.send_since_rekey >= REKEY_INTERVAL
-            || self.recv_since_rekey >= REKEY_INTERVAL
-        {
+        if self.send_since_rekey >= REKEY_INTERVAL || self.recv_since_rekey >= REKEY_INTERVAL {
             self.rekey();
         }
 
@@ -305,9 +303,7 @@ impl SessionCipher {
         // derivation is deterministic from the shared rekey_seed, so both
         // peers produce identical keys regardless of which direction
         // triggered the rekey.
-        if self.send_since_rekey >= REKEY_INTERVAL
-            || self.recv_since_rekey >= REKEY_INTERVAL
-        {
+        if self.send_since_rekey >= REKEY_INTERVAL || self.recv_since_rekey >= REKEY_INTERVAL {
             self.rekey();
         }
 

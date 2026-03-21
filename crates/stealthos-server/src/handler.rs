@@ -54,12 +54,7 @@ fn sanitize_display_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
         .filter(|c| {
-            c.is_alphanumeric()
-                || *c == ' '
-                || *c == '-'
-                || *c == '_'
-                || *c == '\''
-                || *c == '.'
+            c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_' || *c == '\'' || *c == '.'
         })
         .take(MAX_DISPLAY_NAME_LEN)
         .collect();

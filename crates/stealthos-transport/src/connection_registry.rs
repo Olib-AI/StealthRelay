@@ -72,12 +72,7 @@ impl ConnectionRegistry {
             }
             if self
                 .active_count
-                .compare_exchange_weak(
-                    current,
-                    current + 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 break;

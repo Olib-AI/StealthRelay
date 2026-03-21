@@ -411,9 +411,7 @@ mod tests {
 
     #[test]
     fn heartbeat_round_trip() {
-        let ping = ServerFrame::HeartbeatPing {
-            timestamp: 12345,
-        };
+        let ping = ServerFrame::HeartbeatPing { timestamp: 12345 };
         let json = serde_json::to_string(&ping).expect("serialize");
         let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(

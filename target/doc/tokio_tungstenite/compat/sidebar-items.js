@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ContextWaker"],"fn":["cvt"],"struct":["AllowStd","WakerProxy"],"trait":["SetWaker"]};

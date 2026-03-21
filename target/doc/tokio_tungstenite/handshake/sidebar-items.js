@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["StartedHandshake"],"fn":["client_handshake","handshake","server_handshake","without_handshake"],"struct":["MidHandshake","SkippedHandshakeFuture","SkippedHandshakeFutureInner","StartedHandshakeFuture","StartedHandshakeFutureInner"]};

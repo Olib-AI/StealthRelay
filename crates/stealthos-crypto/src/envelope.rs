@@ -470,10 +470,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let keys = make_test_keys();
-        let mut client = SessionCipher::new(
-            &keys,
-            false,
-        );
+        let mut client = SessionCipher::new(&keys, false);
         let mut server = SessionCipher::new(&make_test_keys(), true);
 
         let plaintext = b"hello, stealth world!";

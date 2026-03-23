@@ -206,8 +206,8 @@ impl HostIdentity {
     /// - A BLAKE2b-256 MAC detects file corruption or tampering.
     pub fn save(&self, path: &Path) -> Result<()> {
         use blake2::Blake2b;
-        use blake2::digest::Update;
         use blake2::digest::FixedOutput;
+        use blake2::digest::Update;
         use blake2::digest::consts::U32;
         use std::fs;
         use std::io::Write;
@@ -250,8 +250,8 @@ impl HostIdentity {
     /// - Re-derives all keys from the loaded seed.
     pub fn load(path: &Path) -> Result<Self> {
         use blake2::Blake2b;
-        use blake2::digest::Update;
         use blake2::digest::FixedOutput;
+        use blake2::digest::Update;
         use blake2::digest::consts::U32;
 
         let data = std::fs::read(path)?;
@@ -270,8 +270,7 @@ impl HostIdentity {
         let expected_mac = hasher.finalize_fixed();
 
         // Constant-time comparison to prevent timing side-channel.
-        let macs_match: bool =
-            ConstantTimeEq::ct_eq(&data[36..68], expected_mac.as_slice()).into();
+        let macs_match: bool = ConstantTimeEq::ct_eq(&data[36..68], expected_mac.as_slice()).into();
         if !macs_match {
             return Err(CryptoError::IntegrityCheckFailed);
         }

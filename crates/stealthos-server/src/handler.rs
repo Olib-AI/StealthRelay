@@ -544,7 +544,10 @@ impl MessageHandler {
         // If the server is unclaimed, reject all HostAuth frames.
         // The operator must claim the server first via ClaimServer.
         {
-            let cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cs = self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !cs.is_claimed() {
                 warn!(
                     connection = %connection_id,
@@ -687,7 +690,10 @@ impl MessageHandler {
 
         // ── Verify the authenticated key matches the bound host ──────
         {
-            let cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cs = self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !cs.is_bound_host(&pk_arr) {
                 self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
                 self.throttler.record_failure(remote_addr.ip());
@@ -860,7 +866,10 @@ impl MessageHandler {
 
         // Attempt the claim (lock scope is minimal -- no await inside).
         let result = {
-            let mut cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cs = self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cs.try_claim(&secret_bytes, &pk_bytes, &self.key_dir, &server_fingerprint)
         };
 
@@ -988,7 +997,10 @@ impl MessageHandler {
         };
 
         let result = {
-            let mut cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut cs = self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             cs.try_reclaim(&rk_bytes, &pk_bytes, &self.key_dir)
         };
 
@@ -2025,8 +2037,7 @@ impl MessageHandler {
         rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Base64::encode_string(&nonce_bytes);
 
-        self.connection_nonces
-            .insert(connection_id, nonce.clone());
+        self.connection_nonces.insert(connection_id, nonce.clone());
 
         let challenge_frame = ServerFrame::AuthChallenge { nonce };
         if let Err(e) = self.send_to_connection(connection_id, &challenge_frame) {
@@ -2152,10 +2163,9 @@ impl MessageHandler {
         // Send to all guests not excluded.
         for (_, conn_id) in pool.guest_connection_ids() {
             if !exclude.contains(&conn_id) {
-                let _ = self.connection_registry.send_to(
-                    conn_id,
-                    OutboundMessage::SharedText(Arc::clone(&json)),
-                );
+                let _ = self
+                    .connection_registry
+                    .send_to(conn_id, OutboundMessage::SharedText(Arc::clone(&json)));
             }
         }
     }

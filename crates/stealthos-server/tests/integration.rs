@@ -646,10 +646,10 @@ async fn websocket_connect_and_echo() {
         let (mut ws_sink, mut ws_source) = ws_stream.split();
 
         // Read one message and forward it to the event channel.
-        if let Some(Ok(msg)) = ws_source.next().await {
-            if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                let _ = event_tx.send(text.to_string()).await;
-            }
+        if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+            ws_source.next().await
+        {
+            let _ = event_tx.send(text.to_string()).await;
         }
 
         // Send a close frame.

@@ -221,6 +221,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     // and the transport creates its own, we need them to be the same.
     // Solution: use the transport's registry in AppState.
     let transport_registry = transport.registry();
+    let event_loop_registry = Arc::clone(&transport_registry);
     // Keep a clone for the graceful shutdown drain (HIGH-2).
     let drain_registry = Arc::clone(&transport_registry);
 
@@ -304,6 +305,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
             event = event_rx.recv() => {
                 match event {
+                    Some(ConnectionEvent::Connected {
+                        connection_id,
+                        remote_addr,
+                    }) => {
+                        info!(
+                            connection = %connection_id,
+                            remote = %remote_addr,
+                            "new connection, sending auth challenge"
+                        );
+                        handler.handle_new_connection(connection_id);
+                    }
                     Some(ConnectionEvent::MessageReceived {
                         connection_id,
                         message,
@@ -331,6 +343,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                             reason = %reason,
                             "connection disconnected"
                         );
+                        event_loop_registry.unregister(connection_id);
                         handler.handle_disconnect(connection_id);
                     }
                     None => {

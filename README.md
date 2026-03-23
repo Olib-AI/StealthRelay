@@ -17,7 +17,7 @@ StealthRelay is a self-hosted Rust relay server that routes WebSocket messages b
 
 The relay operates on a zero-knowledge model: deploy it on your own infrastructure, claim ownership via a one-time QR code, and invite friends through cryptographically signed invitation URLs. The server authenticates hosts with Ed25519 signatures and protects against abuse with adaptive proof-of-work, per-IP rate limiting, and progressive blocking.
 
-Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 162 unit tests, and 30 E2E tests.
+Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 166 unit tests, and 30 E2E tests.
 
 ## How It Works
 
@@ -51,8 +51,9 @@ sequenceDiagram
 - **ChaCha20-Poly1305 session cipher** — Authenticated encryption for all application data with automatic symmetric ratchet at 2^20 messages
 - **Ed25519 host authentication** — Domain-separated timestamp signatures verified by the relay before pool creation
 - **HMAC invitation tokens** — 256-bit tokens with HKDF derivation and constant-time comparison; one-time use, time-limited, host approval required
-- **Server claiming** — One-time 256-bit QR code visible only in Docker logs; rate-limited to 3 attempts with recovery key fallback
-- **Session tokens** — 32-byte server-issued tokens required for all privileged host operations (constant-time comparison)
+- **Server claiming** — One-time 256-bit QR code visible only in Docker logs; per-IP rate-limited with progressive blocking and recovery key fallback
+- **Host key integrity** — Identity key files use a v2 format with 4-byte magic (`STKY`), 32-byte seed, and 32-byte BLAKE2b-256 MAC; corruption or tampering is detected on load
+- **Session tokens** — 32-byte server-issued tokens required for all privileged host operations and guest `Forward` frames (constant-time comparison)
 - **Display name sanitization** — Control characters, newlines, and excessive length (>64 chars) stripped before logging or storage
 
 ### Anti-Abuse
@@ -62,6 +63,7 @@ sequenceDiagram
 - **Progressive blocking** — IPs exceeding limits are blocked for configurable durations (default 10 minutes)
 - **JSON depth bomb defense** — Recursive nesting in `SessionResumed` frames is structurally prevented by using flat `BufferedRelayedMessage` types
 - **64 KB message cap** — Oversized WebSocket frames are rejected before processing
+- **Connection registry cleanup** — Connections are properly unregistered on disconnect, preventing `active_count` drift from blocking new connections
 
 ### Operations
 
@@ -70,6 +72,8 @@ sequenceDiagram
 - **Native TLS** — Optional `rustls` with SPKI SHA-256 pin verification for direct TLS termination
 - **Recovery key** — One-time recovery key issued at claim time for server rebinding if the host device is lost
 - **Graceful shutdown** — Signal handling with connection draining
+- **Mutex poison recovery** — All `claim_state` mutex accesses recover from poison (via `PoisonError::into_inner`) instead of panicking, preventing a single thread panic from killing the server
+- **`Arc<str>` broadcast** — Broadcast messages share one `Arc<str>` allocation across all recipients instead of cloning per-peer, reducing allocation pressure for large pools
 
 ### Observability
 
@@ -101,7 +105,7 @@ Security is not bolted on — it is structural. Every layer enforces its own gua
 
 ### Server Authentication (Ed25519)
 
-The host authenticates to the relay by signing `pool_id || timestamp` with a Keychain-stored Ed25519 private key. The relay verifies the signature against the bound host public key before creating a pool. Timestamps are checked within a 5-minute skew window to prevent replay attacks.
+The host authenticates to the relay by signing `pool_id || timestamp || nonce` with a Keychain-stored Ed25519 private key. The relay verifies the signature against the bound host public key before creating a pool. On each new WebSocket connection, the server issues a per-connection nonce via an `auth_challenge` frame. The host must include this nonce in the signed transcript, binding the authentication to that specific connection. Timestamps are checked within a 30-second skew window. Clients that omit the nonce or provide a mismatched nonce are rejected.
 
 ### Invitation Tokens
 
@@ -135,7 +139,7 @@ Challenges include a timestamp to prevent pre-computation and are verified withi
 
 ### Session Tokens
 
-After successful `HostAuth`, the server issues a 32-byte session token. All privileged operations require this token:
+After successful `HostAuth`, the server issues a 32-byte session token for the host. All privileged host operations require this token:
 
 - `CreateInvitation`
 - `RevokeInvitation`
@@ -144,7 +148,7 @@ After successful `HostAuth`, the server issues a 32-byte session token. All priv
 - `ClosePool`
 - Host-originated `Forward`
 
-Token comparison uses constant-time equality to prevent timing side-channels.
+Guest peers also receive a session token at join-approval time. The server stores each guest's token and validates it on every `Forward` frame. All token comparisons use constant-time equality (`subtle::ConstantTimeEq`) to prevent timing side-channels.
 
 ### Noise NK Handshake
 
@@ -380,7 +384,7 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 
 | Frame | Fields | Description |
 |-------|--------|-------------|
-| `host_auth` | `host_public_key`, `timestamp`, `signature`, `pool_id`, `server_url?`, `display_name?` | Authenticate as the pool host with Ed25519 signature |
+| `host_auth` | `host_public_key`, `timestamp`, `signature`, `pool_id`, `nonce`, `server_url?`, `display_name?` | Authenticate as the pool host with Ed25519 signature (nonce from `auth_challenge`) |
 | `join_request` | `token_id`, `proof`, `timestamp`, `nonce`, `client_public_key`, `display_name`, `pow_solution?` | Request to join a pool with an invitation token |
 | `forward` | `data`, `target_peer_ids?`, `sequence`, `session_token?` | Forward opaque E2E encrypted data to peer(s) |
 | `create_invitation` | `max_uses`, `expires_in_secs`, `session_token?` | Host creates an invitation token |
@@ -398,6 +402,7 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 
 | Frame | Fields | Description |
 |-------|--------|-------------|
+| `auth_challenge` | `nonce` | Server-issued per-connection nonce for HostAuth replay protection |
 | `server_hello` | `server_ephemeral_pk`, `server_identity_pk`, `pow_challenge?`, `timestamp`, `signature` | Noise NK handshake step 2 with optional PoW challenge |
 | `host_auth_success` | `pool_id`, `session_token` | Pool created, session token issued |
 | `join_accepted` | `session_token`, `peer_id`, `peers[]`, `pool_info` | Join approved with current pool state |
@@ -499,7 +504,7 @@ StealthRelay/
 # Build the workspace
 cargo build --workspace
 
-# Run all tests (82 unit tests)
+# Run all tests (166 unit tests)
 cargo test --workspace
 
 # Lint

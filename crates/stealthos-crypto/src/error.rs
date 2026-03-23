@@ -60,6 +60,10 @@ pub enum CryptoError {
     #[error("proof of work failed")]
     PowFailed,
 
+    /// The integrity check on a key file failed (corrupted or tampered).
+    #[error("key file integrity check failed")]
+    IntegrityCheckFailed,
+
     /// An underlying I/O error occurred (e.g., reading/writing identity files).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

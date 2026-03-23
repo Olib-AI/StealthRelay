@@ -21,6 +21,10 @@ pub enum ServerFrame {
         /// The host's display name shown to other pool members.
         #[serde(default)]
         display_name: Option<String>,
+        /// Server-issued per-connection nonce for replay protection.
+        /// Included in the signature transcript to bind the auth to a
+        /// specific connection and prevent replay attacks.
+        nonce: String,
     },
 
     /// Request to join a pool with an invitation token.
@@ -124,6 +128,15 @@ pub enum ServerFrame {
     HeartbeatPing { timestamp: i64 },
 
     // ── Server -> Client ──────────────────────────────────────────────
+    /// Per-connection auth challenge sent immediately after WebSocket
+    /// upgrade. Contains a one-time nonce that the client MUST include
+    /// in its `HostAuth` signature transcript to prevent replay attacks.
+    AuthChallenge {
+        /// Base64-encoded 32-byte random nonce. The client includes this
+        /// in the signed transcript: `STEALTH_HOST_AUTH_V1: || pool_id || timestamp || nonce`.
+        nonce: String,
+    },
+
     /// Server hello with optional proof-of-work challenge.
     ServerHello {
         server_ephemeral_pk: String,
@@ -349,6 +362,7 @@ mod tests {
             pool_id: Uuid::nil(),
             server_url: Some("wss://relay.example.com".into()),
             display_name: Some("MyHost".into()),
+            nonce: "challenge-nonce-base64".into(),
         };
         let json = serde_json::to_string(&frame).expect("serialize");
         let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
@@ -358,12 +372,45 @@ mod tests {
                 timestamp,
                 pool_id,
                 display_name,
+                nonce,
                 ..
             } => {
                 assert_eq!(host_public_key, "base64key==");
                 assert_eq!(timestamp, 1_700_000_000);
                 assert_eq!(pool_id, Uuid::nil());
                 assert_eq!(display_name, Some("MyHost".into()));
+                assert_eq!(nonce, "challenge-nonce-base64");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_auth_without_nonce_rejected() {
+        // HostAuth without nonce must fail to deserialize — nonce is required.
+        let json = r#"{
+            "frame_type": "host_auth",
+            "data": {
+                "host_public_key": "key==",
+                "timestamp": 1700000000,
+                "signature": "sig==",
+                "pool_id": "00000000-0000-0000-0000-000000000000"
+            }
+        }"#;
+        let result: Result<ServerFrame, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "HostAuth without nonce must be rejected");
+    }
+
+    #[test]
+    fn auth_challenge_round_trip() {
+        let frame = ServerFrame::AuthChallenge {
+            nonce: "base64nonce==".into(),
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ServerFrame::AuthChallenge { nonce } => {
+                assert_eq!(nonce, "base64nonce==");
             }
             other => panic!("unexpected variant: {other:?}"),
         }

@@ -186,16 +186,40 @@ impl HostIdentity {
         }
     }
 
-    /// Persist the 32-byte seed to a file with restrictive permissions (0o600).
+    /// Magic number for the integrity-protected key file format.
+    const KEY_FILE_MAGIC: &'static [u8; 4] = b"STKY";
+
+    /// Persist the seed to a file with restrictive permissions (0o600).
+    ///
+    /// # File Format (v2, 68 bytes)
+    ///
+    /// ```text
+    /// [0..4]   magic "STKY"
+    /// [4..36]  32-byte seed
+    /// [36..68] 32-byte BLAKE2b-256 MAC over magic || seed
+    /// ```
     ///
     /// # Security Properties
     ///
     /// - File permissions are set to owner-only read/write (mode 0o600).
     /// - Only the seed is stored — keys are re-derived on load.
-    /// - The file contains exactly 32 raw bytes (no framing, no metadata).
+    /// - A BLAKE2b-256 MAC detects file corruption or tampering.
     pub fn save(&self, path: &Path) -> Result<()> {
+        use blake2::Blake2b;
+        use blake2::digest::Update;
+        use blake2::digest::FixedOutput;
+        use blake2::digest::consts::U32;
         use std::fs;
         use std::io::Write;
+
+        let mut payload = Vec::with_capacity(68);
+        payload.extend_from_slice(Self::KEY_FILE_MAGIC);
+        payload.extend_from_slice(&self.seed.0);
+
+        let mut hasher = Blake2b::<U32>::default();
+        hasher.update(&payload);
+        let mac = hasher.finalize_fixed();
+        payload.extend_from_slice(&mac);
 
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -203,24 +227,57 @@ impl HostIdentity {
             .truncate(true)
             .mode(0o600)
             .open(path)?;
-        file.write_all(&self.seed.0)?;
+        file.write_all(&payload)?;
         file.sync_all()?;
         Ok(())
     }
 
     /// Load a host identity from a previously saved seed file.
     ///
+    /// # File Format (68 bytes)
+    ///
+    /// ```text
+    /// [0..4]   magic "STKY"
+    /// [4..36]  32-byte seed
+    /// [36..68] 32-byte BLAKE2b-256 MAC over magic || seed
+    /// ```
+    ///
     /// # Security Properties
     ///
-    /// - Validates that the file is exactly 32 bytes.
+    /// - Validates file size (exactly 68 bytes).
+    /// - Verifies the BLAKE2b-256 MAC with constant-time comparison to
+    ///   detect corruption or tampering.
     /// - Re-derives all keys from the loaded seed.
     pub fn load(path: &Path) -> Result<Self> {
+        use blake2::Blake2b;
+        use blake2::digest::Update;
+        use blake2::digest::FixedOutput;
+        use blake2::digest::consts::U32;
+
         let data = std::fs::read(path)?;
-        if data.len() != 32 {
+
+        if data.len() != 68 {
             return Err(CryptoError::InvalidKeyLength);
         }
+
+        if &data[..4] != Self::KEY_FILE_MAGIC {
+            return Err(CryptoError::IntegrityCheckFailed);
+        }
+
+        // Recompute MAC over magic || seed.
+        let mut hasher = Blake2b::<U32>::default();
+        hasher.update(&data[..36]);
+        let expected_mac = hasher.finalize_fixed();
+
+        // Constant-time comparison to prevent timing side-channel.
+        let macs_match: bool =
+            ConstantTimeEq::ct_eq(&data[36..68], expected_mac.as_slice()).into();
+        if !macs_match {
+            return Err(CryptoError::IntegrityCheckFailed);
+        }
+
         let mut seed = [0u8; 32];
-        seed.copy_from_slice(&data);
+        seed.copy_from_slice(&data[4..36]);
         Ok(Self::from_seed(seed))
     }
 
@@ -343,10 +400,54 @@ mod tests {
 
         let id = HostIdentity::generate();
         id.save(&path).unwrap();
+
+        // Verify v2 format: file should be 68 bytes.
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data.len(), 68);
+        assert_eq!(&data[..4], b"STKY");
+
         let loaded = HostIdentity::load(&path).unwrap();
 
         assert_eq!(id.fingerprint(), loaded.fingerprint());
         assert_eq!(id.public_keys().ed25519, loaded.public_keys().ed25519);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn load_raw_32_byte_file_rejected() {
+        let dir = std::env::temp_dir().join("stealthos_test_identity_raw32");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_raw32.key");
+
+        // Write a raw 32-byte seed — must be rejected (not a valid v2 file).
+        let seed = [42u8; 32];
+        std::fs::write(&path, seed).unwrap();
+
+        let result = HostIdentity::load(&path);
+        assert!(result.is_err(), "raw 32-byte file must be rejected");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn load_corrupted_v2_file_fails() {
+        let dir = std::env::temp_dir().join("stealthos_test_identity_corrupt");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_corrupt.key");
+
+        let id = HostIdentity::generate();
+        id.save(&path).unwrap();
+
+        // Corrupt one byte of the seed.
+        let mut data = std::fs::read(&path).unwrap();
+        data[10] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        let result = HostIdentity::load(&path);
+        assert!(result.is_err());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

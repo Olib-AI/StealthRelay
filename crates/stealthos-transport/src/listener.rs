@@ -419,6 +419,18 @@ async fn run_actor<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         warn!(%connection_id, "failed to register connection: {e}");
         return;
     }
+
+    // Notify the server layer that a new connection is ready so it can
+    // send initial frames (e.g., auth challenge nonce) before the client
+    // sends any messages. Best-effort — if the receiver is gone we
+    // proceed anyway (the actor will disconnect on its own).
+    let _ = event_tx
+        .send(ConnectionEvent::Connected {
+            connection_id,
+            remote_addr,
+        })
+        .await;
+
     let actor = ConnectionActor::new(ConnectionActorParams {
         connection_id,
         remote_addr,

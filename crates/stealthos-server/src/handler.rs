@@ -142,11 +142,22 @@ pub struct MessageHandler {
     /// and required for all privileged host operations (`CreateInvitation`,
     /// `KickPeer`, `ClosePool`, `Forward`, `JoinApproval`, `RevokeInvitation`).
     host_session_tokens: DashMap<PoolId, String>,
+    /// Maps `connection_id` to the guest peer's session token. Generated at
+    /// join-approval time and required for `Forward` frames from guest peers.
+    guest_session_tokens: DashMap<ConnectionId, String>,
     /// Per-connection session ciphers established via Noise NK handshake.
     /// Keyed by `ConnectionId`. The `Mutex` is `std::sync::Mutex` because
     /// the lock is never held across `.await` points — each encrypt/decrypt
     /// call is sub-microsecond.
     session_ciphers: DashMap<ConnectionId, Mutex<SessionCipher>>,
+    /// Per-connection auth nonces for replay protection (SECURITY: H-3).
+    ///
+    /// A 32-byte random nonce is generated for each new WebSocket connection
+    /// and sent to the client in an `AuthChallenge` frame. The client MUST
+    /// include the nonce in its `HostAuth` signature transcript to bind the
+    /// auth to this specific connection, preventing replay of captured
+    /// `HostAuth` frames on a different connection.
+    connection_nonces: DashMap<ConnectionId, String>,
 }
 
 impl MessageHandler {
@@ -180,7 +191,9 @@ impl MessageHandler {
             claim_state: Mutex::new(claim_state),
             key_dir,
             host_session_tokens: DashMap::new(),
+            guest_session_tokens: DashMap::new(),
             session_ciphers: DashMap::new(),
+            connection_nonces: DashMap::new(),
         }
     }
 
@@ -287,6 +300,7 @@ impl MessageHandler {
                 pool_id,
                 server_url,
                 display_name,
+                nonce,
             } => {
                 self.handle_host_auth(
                     connection_id,
@@ -297,6 +311,7 @@ impl MessageHandler {
                     timestamp,
                     server_url,
                     display_name,
+                    nonce,
                 )
                 .await
             }
@@ -444,7 +459,8 @@ impl MessageHandler {
             }
 
             // ── Server -> Client frames (should never arrive from a client) ──
-            ServerFrame::ServerHello { .. }
+            ServerFrame::AuthChallenge { .. }
+            | ServerFrame::ServerHello { .. }
             | ServerFrame::HostAuthSuccess { .. }
             | ServerFrame::JoinAccepted { .. }
             | ServerFrame::JoinRejected { .. }
@@ -483,6 +499,7 @@ impl MessageHandler {
         timestamp: i64,
         server_url: Option<String>,
         display_name: Option<String>,
+        client_nonce: String,
     ) -> Result<(), anyhow::Error> {
         const HOST_AUTH_PREFIX: &[u8] = b"STEALTH_HOST_AUTH_V1:";
 
@@ -527,7 +544,7 @@ impl MessageHandler {
         // If the server is unclaimed, reject all HostAuth frames.
         // The operator must claim the server first via ClaimServer.
         {
-            let cs = self.claim_state.lock().expect("claim_state lock poisoned");
+            let cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !cs.is_claimed() {
                 warn!(
                     connection = %connection_id,
@@ -543,17 +560,61 @@ impl MessageHandler {
             }
         }
 
-        // Validate timestamp freshness to prevent replay of signed auth messages.
-        // Allows up to 5 minutes of clock skew between client and server.
+        // ── Nonce validation (SECURITY: H-3 replay protection) ─────────
+        //
+        // Verify the client nonce matches the server-issued nonce for this
+        // connection. On match, consume it (one-time use) and enforce a
+        // 30-second timestamp window.
+        {
+            let stored = self.connection_nonces.get(&connection_id);
+            match stored {
+                Some(expected) if expected.value() == &client_nonce => {
+                    // Nonce matches — will be removed after successful auth.
+                }
+                Some(_) => {
+                    self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
+                    self.throttler.record_failure(remote_addr.ip());
+                    warn!(
+                        connection = %connection_id,
+                        pool = %pool_id,
+                        "host auth nonce mismatch"
+                    );
+                    let error_frame = ServerFrame::Error {
+                        code: 401,
+                        message: "auth nonce mismatch".to_owned(),
+                    };
+                    self.send_to_connection(connection_id, &error_frame)?;
+                    return Ok(());
+                }
+                None => {
+                    self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
+                    self.throttler.record_failure(remote_addr.ip());
+                    warn!(
+                        connection = %connection_id,
+                        pool = %pool_id,
+                        "host auth nonce provided but no challenge was issued for this connection"
+                    );
+                    let error_frame = ServerFrame::Error {
+                        code: 401,
+                        message: "no auth challenge issued for this connection".to_owned(),
+                    };
+                    self.send_to_connection(connection_id, &error_frame)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Validate timestamp freshness (30-second window, nonce-bound).
+        let max_skew: i64 = 30;
         let now = chrono::Utc::now().timestamp();
         let skew = (now - timestamp).abs();
-        if skew > 300 {
+        if skew > max_skew {
             self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
             self.throttler.record_failure(remote_addr.ip());
             warn!(
                 connection = %connection_id,
                 pool = %pool_id,
-                "host auth timestamp outside acceptable window (skew={skew}s)"
+                "host auth timestamp outside acceptable window (skew={skew}s, max={max_skew}s)"
             );
             let error_frame = ServerFrame::Error {
                 code: 401,
@@ -563,7 +624,7 @@ impl MessageHandler {
             return Ok(());
         }
 
-        // Verify the Ed25519 signature over (pool_id || timestamp).
+        // Verify the Ed25519 signature over (pool_id || timestamp [|| nonce]).
         let pk_bytes = Base64::decode_vec(&host_public_key)
             .map_err(|_| anyhow::anyhow!("invalid host public key encoding"))?;
         let sig_bytes = Base64::decode_vec(&signature)
@@ -583,18 +644,21 @@ impl MessageHandler {
         let mut sig_arr = [0u8; 64];
         sig_arr.copy_from_slice(&sig_bytes);
 
-        // Build the message that was signed: domain_prefix || pool_id bytes || timestamp bytes.
+        // Build the message that was signed:
+        //   domain_prefix || pool_id bytes || timestamp bytes [|| nonce bytes]
         //
         // SECURITY: The domain prefix "STEALTH_HOST_AUTH_V1:" prevents
-        // cross-context signature forgery. Without this, a signature over
-        // pool_id || timestamp could potentially be replayed in a different
-        // protocol context (e.g., handshake transcript) if the byte layout
-        // happened to collide. The client MUST use the same prefix when
-        // constructing the signed message.
-        let mut sign_msg = Vec::with_capacity(HOST_AUTH_PREFIX.len() + 24);
+        // cross-context signature forgery. When a nonce is present, the
+        // raw nonce bytes (base64-decoded) are appended to the transcript,
+        // binding the signature to this specific connection.
+        let nonce_raw = Base64::decode_vec(&client_nonce)
+            .map_err(|_| anyhow::anyhow!("invalid nonce encoding"))?;
+
+        let mut sign_msg = Vec::with_capacity(HOST_AUTH_PREFIX.len() + 24 + nonce_raw.len());
         sign_msg.extend_from_slice(HOST_AUTH_PREFIX);
         sign_msg.extend_from_slice(pool_id.as_bytes());
         sign_msg.extend_from_slice(&timestamp.to_be_bytes());
+        sign_msg.extend_from_slice(&nonce_raw);
 
         let mut pk_arr = [0u8; 32];
         pk_arr.copy_from_slice(&pk_bytes);
@@ -623,7 +687,7 @@ impl MessageHandler {
 
         // ── Verify the authenticated key matches the bound host ──────
         {
-            let cs = self.claim_state.lock().expect("claim_state lock poisoned");
+            let cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !cs.is_bound_host(&pk_arr) {
                 self.metrics.auth_failure.fetch_add(1, Ordering::Relaxed);
                 self.throttler.record_failure(remote_addr.ip());
@@ -646,6 +710,9 @@ impl MessageHandler {
             pool = %pool_id,
             "host auth accepted"
         );
+
+        // Consume the nonce after successful verification (one-time use).
+        self.connection_nonces.remove(&connection_id);
 
         // Record successful auth to reset failure counter.
         self.throttler.record_success(remote_addr.ip());
@@ -719,11 +786,25 @@ impl MessageHandler {
     async fn handle_claim_server(
         &self,
         connection_id: ConnectionId,
-        _remote_addr: SocketAddr,
+        remote_addr: SocketAddr,
         claim_secret_hex: String,
         host_public_key_b64: String,
         display_name: String,
     ) -> Result<(), anyhow::Error> {
+        // Rate limit: block IPs with repeated auth failures.
+        if let Err(e) = self.throttler.check_allowed(remote_addr.ip()) {
+            warn!(
+                connection = %connection_id,
+                remote = %remote_addr,
+                "claim server blocked: {e}"
+            );
+            let frame = ServerFrame::ClaimRejected {
+                reason: "temporarily blocked".to_owned(),
+            };
+            self.send_to_connection(connection_id, &frame)?;
+            return Ok(());
+        }
+
         // SECURITY: CRITICAL-1 — Sanitize display_name before any logging or
         // storage to prevent log injection via crafted names.
         let display_name = sanitize_display_name(&display_name);
@@ -779,7 +860,7 @@ impl MessageHandler {
 
         // Attempt the claim (lock scope is minimal -- no await inside).
         let result = {
-            let mut cs = self.claim_state.lock().expect("claim_state lock poisoned");
+            let mut cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             cs.try_claim(&secret_bytes, &pk_bytes, &self.key_dir, &server_fingerprint)
         };
 
@@ -809,6 +890,7 @@ impl MessageHandler {
                 self.send_to_connection(connection_id, &frame)
             }
             Err(claim::ClaimError::InvalidSecret) => {
+                self.throttler.record_failure(remote_addr.ip());
                 warn!(
                     connection = %connection_id,
                     "claim rejected: invalid secret"
@@ -846,11 +928,25 @@ impl MessageHandler {
     async fn handle_reclaim_server(
         &self,
         connection_id: ConnectionId,
-        _remote_addr: SocketAddr,
+        remote_addr: SocketAddr,
         recovery_key_hex: String,
         new_host_pk_b64: String,
         display_name: String,
     ) -> Result<(), anyhow::Error> {
+        // Rate limit: block IPs with repeated auth failures.
+        if let Err(e) = self.throttler.check_allowed(remote_addr.ip()) {
+            warn!(
+                connection = %connection_id,
+                remote = %remote_addr,
+                "reclaim server blocked: {e}"
+            );
+            let frame = ServerFrame::ClaimRejected {
+                reason: "temporarily blocked".to_owned(),
+            };
+            self.send_to_connection(connection_id, &frame)?;
+            return Ok(());
+        }
+
         // SECURITY: CRITICAL-1 — Sanitize display_name before any logging or
         // storage to prevent log injection via crafted names.
         let display_name = sanitize_display_name(&display_name);
@@ -892,7 +988,7 @@ impl MessageHandler {
         };
 
         let result = {
-            let mut cs = self.claim_state.lock().expect("claim_state lock poisoned");
+            let mut cs = self.claim_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             cs.try_reclaim(&rk_bytes, &pk_bytes, &self.key_dir)
         };
 
@@ -914,6 +1010,7 @@ impl MessageHandler {
                 self.send_to_connection(connection_id, &frame)
             }
             Err(claim::ClaimError::InvalidSecret) => {
+                self.throttler.record_failure(remote_addr.ip());
                 warn!(connection = %connection_id, "reclaim rejected: invalid recovery key");
                 let frame = ServerFrame::ClaimRejected {
                     reason: "invalid recovery key".to_owned(),
@@ -921,6 +1018,7 @@ impl MessageHandler {
                 self.send_to_connection(connection_id, &frame)
             }
             Err(e) => {
+                self.throttler.record_failure(remote_addr.ip());
                 warn!(connection = %connection_id, "reclaim failed: {e}");
                 let frame = ServerFrame::ClaimRejected {
                     reason: "reclaim failed".to_owned(),
@@ -1298,6 +1396,10 @@ impl MessageHandler {
 
             let peers = pool.peers();
 
+            // Store the guest's session token for validation on Forward frames.
+            self.guest_session_tokens
+                .insert(pending.connection_id, peer_session_token.clone());
+
             // Send JoinAccepted to the client.
             let accepted_frame = ServerFrame::JoinAccepted {
                 session_token: peer_session_token,
@@ -1424,13 +1526,17 @@ impl MessageHandler {
             return Ok(());
         };
 
-        // If the sender is the pool host, validate the session token.
-        // Guest peers are authenticated by their connection mapping and
-        // do not need to provide a session token for Forward frames.
-        if pool.is_host(connection_id)
-            && self
+        // Validate session token for both host and guest peers.
+        if pool.is_host(connection_id) {
+            if self
                 .validate_session_token(connection_id, pool.id, session_token.as_deref())
                 .is_err()
+            {
+                return Ok(());
+            }
+        } else if self
+            .validate_guest_session_token(connection_id, session_token.as_deref())
+            .is_err()
         {
             return Ok(());
         }
@@ -1463,13 +1569,14 @@ impl MessageHandler {
         // JSON string across all recipients via clone (cheap Arc bump on the
         // String's internal buffer).
         if let Some(result) = route_result {
-            let json = serde_json::to_string(&result.frame)
-                .map_err(|e| anyhow::anyhow!("failed to serialize frame: {e}"))?;
+            let json: Arc<str> = serde_json::to_string(&result.frame)
+                .map_err(|e| anyhow::anyhow!("failed to serialize frame: {e}"))?
+                .into();
 
             for conn_id in &result.recipients {
                 if let Err(e) = self
                     .connection_registry
-                    .send_to(*conn_id, OutboundMessage::Text(json.clone()))
+                    .send_to(*conn_id, OutboundMessage::SharedText(Arc::clone(&json)))
                 {
                     // PERFORMANCE: P5 - Slow-consumer send failures are expected
                     // under load and already handled by the connection actor's
@@ -1907,11 +2014,38 @@ impl MessageHandler {
     // Public helpers for the main server loop
     // -----------------------------------------------------------------------
 
+    /// Handle a newly established WebSocket connection by generating a
+    /// per-connection auth nonce and sending an `AuthChallenge` frame.
+    ///
+    /// SECURITY: H-3 — The nonce binds any subsequent `HostAuth` signature
+    /// to this specific connection, preventing replay of captured auth
+    /// frames on a different WebSocket within the timestamp window.
+    pub fn handle_new_connection(&self, connection_id: ConnectionId) {
+        let mut nonce_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Base64::encode_string(&nonce_bytes);
+
+        self.connection_nonces
+            .insert(connection_id, nonce.clone());
+
+        let challenge_frame = ServerFrame::AuthChallenge { nonce };
+        if let Err(e) = self.send_to_connection(connection_id, &challenge_frame) {
+            warn!(
+                connection = %connection_id,
+                "failed to send auth challenge: {e}"
+            );
+        }
+    }
+
     /// Handle a peer disconnection: remove from pool and notify others.
     pub fn handle_disconnect(&self, connection_id: ConnectionId) {
         // Clean up any session cipher for this connection. The cipher holds
         // key material that is zeroized on drop.
         self.session_ciphers.remove(&connection_id);
+        // Clean up any guest session token for this connection.
+        self.guest_session_tokens.remove(&connection_id);
+        // Clean up any unused auth nonce for this connection.
+        self.connection_nonces.remove(&connection_id);
 
         let Some((pool_id, peer_id)) = self.pool_registry.unregister_connection(connection_id)
         else {
@@ -2002,23 +2136,26 @@ impl MessageHandler {
 
     /// Broadcast a frame to all members of a pool, excluding specified connections.
     fn broadcast_to_pool(&self, pool: &Pool, frame: &ServerFrame, exclude: &[ConnectionId]) {
-        let Ok(json) = serde_json::to_string(frame) else {
+        let Ok(json_string) = serde_json::to_string(frame) else {
             return;
         };
+        let json: Arc<str> = json_string.into();
 
         // Send to host if not excluded.
         if !exclude.contains(&pool.host_connection_id) {
-            let _ = self
-                .connection_registry
-                .send_to(pool.host_connection_id, OutboundMessage::Text(json.clone()));
+            let _ = self.connection_registry.send_to(
+                pool.host_connection_id,
+                OutboundMessage::SharedText(Arc::clone(&json)),
+            );
         }
 
         // Send to all guests not excluded.
         for (_, conn_id) in pool.guest_connection_ids() {
             if !exclude.contains(&conn_id) {
-                let _ = self
-                    .connection_registry
-                    .send_to(conn_id, OutboundMessage::Text(json.clone()));
+                let _ = self.connection_registry.send_to(
+                    conn_id,
+                    OutboundMessage::SharedText(Arc::clone(&json)),
+                );
             }
         }
     }
@@ -2173,6 +2310,63 @@ impl MessageHandler {
             };
             self.send_to_connection(connection_id, &error_frame)?;
             return Err(anyhow::anyhow!("session token mismatch"));
+        }
+
+        Ok(())
+    }
+
+    /// Validate a session token for a guest peer operation (e.g., `Forward`).
+    ///
+    /// Returns `Ok(())` if the token matches the stored guest session token
+    /// for this connection. Returns `Err(())` and sends an error frame if
+    /// validation fails.
+    fn validate_guest_session_token(
+        &self,
+        connection_id: ConnectionId,
+        provided_token: Option<&str>,
+    ) -> Result<(), anyhow::Error> {
+        let Some(provided) = provided_token else {
+            warn!(
+                connection = %connection_id,
+                "guest forward rejected: missing session token"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "session token required".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Err(anyhow::anyhow!("missing guest session token"));
+        };
+
+        let stored = self.guest_session_tokens.get(&connection_id);
+        let Some(stored_ref) = stored else {
+            warn!(
+                connection = %connection_id,
+                "guest forward rejected: no session token on file"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "invalid session token".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Err(anyhow::anyhow!("no guest session token on file"));
+        };
+
+        let tokens_match: bool =
+            subtle::ConstantTimeEq::ct_eq(provided.as_bytes(), stored_ref.value().as_bytes())
+                .into();
+
+        if !tokens_match {
+            warn!(
+                connection = %connection_id,
+                "guest forward rejected: session token mismatch"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "invalid session token".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Err(anyhow::anyhow!("guest session token mismatch"));
         }
 
         Ok(())

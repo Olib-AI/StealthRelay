@@ -471,11 +471,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let keys = make_test_keys();
         let mut client = SessionCipher::new(
-            &SessionKeys {
-                client_write_key: keys.client_write_key,
-                server_write_key: keys.server_write_key,
-                rekey_seed: keys.rekey_seed,
-            },
+            &keys,
             false,
         );
         let mut server = SessionCipher::new(&make_test_keys(), true);

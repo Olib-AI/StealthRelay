@@ -10,6 +10,7 @@
 //! - Slow-consumer detection and eviction.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
@@ -34,6 +35,10 @@ use crate::types::ConnectionId;
 pub enum OutboundMessage {
     /// Send a UTF-8 text frame.
     Text(String),
+    /// Send a UTF-8 text frame backed by a shared `Arc<str>`.
+    /// Cloning this variant is O(1) (reference count bump), avoiding
+    /// per-recipient heap allocation in broadcast scenarios.
+    SharedText(Arc<str>),
     /// Send a binary frame.
     Binary(Vec<u8>),
     /// Initiate a graceful close with the given status code and reason.
@@ -43,6 +48,17 @@ pub enum OutboundMessage {
 /// Events emitted by a connection actor back to the server layer.
 #[derive(Debug)]
 pub enum ConnectionEvent {
+    /// A new WebSocket connection has been established and registered.
+    ///
+    /// Emitted immediately after registration so the server layer can
+    /// send initial frames (e.g., auth challenge nonces) before the
+    /// client sends any messages.
+    Connected {
+        /// The newly assigned connection identifier.
+        connection_id: ConnectionId,
+        /// Remote socket address.
+        remote_addr: SocketAddr,
+    },
     /// A text message was received from the client.
     MessageReceived {
         /// The connection that produced this message.
@@ -260,6 +276,7 @@ impl ConnectionActor {
                     if let Some(outbound) = msg {
                         let ws_msg = match outbound {
                             OutboundMessage::Text(t) => WsMessage::text(t),
+                            OutboundMessage::SharedText(t) => WsMessage::text(t.as_ref()),
                             OutboundMessage::Binary(b) => WsMessage::binary(b),
                             OutboundMessage::Close(code, reason) => {
                                 let _ = send_close(

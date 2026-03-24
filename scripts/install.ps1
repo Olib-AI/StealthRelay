@@ -224,12 +224,12 @@ function Register-RelayService {
     }
 
     $binPathValue = "`"$BinaryPath`" serve --config `"$ConfigPath`""
-    $scArgs = @("create", $ServiceName, "binPath=", $binPathValue, "start=", "auto", "DisplayName=", $ServiceDisplayName)
-    $scResult = & sc.exe @scArgs 2>&1
+    $cmd = "sc.exe create $ServiceName binPath= `"$binPathValue`" start= auto DisplayName= `"$ServiceDisplayName`""
+    cmd /c $cmd 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Fatal "Failed to create service: $scResult"
+        Write-Fatal "Failed to create service. Try running: $cmd"
     }
-    & sc.exe description $ServiceName "Zero-knowledge WebSocket relay for StealthOS" 2>&1 | Out-Null
+    cmd /c "sc.exe description $ServiceName `"Zero-knowledge WebSocket relay for StealthOS`"" 2>&1 | Out-Null
 
     Write-Success "Windows Service registered"
 }

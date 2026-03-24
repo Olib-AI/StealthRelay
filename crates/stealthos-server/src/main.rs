@@ -128,7 +128,10 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let setup_state = if claim_state.is_claimed() {
         let shared_claim = Arc::new(Mutex::new(claim_state));
         Some((
-            Arc::new(setup::SetupState::new(Arc::clone(&shared_claim))),
+            Arc::new(setup::SetupState::new(
+                Arc::clone(&shared_claim),
+                env!("CARGO_PKG_VERSION"),
+            )),
             shared_claim,
         ))
     } else {
@@ -137,7 +140,10 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         }
         // Wrap in Arc<Mutex<>> for sharing between handler and setup page.
         let shared_claim = Arc::new(Mutex::new(claim_state));
-        let ss = Arc::new(setup::SetupState::new(Arc::clone(&shared_claim)));
+        let ss = Arc::new(setup::SetupState::new(
+            Arc::clone(&shared_claim),
+            env!("CARGO_PKG_VERSION"),
+        ));
         let token = ss.token_hex();
         let metrics_addr = &config.server.metrics_bind;
         eprintln!();

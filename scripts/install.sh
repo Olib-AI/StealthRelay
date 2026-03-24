@@ -395,6 +395,85 @@ stop_service() {
     fi
 }
 
+# ── Auto-update timer ─────────────────────────────────────────────────────────
+
+install_update_timer() {
+    if [ "$OS" = "linux" ]; then
+        local timer_path="/etc/systemd/system/${SERVICE_NAME}-update.timer"
+        local service_path="/etc/systemd/system/${SERVICE_NAME}-update.service"
+
+        info "Creating weekly auto-update timer..."
+        $SUDO_CMD tee "$service_path" > /dev/null << UNIT
+[Unit]
+Description=StealthOS Relay Auto-Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash -s -- --update'
+UNIT
+
+        $SUDO_CMD tee "$timer_path" > /dev/null << UNIT
+[Unit]
+Description=Weekly StealthOS Relay update check
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+        $SUDO_CMD systemctl daemon-reload
+        $SUDO_CMD systemctl enable --now "${SERVICE_NAME}-update.timer"
+        success "Weekly auto-update timer enabled"
+
+    elif [ "$OS" = "darwin" ]; then
+        local plist_dir plist_path
+        if [ "$(id -u)" -eq 0 ]; then
+            plist_dir="/Library/LaunchDaemons"
+        else
+            plist_dir="${HOME}/Library/LaunchAgents"
+        fi
+        plist_path="${plist_dir}/${LAUNCHD_LABEL}.update.plist"
+
+        info "Creating weekly auto-update job..."
+        $SUDO_CMD tee "$plist_path" > /dev/null << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}.update</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash -s -- --update</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+    </dict>
+</dict>
+</plist>
+PLIST
+
+        if [ "$(id -u)" -eq 0 ]; then
+            $SUDO_CMD launchctl load "$plist_path"
+        else
+            launchctl load "$plist_path"
+        fi
+        success "Weekly auto-update job enabled (Sundays at 4 AM)"
+    fi
+}
+
 # ── Wait for health ──────────────────────────────────────────────────────────
 
 wait_for_health() {
@@ -490,8 +569,13 @@ do_uninstall() {
 
     stop_service
 
-    # Remove service files
+    # Remove service files and update timer
     if [ "$OS" = "linux" ]; then
+        if [ -f "/etc/systemd/system/${SERVICE_NAME}-update.timer" ]; then
+            $SUDO_CMD systemctl disable --now "${SERVICE_NAME}-update.timer" 2>/dev/null || true
+            $SUDO_CMD rm -f "/etc/systemd/system/${SERVICE_NAME}-update.timer"
+            $SUDO_CMD rm -f "/etc/systemd/system/${SERVICE_NAME}-update.service"
+        fi
         if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
             info "Removing systemd service..."
             $SUDO_CMD systemctl disable "$SERVICE_NAME" 2>/dev/null || true
@@ -502,13 +586,16 @@ do_uninstall() {
     elif [ "$OS" = "darwin" ]; then
         local plist
         for plist in "/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist" \
-                     "${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"; do
+                     "/Library/LaunchDaemons/${LAUNCHD_LABEL}.update.plist" \
+                     "${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist" \
+                     "${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.update.plist"; do
             if [ -f "$plist" ]; then
-                info "Removing launchd plist..."
+                info "Removing $(basename "$plist")..."
+                $SUDO_CMD launchctl unload "$plist" 2>/dev/null || true
                 $SUDO_CMD rm -f "$plist"
-                success "Plist removed"
             fi
         done
+        success "Service and update timer removed"
     fi
 
     # Remove binary
@@ -608,6 +695,7 @@ do_install() {
         fi
 
         start_service
+        install_update_timer
 
         if wait_for_health; then
             show_setup_url

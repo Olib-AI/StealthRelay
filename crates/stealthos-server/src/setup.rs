@@ -28,16 +28,19 @@ pub struct SetupState {
     setup_token: [u8; 8],
     /// Reference to the shared claim state.
     claim_state: Arc<Mutex<ClaimState>>,
+    /// Server version string (from `CARGO_PKG_VERSION`).
+    version: &'static str,
 }
 
 impl SetupState {
     /// Create a new setup state with a random token.
-    pub fn new(claim_state: Arc<Mutex<ClaimState>>) -> Self {
+    pub fn new(claim_state: Arc<Mutex<ClaimState>>, version: &'static str) -> Self {
         let mut setup_token = [0u8; 8];
         rand::rngs::OsRng.fill_bytes(&mut setup_token);
         Self {
             setup_token,
             claim_state,
+            version,
         }
     }
 
@@ -91,10 +94,10 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
         .with_state(state)
 }
 
-/// GET / — redirects to /setup (with token) when unclaimed, shows guide when claimed.
+/// GET / — shows guide when claimed, info page when unclaimed.
 async fn root_handler(State(state): State<Arc<SetupState>>) -> impl IntoResponse {
     if state.is_claimed() {
-        (StatusCode::OK, Html(claimed_page()))
+        (StatusCode::OK, Html(claimed_page(state.version)))
     } else {
         (StatusCode::OK, Html(unclaimed_root_page()))
     }
@@ -112,7 +115,7 @@ async fn setup_handler(
 ) -> impl IntoResponse {
     // Always return the claimed page if already claimed -- regardless of token.
     if state.is_claimed() {
-        return (StatusCode::OK, Html(claimed_page()));
+        return (StatusCode::OK, Html(claimed_page(state.version)));
     }
 
     // Require and validate the setup token.
@@ -127,7 +130,7 @@ async fn setup_handler(
     // Serve the setup page with the claim QR code.
     let Some(secret) = state.claim_secret() else {
         // Race: server was claimed between the check above and here.
-        return (StatusCode::OK, Html(claimed_page()));
+        return (StatusCode::OK, Html(claimed_page(state.version)));
     };
 
     (StatusCode::OK, Html(render_setup_page(&secret)))
@@ -410,10 +413,14 @@ fn unclaimed_root_page() -> String {
 }
 
 /// HTML page shown after the server has been claimed.
-/// Includes step-by-step guides for setting up free HTTPS tunnels.
-fn claimed_page() -> String {
-    String::from(
-        r#"<!DOCTYPE html>
+/// Includes step-by-step guides for setting up free HTTPS tunnels
+/// and a client-side update check (browser fetches GitHub API, not the server).
+fn claimed_page(version: &str) -> String {
+    // Use string replacement instead of format! to avoid escaping all CSS/JS braces.
+    CLAIMED_PAGE_TEMPLATE.replace("{{VERSION}}", version)
+}
+
+const CLAIMED_PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -454,6 +461,18 @@ fn claimed_page() -> String {
   }
   .status-item .label { color: #7777aa; }
   .status-item .value { color: #88cc88; font-family: monospace; }
+  .update-banner {
+    display: none;
+    background: rgba(100, 200, 100, 0.08);
+    border: 1px solid rgba(100, 200, 100, 0.25);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 20px 0;
+    text-align: center;
+  }
+  .update-banner.visible { display: block; }
+  .update-banner .new-ver { color: #88cc88; font-weight: 600; }
+  .update-banner code { font-size: 0.85em; }
   h2 {
     font-size: 1.25em;
     color: #fff;
@@ -595,7 +614,21 @@ fn claimed_page() -> String {
         <span class="label">Status</span>
         <span class="value">Online</span>
       </div>
+      <div class="status-item">
+        <span class="label">Version</span>
+        <span class="value" id="current-version">{{VERSION}}</span>
+      </div>
     </div>
+  </div>
+
+  <div class="update-banner" id="update-banner">
+    <p>
+      A new version is available: <span class="new-ver" id="new-version"></span>
+    </p>
+    <p>Update with: <code>curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash -s -- --update</code></p>
+    <p style="font-size:0.8em; color:#7777aa; margin-top:8px;">
+      <a href="https://github.com/Olib-AI/StealthRelay/releases" target="_blank" rel="noopener">View release notes</a>
+    </p>
   </div>
 
   <div class="next-step">
@@ -856,10 +889,36 @@ curl -i --http1.1 \
   </div>
 
 </div>
+<script>
+// Client-side update check — the BROWSER fetches the GitHub API, not the server.
+// Zero privacy impact on the relay. No outbound connections from your server.
+(function() {
+  var current = document.getElementById('current-version').textContent.replace(/^v/, '');
+  fetch('https://api.github.com/repos/Olib-AI/StealthRelay/releases/latest')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.tag_name) return;
+      var latest = data.tag_name.replace(/^v/, '');
+      if (latest !== current && compareSemver(latest, current) > 0) {
+        document.getElementById('new-version').textContent = data.tag_name;
+        document.getElementById('update-banner').classList.add('visible');
+      }
+    })
+    .catch(function() { /* silently ignore — no connectivity or rate limited */ });
+
+  function compareSemver(a, b) {
+    var pa = a.split('.').map(Number);
+    var pb = b.split('.').map(Number);
+    for (var i = 0; i < 3; i++) {
+      if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+      if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+    }
+    return 0;
+  }
+})();
+</script>
 </body>
-</html>"#,
-    )
-}
+</html>"#;
 
 /// HTML page shown when the token is missing or invalid.
 fn forbidden_page() -> String {
@@ -917,7 +976,7 @@ mod tests {
         let claim = ClaimState::load_or_create(dir.path());
         assert!(!claim.is_claimed());
         let shared = Arc::new(Mutex::new(claim));
-        let setup = Arc::new(SetupState::new(Arc::clone(&shared)));
+        let setup = Arc::new(SetupState::new(Arc::clone(&shared), "0.0.0-test"));
         (setup, shared)
     }
 
@@ -929,7 +988,7 @@ mod tests {
             .try_claim(&secret, &[42u8; 32], dir.path(), "fp")
             .unwrap();
         let shared = Arc::new(Mutex::new(claim));
-        Arc::new(SetupState::new(shared))
+        Arc::new(SetupState::new(shared, "0.0.0-test"))
     }
 
     #[test]

@@ -205,47 +205,42 @@ All display names received from clients are sanitized before logging or storage:
 
 ## Quick Start
 
-### 1. Deploy with Docker
+### 1. Install
+
+**One-line install** (Linux / macOS / Raspberry Pi):
 
 ```bash
-docker run -d --name stealth-relay \
-  -p 9090:9090 -p 127.0.0.1:9091:9091 \
-  -v stealth-relay-keys:/var/stealth-relay/keys \
-  -e STEALTH_SERVER__WS_BIND=0.0.0.0:9090 \
-  -e STEALTH_SERVER__METRICS_BIND=0.0.0.0:9091 \
-  --read-only --tmpfs /tmp:noexec,nosuid,size=16m \
-  --security-opt no-new-privileges:true --cap-drop ALL \
-  ghcr.io/olib-ai/stealth-relay:latest
+curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash
 ```
+
+**Windows** (run PowerShell as Administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.ps1 | iex
+```
+
+The installer downloads a pre-built binary, verifies its SHA256 checksum, creates a system service, and starts the server. No Docker, no dependencies.
+
+> **Prefer Docker?** See [Docker Compose](#docker-compose) or [One-Click Cloud Deploy](#one-click-deploy) below.
 
 ### 2. Claim the Server
 
-```bash
-docker logs stealth-relay
-```
+After installation, a **setup page** opens automatically in your browser:
 
-You will see a one-time QR code:
+<p align="center">
+  <code>http://localhost:9091/setup?token=&lt;TOKEN&gt;</code>
+</p>
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║              SERVER CLAIM REQUIRED                          ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                              ║
-║  Scan the QR code below with StealthOS to claim this         ║
-║  server, or enter the code manually in the app.              ║
-║                                                              ║
-    █▀▀▀▀▀▀▀██▀▀▀█▀▀▀█▀██▀▀▀▀██▀█▀█▀▀▀▀▀▀▀█
-    █ █▀▀▀█ ██▀▀ ▄█▀▄▀▀▄▄▄ █▄▄█▄█ █ █▀▀▀█ █
-    ...
-║                                                              ║
-║  Manual code: xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx             ║
-╚══════════════════════════════════════════════════════════════╝
-```
+The setup page displays a **QR code** — scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
+
+> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden — even if someone can reach port 9091.
+
+> **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
 
 Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
 - Enter your server URL (`ws://your-ip:9090`)
-- Tap **Scan QR Code** (point camera at the terminal QR)
-- Or type the manual code from the logs
+- Tap **Scan QR Code** and point your camera at the setup page
+- Or tap **Enter Code Manually** and paste the code
 
 The server is now bound to your device. A **recovery key** is shown once — **save it securely**. It is the only way to reclaim the server if you lose your device.
 
@@ -263,6 +258,38 @@ When friends open the invitation:
 Chat, play games, share files — all end-to-end encrypted. The server routes messages but can never read them.
 
 ## Deployment
+
+### Native Install (Recommended)
+
+The fastest way to self-host on your own hardware — a laptop, desktop, or single-board computer like a Raspberry Pi.
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell as Administrator):**
+
+```powershell
+irm https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.ps1 | iex
+```
+
+The installer:
+- Downloads the correct binary for your OS and architecture (amd64 / arm64)
+- Verifies the SHA256 checksum against the signed release
+- Creates a system service (systemd on Linux, launchd on macOS, Windows Service)
+- Opens the setup page in your browser for one-click claiming
+
+Supported platforms: Ubuntu, Debian, Fedora, RHEL, Arch, Alpine, Raspberry Pi OS, macOS (Intel & Apple Silicon), Windows 10/11.
+
+| Option | Description |
+|--------|-------------|
+| `--version v1.0.0` | Install a specific version |
+| `--update` | Update binary, preserve keys and config |
+| `--uninstall` | Remove everything (prompts before deleting keys) |
+| `--no-service` | Don't create a system service |
+| `--no-browser` | Don't auto-open the browser |
 
 ### One-Click Deploy
 
@@ -445,6 +472,7 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 StealthRelay/
 ├── Cargo.toml                         # Workspace manifest (Rust 2024 edition)
 ├── Cargo.lock
+├── Cross.toml                         # Cross-compilation config for CI binaries
 ├── Dockerfile                         # Multi-stage build (Debian bookworm)
 ├── config/
 │   └── default.toml                   # Annotated default configuration
@@ -458,7 +486,8 @@ StealthRelay/
 │   │   │   ├── app.rs                 # AppState shared across connections
 │   │   │   ├── config.rs              # TOML + env config loading
 │   │   │   ├── handler.rs             # WebSocket message dispatch
-│   │   │   └── claim.rs               # Server claim/reclaim logic
+│   │   │   ├── claim.rs               # Server claim/reclaim logic
+│   │   │   └── setup.rs              # Token-protected setup page with QR code
 │   │   └── tests/
 │   │       └── integration.rs         # Integration tests
 │   ├── stealthos-core/                # Pool registry, routing, types
@@ -495,6 +524,8 @@ StealthRelay/
 │           ├── metrics.rs             # Prometheus metrics exporter
 │           └── health.rs              # /health and /metrics HTTP handlers
 └── scripts/
+    ├── install.sh                     # Linux/macOS installer (bash)
+    ├── install.ps1                    # Windows installer (PowerShell)
     └── e2e-test.sh                    # End-to-end test runner
 ```
 

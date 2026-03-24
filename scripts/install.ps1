@@ -227,8 +227,9 @@ function Register-RelayService {
         -BinaryPathName "`"$BinaryPath`" serve --config `"$ConfigPath`"" `
         -DisplayName $ServiceDisplayName `
         -StartupType Automatic `
-        -Description "Zero-knowledge WebSocket relay for StealthOS" `
         -ErrorAction Stop
+    # -Description requires PowerShell 7+; use sc.exe for PS 5.1 compat
+    sc.exe description $ServiceName "Zero-knowledge WebSocket relay for StealthOS" 2>$null | Out-Null
 
     Write-Success "Windows Service registered"
 }

@@ -367,8 +367,6 @@ pub fn print_ready_banner(host_key_hex: &str) {
 /// renames it into place. This avoids a TOCTOU window where the file exists
 /// with the default umask before permissions are tightened.
 fn save_binding(key_dir: &Path, binding: &HostBinding) -> Result<(), ClaimError> {
-    use std::io::Write;
-
     let binding_path = key_dir.join(BINDING_FILENAME);
     let tmp_path = key_dir.join(".host_binding.json.tmp");
     let json = serde_json::to_string_pretty(binding)
@@ -378,6 +376,7 @@ fn save_binding(key_dir: &Path, binding: &HostBinding) -> Result<(), ClaimError>
     {
         #[cfg(unix)]
         {
+            use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)

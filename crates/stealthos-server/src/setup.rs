@@ -376,9 +376,14 @@ function copyCode() {{
 // If a recovery key is returned, show it before redirecting to the guide.
 var token = new URLSearchParams(window.location.search).get('token');
 var pollInterval = setInterval(function() {{
+  if (!token) return;
   fetch('/setup/status?token=' + encodeURIComponent(token))
-    .then(function(r) {{ return r.json(); }})
+    .then(function(r) {{
+      if (!r.ok) return null;
+      return r.json();
+    }})
     .then(function(data) {{
+      if (!data) return;
       if (data.claimed) {{
         clearInterval(pollInterval);
         if (data.recovery_key) {{
@@ -388,7 +393,19 @@ var pollInterval = setInterval(function() {{
         }}
       }}
     }})
-    .catch(function() {{}});
+    .catch(function() {{
+      // Fallback: if status endpoint fails, try reloading the page.
+      // The /setup handler returns the claimed page when claimed.
+      fetch(window.location.href)
+        .then(function(r) {{ return r.text(); }})
+        .then(function(html) {{
+          if (html.indexOf('Server Claimed') !== -1) {{
+            clearInterval(pollInterval);
+            window.location.reload();
+          }}
+        }})
+        .catch(function() {{}});
+    }});
 }}, 2000);
 
 function showRecoveryKey(key) {{

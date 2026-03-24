@@ -879,7 +879,7 @@ sudo apt update && sudo apt install cloudflared
       <li>
         Start the tunnel:
         <div class="copy-wrap">
-          <pre><code>cloudflared tunnel --url ws://localhost:9090 run stealth-relay</code></pre>
+          <pre><code>cloudflared tunnel --url http://localhost:9090 run stealth-relay</code></pre>
         </div>
       </li>
       <li>
@@ -892,7 +892,7 @@ sudo apt update && sudo apt install cloudflared
     </div>
     <div class="note">
       <strong>Don't have a domain?</strong> Use the quick tunnel instead &mdash; no domain needed:
-      <pre><code>cloudflared tunnel --url ws://localhost:9090</code></pre>
+      <pre><code>cloudflared tunnel --url http://localhost:9090</code></pre>
       This gives you a temporary <code>https://xxxx-xxxx.trycloudflare.com</code> address.
       It changes every time you restart, but it's great for testing.
     </div>

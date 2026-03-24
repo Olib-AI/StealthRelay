@@ -132,10 +132,12 @@ pub struct MessageHandler {
     pending_pow_challenges: DashMap<ConnectionId, PendingPowChallenge>,
     /// Server claim state -- determines whether a host is bound.
     ///
-    /// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) because the lock
-    /// is never held across `.await` points and the critical section is
-    /// sub-microsecond (constant-time compare + optional file write).
-    claim_state: Mutex<ClaimState>,
+    /// Wrapped in `Arc<Mutex<>>` so it can be shared with the setup page
+    /// HTTP handler. Uses `std::sync::Mutex` (not `tokio::sync::Mutex`)
+    /// because the lock is never held across `.await` points and the
+    /// critical section is sub-microsecond (constant-time compare +
+    /// optional file write).
+    claim_state: Arc<Mutex<ClaimState>>,
     /// Key directory path, used for persisting claim bindings.
     key_dir: PathBuf,
     /// Maps `pool_id` to the host's session token. Generated at pool creation
@@ -172,7 +174,7 @@ impl MessageHandler {
         host_identity: Arc<HostIdentity>,
         server_addr: String,
         max_pool_size: usize,
-        claim_state: ClaimState,
+        claim_state: Arc<Mutex<ClaimState>>,
         key_dir: PathBuf,
     ) -> Self {
         Self {
@@ -188,7 +190,7 @@ impl MessageHandler {
             max_pool_size,
             token_to_pool: DashMap::new(),
             pending_pow_challenges: DashMap::new(),
-            claim_state: Mutex::new(claim_state),
+            claim_state,
             key_dir,
             host_session_tokens: DashMap::new(),
             guest_session_tokens: DashMap::new(),

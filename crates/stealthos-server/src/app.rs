@@ -1,7 +1,7 @@
 //! Application state -- the root container for all shared server state.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use stealthos_core::PoolRegistry;
@@ -63,14 +63,14 @@ impl AppState {
         // is built in main.rs with the transport server's connection registry
         // and the actual ClaimState. This handler exists only because AppState
         // was designed with it as a field; it is never used for dispatch.
-        let placeholder_claim = ClaimState::Claimed {
+        let placeholder_claim = Arc::new(Mutex::new(ClaimState::Claimed {
             binding: crate::claim::HostBinding {
                 host_public_key: String::new(),
                 claimed_at: String::new(),
                 server_fingerprint: String::new(),
                 recovery_key_hash: String::new(),
             },
-        };
+        }));
         let handler = Arc::new(MessageHandler::new(
             Arc::clone(&pool_registry),
             Arc::clone(&connection_registry),

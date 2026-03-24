@@ -19,10 +19,11 @@ mod app;
 mod claim;
 mod config;
 mod handler;
+mod setup;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -122,11 +123,34 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // 2b. Check claim state and print QR banner BEFORE any logging starts.
     let claim_state = claim::ClaimState::load_or_create(&key_dir);
-    if !claim_state.is_claimed()
-        && let Some(secret) = claim_state.claim_secret()
-    {
-        claim::print_claim_banner(secret);
-    }
+
+    // Generate setup page token and print setup URL if unclaimed.
+    let setup_state = if claim_state.is_claimed() {
+        let shared_claim = Arc::new(Mutex::new(claim_state));
+        Some((
+            Arc::new(setup::SetupState::new(Arc::clone(&shared_claim))),
+            shared_claim,
+        ))
+    } else {
+        if let Some(secret) = claim_state.claim_secret() {
+            claim::print_claim_banner(secret);
+        }
+        // Wrap in Arc<Mutex<>> for sharing between handler and setup page.
+        let shared_claim = Arc::new(Mutex::new(claim_state));
+        let ss = Arc::new(setup::SetupState::new(Arc::clone(&shared_claim)));
+        let token = ss.token_hex();
+        let metrics_addr = &config.server.metrics_bind;
+        eprintln!();
+        eprintln!("  ┌─────────────────────────────────────────────────────────┐");
+        eprintln!("  │  Open this URL in your browser to claim the server:     │");
+        eprintln!("  │                                                         │");
+        eprintln!("  │  http://{metrics_addr}/setup?token={token}");
+        eprintln!("  │                                                         │");
+        eprintln!("  │  (The token protects this page from unauthorized access)│");
+        eprintln!("  └─────────────────────────────────────────────────────────┘");
+        eprintln!();
+        Some((ss, shared_claim))
+    };
 
     // 3. NOW initialize structured logging (after QR banner is fully printed).
     let log_format = match config.logging.format.as_str() {
@@ -152,10 +176,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         "host identity loaded"
     );
 
-    if claim_state.is_claimed() {
-        info!("server is claimed and ready");
-    } else {
-        info!("server is UNCLAIMED -- waiting for claim");
+    // Extract shared state from the setup_state tuple.
+    let (setup_state_arc, shared_claim) = setup_state.expect("setup_state always Some");
+    {
+        let cs = shared_claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cs.is_claimed() {
+            info!("server is claimed and ready");
+        } else {
+            info!("server is UNCLAIMED -- waiting for claim");
+        }
     }
 
     // 4. Build application state.
@@ -169,8 +200,27 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid metrics_bind address: {e}"))?;
 
+    // Capture the setup URL before moving setup_state_arc into the spawned task.
+    let setup_url = {
+        let is_unclaimed = !shared_claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_claimed();
+        if is_unclaimed {
+            Some(format!(
+                "http://{}/setup?token={}",
+                metrics_bind,
+                setup_state_arc.token_hex()
+            ))
+        } else {
+            None
+        }
+    };
+
     let health_handle = tokio::spawn(async move {
-        let app = health_router(health_state);
+        let health_app = health_router(health_state);
+        let setup_app = setup::setup_router(setup_state_arc);
+        let app = health_app.merge(setup_app);
         let listener = match TcpListener::bind(metrics_bind).await {
             Ok(l) => l,
             Err(e) => {
@@ -178,12 +228,35 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 return;
             }
         };
-        info!(bind = %metrics_bind, "health/metrics endpoint listening");
+        info!(bind = %metrics_bind, "health/metrics/setup endpoint listening");
 
         if let Err(e) = axum::serve(listener, app).await {
             error!("health server error: {e}");
         }
     });
+
+    // Auto-open browser for the setup page (non-Docker native installs only).
+    if let Some(ref url) = setup_url {
+        let is_docker = std::path::Path::new("/.dockerenv").exists();
+        let no_browser = std::env::var("STEALTH_NO_BROWSER").is_ok();
+
+        if !is_docker && !no_browser {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open").arg(url).spawn();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", url])
+                    .spawn();
+            }
+        }
+    }
 
     // 6. Housekeeping task is spawned after handler creation (step 7b).
     let pool_idle_timeout = Duration::from_secs(config.pool.pool_idle_timeout);
@@ -245,7 +318,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             host_identity,
             config.server.ws_bind.clone(),
             config.pool.max_pool_size,
-            claim_state,
+            shared_claim,
             key_dir.clone(),
         ))
     };

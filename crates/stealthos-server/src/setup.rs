@@ -338,7 +338,7 @@ fn render_setup_page(claim_secret: &[u8; 32]) -> String {
   <div class="manual-section">
     <div class="manual-label">Manual Code</div>
     <div class="manual-code" id="claim-code">{formatted}</div>
-    <button class="copy-btn" onclick="copyCode()" id="copy-btn">Copy Code</button>
+    <button class="copy-btn" id="copy-btn">Copy Code</button>
   </div>
 
   <div class="warning">
@@ -346,117 +346,115 @@ fn render_setup_page(claim_secret: &[u8; 32]) -> String {
     Only the server operator should see this page.
   </div>
 </div>
+
+<!-- Hidden recovery key page — shown by JS after successful claim -->
+<div id="recovery-page" style="display:none;">
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#0f0f1a;color:#e0e0e6;min-height:100vh;display:flex;justify-content:center;
+align-items:center;text-align:center;">
+<div style="max-width:520px;padding:32px 24px;">
+  <div style="font-size:3em;margin-bottom:16px;">&#x2705;</div>
+  <h1 style="font-size:1.5em;color:#fff;margin:0 0 12px;">Server Claimed Successfully</h1>
+  <p style="color:#9999bb;line-height:1.6;margin-bottom:24px;">
+    Save your <strong style="color:#fff;">recovery key</strong> below. It is the
+    <strong style="color:#ffaa44;">only way</strong> to reclaim your server if you lose your device.
+    This key is shown <strong style="color:#ffaa44;">once</strong> and never stored on the server.
+  </p>
+  <div style="background:#1a1a2e;border:1px solid #2a2a44;border-radius:10px;
+  padding:20px;margin-bottom:16px;">
+    <div style="font-size:0.75em;color:#7777aa;text-transform:uppercase;
+    letter-spacing:0.08em;margin-bottom:10px;">Recovery Key</div>
+    <div id="rk-display" style="font-family:'SF Mono','Fira Code',Consolas,monospace;
+    font-size:0.9em;color:#88cc88;word-break:break-all;line-height:1.8;
+    user-select:all;"></div>
+    <button id="rk-copy" style="margin-top:12px;padding:8px 20px;
+    background:#2a2a44;color:#ccccee;border:1px solid #3a3a55;border-radius:6px;
+    font-size:0.85em;cursor:pointer;">Copy Recovery Key</button>
+  </div>
+  <div style="background:rgba(255,180,50,0.08);border:1px solid rgba(255,180,50,0.2);
+  border-radius:8px;padding:12px 16px;font-size:0.85em;color:#ddaa44;margin-bottom:20px;">
+    <strong>Write this down or save it in a password manager.</strong><br>
+    If you lose your device AND this key, you must redeploy with a fresh key volume.
+  </div>
+  <button id="rk-continue" style="padding:10px 28px;background:#2a4a2a;
+  color:#88cc88;border:1px solid #3a6a3a;border-radius:6px;font-size:0.95em;
+  cursor:pointer;">I've Saved It — Continue to Setup</button>
+</div>
+</div>
+</div>
+
 <script>
-function copyCode() {{
-  var code = '{full_hex}';
-  if (navigator.clipboard && navigator.clipboard.writeText) {{
-    navigator.clipboard.writeText(code).then(function() {{
-      document.getElementById('copy-btn').textContent = 'Copied!';
-      setTimeout(function() {{
-        document.getElementById('copy-btn').textContent = 'Copy Code';
-      }}, 2000);
-    }});
-  }} else {{
-    var ta = document.createElement('textarea');
-    ta.value = code;
-    ta.style.position = 'fixed';
-    ta.style.left = '-9999px';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    document.getElementById('copy-btn').textContent = 'Copied!';
-    setTimeout(function() {{
-      document.getElementById('copy-btn').textContent = 'Copy Code';
-    }}, 2000);
+(function() {{
+  var claimCode = '{full_hex}';
+  var token = new URLSearchParams(window.location.search).get('token');
+
+  // Copy claim code button
+  document.getElementById('copy-btn').addEventListener('click', function() {{
+    copyToClipboard(claimCode, 'copy-btn', 'Copy Code');
+  }});
+
+  // Copy recovery key button
+  document.getElementById('rk-copy').addEventListener('click', function() {{
+    copyToClipboard(window._rkRaw || '', 'rk-copy', 'Copy Recovery Key');
+  }});
+
+  // Continue button on recovery key page
+  document.getElementById('rk-continue').addEventListener('click', function() {{
+    window.location.href = '/';
+  }});
+
+  function copyToClipboard(text, btnId, resetLabel) {{
+    var btn = document.getElementById(btnId);
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(text).then(function() {{
+        btn.textContent = 'Copied!';
+        setTimeout(function() {{ btn.textContent = resetLabel; }}, 2000);
+      }});
+    }} else {{
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      btn.textContent = 'Copied!';
+      setTimeout(function() {{ btn.textContent = resetLabel; }}, 2000);
+    }}
   }}
-}}
-// Auto-refresh to detect when server is claimed.
-// Poll /setup/status to detect when server is claimed.
-// If a recovery key is returned, show it before redirecting to the guide.
-var token = new URLSearchParams(window.location.search).get('token');
-var pollInterval = setInterval(function() {{
-  if (!token) return;
-  fetch('/setup/status?token=' + encodeURIComponent(token))
-    .then(function(r) {{
-      if (!r.ok) return null;
-      return r.json();
-    }})
-    .then(function(data) {{
-      if (!data) return;
-      if (data.claimed) {{
-        clearInterval(pollInterval);
-        if (data.recovery_key) {{
-          showRecoveryKey(data.recovery_key);
-        }} else {{
-          window.location.href = '/';
-        }}
-      }}
-    }})
-    .catch(function() {{
-      // Fallback: if status endpoint fails, try reloading the page.
-      // The /setup handler returns the claimed page when claimed.
-      fetch(window.location.href)
-        .then(function(r) {{ return r.text(); }})
-        .then(function(html) {{
-          if (html.indexOf('Server Claimed') !== -1) {{
+
+  // Poll for claim status
+  if (token) {{
+    var pollInterval = setInterval(function() {{
+      fetch('/setup/status?token=' + encodeURIComponent(token))
+        .then(function(r) {{
+          if (!r.ok) return null;
+          return r.json();
+        }})
+        .then(function(data) {{
+          if (!data) return;
+          if (data.claimed) {{
             clearInterval(pollInterval);
-            window.location.reload();
+            if (data.recovery_key) {{
+              showRecoveryKey(data.recovery_key);
+            }} else {{
+              window.location.href = '/';
+            }}
           }}
         }})
         .catch(function() {{}});
-    }});
-}}, 2000);
-
-function showRecoveryKey(key) {{
-  var formatted = key.match(/.{{1,4}}/g).join('-');
-  document.body.innerHTML = '\
-<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;\
-background:#0f0f1a;color:#e0e0e6;min-height:100vh;display:flex;justify-content:center;\
-align-items:center;text-align:center;">\
-<div style="max-width:520px;padding:32px 24px;">\
-  <div style="font-size:3em;margin-bottom:16px;">&#x2705;</div>\
-  <h1 style="font-size:1.5em;color:#fff;margin:0 0 12px;">Server Claimed Successfully</h1>\
-  <p style="color:#9999bb;line-height:1.6;margin-bottom:24px;">\
-    Save your <strong style="color:#fff;">recovery key</strong> below. It is the\
-    <strong style="color:#ffaa44;">only way</strong> to reclaim your server if you lose your device.\
-    This key is shown <strong style="color:#ffaa44;">once</strong> and never stored on the server.\
-  </p>\
-  <div style="background:#1a1a2e;border:1px solid #2a2a44;border-radius:10px;\
-  padding:20px;margin-bottom:16px;">\
-    <div style="font-size:0.75em;color:#7777aa;text-transform:uppercase;\
-    letter-spacing:0.08em;margin-bottom:10px;">Recovery Key</div>\
-    <div id="rk-display" style="font-family:SF Mono,Fira Code,Consolas,monospace;\
-    font-size:0.9em;color:#88cc88;word-break:break-all;line-height:1.8;\
-    user-select:all;">' + formatted + '</div>\
-    <button onclick="copyRK()" id="rk-copy" style="margin-top:12px;padding:8px 20px;\
-    background:#2a2a44;color:#ccccee;border:1px solid #3a3a55;border-radius:6px;\
-    font-size:0.85em;cursor:pointer;">Copy Recovery Key</button>\
-  </div>\
-  <div style="background:rgba(255,180,50,0.08);border:1px solid rgba(255,180,50,0.2);\
-  border-radius:8px;padding:12px 16px;font-size:0.85em;color:#ddaa44;margin-bottom:20px;">\
-    <strong>Write this down or save it in a password manager.</strong><br>\
-    If you lose your device AND this key, you must redeploy with a fresh key volume.\
-  </div>\
-  <button onclick="window.location.href=\\'/\\'" style="padding:10px 28px;background:#2a4a2a;\
-  color:#88cc88;border:1px solid #3a6a3a;border-radius:6px;font-size:0.95em;\
-  cursor:pointer;">I\'ve Saved It &mdash; Continue to Setup</button>\
-</div>\
-</div>';
-  window._rkRaw = key;
-}}
-
-function copyRK() {{
-  var key = window._rkRaw || '';
-  if (navigator.clipboard && navigator.clipboard.writeText) {{
-    navigator.clipboard.writeText(key).then(function() {{
-      document.getElementById('rk-copy').textContent = 'Copied!';
-      setTimeout(function() {{
-        document.getElementById('rk-copy').textContent = 'Copy Recovery Key';
-      }}, 2000);
-    }});
+    }}, 2000);
   }}
-}}
+
+  function showRecoveryKey(key) {{
+    window._rkRaw = key;
+    var formatted = key.match(/.{{1,4}}/g).join('-');
+    document.getElementById('rk-display').textContent = formatted;
+    document.querySelector('.container').style.display = 'none';
+    document.getElementById('recovery-page').style.display = 'block';
+  }}
+}})();
 </script>
 </body>
 </html>"#

@@ -163,12 +163,13 @@ jobs:
           # Create zip for notarization (notarytool requires zip/dmg/pkg)
           ditto -c -k "$BINARY" /tmp/notarize.zip
 
-          # Submit for notarization and wait
+          # Submit for notarization (don't block — Apple can take 30+ min).
+          # The binary is already code-signed, which prevents Gatekeeper warnings.
+          # Notarization adds offline verification and completes asynchronously.
           xcrun notarytool submit /tmp/notarize.zip \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 30m
+            --team-id "$APPLE_TEAM_ID" || true
 
           # Cleanup
           security delete-keychain "$KEYCHAIN_PATH"

@@ -122,6 +122,9 @@ jobs:
       - name: Build (cargo)
         if: ${{ !matrix.use_cross }}
         run: cargo build --release -p stealthos-server --target ${{ matrix.target }}
+        env:
+          # Static link the C runtime on Windows so the binary has no VCRUNTIME dependency
+          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
 
       - name: Sign and notarize macOS binary
         if: runner.os == 'macOS'

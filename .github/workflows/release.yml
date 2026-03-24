@@ -98,6 +98,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set version from git tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting workspace version to $VERSION"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -109,11 +117,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --locked -p stealthos-server --target ${{ matrix.target }}
+        run: cross build --release -p stealthos-server --target ${{ matrix.target }}
 
       - name: Build (cargo)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --locked -p stealthos-server --target ${{ matrix.target }}
+        run: cargo build --release -p stealthos-server --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash
@@ -198,6 +206,15 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
+      - name: Extract version from ref
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         id: build
@@ -207,6 +224,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: STEALTH_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

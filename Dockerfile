@@ -22,11 +22,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+# Optional: set the release version (from git tag).
+ARG STEALTH_VERSION=""
+
 # Copy everything and build.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY config/ config/
-RUN cargo build --release --locked -p stealthos-server
+
+# If a version is provided, stamp it into the workspace manifest.
+RUN if [ -n "$STEALTH_VERSION" ]; then \
+      sed -i "s/^version = .*/version = \"$STEALTH_VERSION\"/" Cargo.toml; \
+      cargo build --release -p stealthos-server; \
+    else \
+      cargo build --release --locked -p stealthos-server; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal Debian runtime

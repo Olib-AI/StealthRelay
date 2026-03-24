@@ -140,6 +140,8 @@ pub struct MessageHandler {
     claim_state: Arc<Mutex<ClaimState>>,
     /// Key directory path, used for persisting claim bindings.
     key_dir: PathBuf,
+    /// Setup page state -- used to pass the recovery key after claiming.
+    setup_state: Option<Arc<crate::setup::SetupState>>,
     /// Maps `pool_id` to the host's session token. Generated at pool creation
     /// and required for all privileged host operations (`CreateInvitation`,
     /// `KickPeer`, `ClosePool`, `Forward`, `JoinApproval`, `RevokeInvitation`).
@@ -176,6 +178,7 @@ impl MessageHandler {
         max_pool_size: usize,
         claim_state: Arc<Mutex<ClaimState>>,
         key_dir: PathBuf,
+        setup_state: Option<Arc<crate::setup::SetupState>>,
     ) -> Self {
         Self {
             pool_registry,
@@ -192,6 +195,7 @@ impl MessageHandler {
             pending_pow_challenges: DashMap::new(),
             claim_state,
             key_dir,
+            setup_state,
             host_session_tokens: DashMap::new(),
             guest_session_tokens: DashMap::new(),
             session_ciphers: DashMap::new(),
@@ -883,10 +887,17 @@ impl MessageHandler {
                     "server claimed successfully"
                 );
 
+                let recovery_hex = claim::hex_encode(&recovery_key);
+
+                // Pass recovery key to setup page so it can display it once.
+                if let Some(ref ss) = self.setup_state {
+                    ss.set_recovery_key(recovery_hex.clone());
+                }
+
                 let frame = ServerFrame::ClaimSuccess {
                     server_fingerprint,
                     message: "server claimed successfully".to_owned(),
-                    recovery_key: claim::hex_encode(&recovery_key),
+                    recovery_key: recovery_hex,
                 };
                 self.send_to_connection(connection_id, &frame)
             }

@@ -223,6 +223,9 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         }
     };
 
+    // Keep a clone for the message handler so it can pass the recovery key.
+    let setup_state_for_handler = Arc::clone(&setup_state_arc);
+
     let health_handle = tokio::spawn(async move {
         let health_app = health_router(health_state);
         let setup_app = setup::setup_router(setup_state_arc);
@@ -326,6 +329,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             config.pool.max_pool_size,
             shared_claim,
             key_dir.clone(),
+            Some(setup_state_for_handler),
         ))
     };
 

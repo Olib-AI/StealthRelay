@@ -82,6 +82,7 @@ impl AppState {
             max_pool_size,
             placeholder_claim,
             PathBuf::from(&config.crypto.key_dir),
+            None, // No setup state for the placeholder handler
         ));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

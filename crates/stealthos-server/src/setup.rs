@@ -30,6 +30,9 @@ pub struct SetupState {
     claim_state: Arc<Mutex<ClaimState>>,
     /// Server version string (from `CARGO_PKG_VERSION`).
     version: &'static str,
+    /// Recovery key (hex string), set once at claim time, cleared after first read.
+    /// This allows the setup page to show the recovery key one time after claiming.
+    recovery_key: Mutex<Option<String>>,
 }
 
 impl SetupState {
@@ -41,6 +44,7 @@ impl SetupState {
             setup_token,
             claim_state,
             version,
+            recovery_key: Mutex::new(None),
         }
     }
 
@@ -68,6 +72,24 @@ impl SetupState {
         cs.claim_secret().copied()
     }
 
+    /// Store the recovery key after a successful claim. Called by the handler.
+    pub fn set_recovery_key(&self, key_hex: String) {
+        let mut rk = self
+            .recovery_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *rk = Some(key_hex);
+    }
+
+    /// Take the recovery key (returns it once, then clears it).
+    fn take_recovery_key(&self) -> Option<String> {
+        let mut rk = self
+            .recovery_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        rk.take()
+    }
+
     /// Check if the server has been claimed.
     fn is_claimed(&self) -> bool {
         self.claim_state
@@ -91,6 +113,7 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/setup", get(setup_handler))
+        .route("/setup/status", get(status_handler))
         .with_state(state)
 }
 
@@ -134,6 +157,44 @@ async fn setup_handler(
     };
 
     (StatusCode::OK, Html(render_setup_page(&secret)))
+}
+
+/// GET /setup/status — JSON endpoint polled by the setup page JS.
+///
+/// Returns claim status and, once after claiming, the recovery key.
+/// The recovery key is cleared after the first read (one-time).
+/// Protected by the same setup token as `/setup`.
+async fn status_handler(
+    State(state): State<Arc<SetupState>>,
+    Query(params): Query<SetupQuery>,
+) -> impl IntoResponse {
+    // Require token for status too — prevents unauthenticated polling.
+    let token_valid = params
+        .token
+        .as_deref()
+        .is_some_and(|t| state.validate_token(t));
+
+    if !token_valid {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "forbidden"})),
+        );
+    }
+
+    let claimed = state.is_claimed();
+    let recovery_key = if claimed {
+        state.take_recovery_key()
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "claimed": claimed,
+            "recovery_key": recovery_key,
+        })),
+    )
 }
 
 // ── HTML page rendering ──────────────────────────────────────────────────
@@ -311,19 +372,74 @@ function copyCode() {{
   }}
 }}
 // Auto-refresh to detect when server is claimed.
-setInterval(function() {{
-  fetch(window.location.href).then(function(r) {{
-    return r.text();
-  }}).then(function(html) {{
-    if (html.indexOf('Server Claimed') !== -1) {{
-      document.body.innerHTML = html;
-      // Swap to the claimed page body content.
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(html, 'text/html');
-      document.body.innerHTML = doc.body.innerHTML;
-    }}
-  }}).catch(function() {{}});
-}}, 3000);
+// Poll /setup/status to detect when server is claimed.
+// If a recovery key is returned, show it before redirecting to the guide.
+var token = new URLSearchParams(window.location.search).get('token');
+var pollInterval = setInterval(function() {{
+  fetch('/setup/status?token=' + encodeURIComponent(token))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+      if (data.claimed) {{
+        clearInterval(pollInterval);
+        if (data.recovery_key) {{
+          showRecoveryKey(data.recovery_key);
+        }} else {{
+          window.location.href = '/';
+        }}
+      }}
+    }})
+    .catch(function() {{}});
+}}, 2000);
+
+function showRecoveryKey(key) {{
+  var formatted = key.match(/.{{1,4}}/g).join('-');
+  document.body.innerHTML = '\
+<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;\
+background:#0f0f1a;color:#e0e0e6;min-height:100vh;display:flex;justify-content:center;\
+align-items:center;text-align:center;">\
+<div style="max-width:520px;padding:32px 24px;">\
+  <div style="font-size:3em;margin-bottom:16px;">&#x2705;</div>\
+  <h1 style="font-size:1.5em;color:#fff;margin:0 0 12px;">Server Claimed Successfully</h1>\
+  <p style="color:#9999bb;line-height:1.6;margin-bottom:24px;">\
+    Save your <strong style="color:#fff;">recovery key</strong> below. It is the\
+    <strong style="color:#ffaa44;">only way</strong> to reclaim your server if you lose your device.\
+    This key is shown <strong style="color:#ffaa44;">once</strong> and never stored on the server.\
+  </p>\
+  <div style="background:#1a1a2e;border:1px solid #2a2a44;border-radius:10px;\
+  padding:20px;margin-bottom:16px;">\
+    <div style="font-size:0.75em;color:#7777aa;text-transform:uppercase;\
+    letter-spacing:0.08em;margin-bottom:10px;">Recovery Key</div>\
+    <div id="rk-display" style="font-family:SF Mono,Fira Code,Consolas,monospace;\
+    font-size:0.9em;color:#88cc88;word-break:break-all;line-height:1.8;\
+    user-select:all;">' + formatted + '</div>\
+    <button onclick="copyRK()" id="rk-copy" style="margin-top:12px;padding:8px 20px;\
+    background:#2a2a44;color:#ccccee;border:1px solid #3a3a55;border-radius:6px;\
+    font-size:0.85em;cursor:pointer;">Copy Recovery Key</button>\
+  </div>\
+  <div style="background:rgba(255,180,50,0.08);border:1px solid rgba(255,180,50,0.2);\
+  border-radius:8px;padding:12px 16px;font-size:0.85em;color:#ddaa44;margin-bottom:20px;">\
+    <strong>Write this down or save it in a password manager.</strong><br>\
+    If you lose your device AND this key, you must redeploy with a fresh key volume.\
+  </div>\
+  <button onclick="window.location.href=\\'/\\'" style="padding:10px 28px;background:#2a4a2a;\
+  color:#88cc88;border:1px solid #3a6a3a;border-radius:6px;font-size:0.95em;\
+  cursor:pointer;">I\'ve Saved It &mdash; Continue to Setup</button>\
+</div>\
+</div>';
+  window._rkRaw = key;
+}}
+
+function copyRK() {{
+  var key = window._rkRaw || '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {{
+    navigator.clipboard.writeText(key).then(function() {{
+      document.getElementById('rk-copy').textContent = 'Copied!';
+      setTimeout(function() {{
+        document.getElementById('rk-copy').textContent = 'Copy Recovery Key';
+      }}, 2000);
+    }});
+  }}
+}}
 </script>
 </body>
 </html>"#

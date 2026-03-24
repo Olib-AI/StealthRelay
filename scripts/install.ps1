@@ -223,11 +223,13 @@ function Register-RelayService {
         Start-Sleep -Seconds 2
     }
 
-    $binPathEscaped = "`"$BinaryPath`" serve --config `"$ConfigPath`""
-    sc.exe create $ServiceName binPath= $binPathEscaped start= auto DisplayName= $ServiceDisplayName | Out-Null
-    sc.exe description $ServiceName "Zero-knowledge WebSocket relay for StealthOS" | Out-Null
-    # Set STEALTH_NO_BROWSER for the service environment
-    # Services run in session 0, browser open would fail anyway
+    $binPathValue = "`"$BinaryPath`" serve --config `"$ConfigPath`""
+    $scArgs = @("create", $ServiceName, "binPath=", $binPathValue, "start=", "auto", "DisplayName=", $ServiceDisplayName)
+    $scResult = & sc.exe @scArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fatal "Failed to create service: $scResult"
+    }
+    & sc.exe description $ServiceName "Zero-knowledge WebSocket relay for StealthOS" 2>&1 | Out-Null
 
     Write-Success "Windows Service registered"
 }

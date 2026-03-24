@@ -362,20 +362,41 @@ pub fn print_ready_banner(host_key_hex: &str) {
 }
 
 /// Save the host binding to disk with restrictive permissions.
+///
+/// Writes to a temporary file first with 0o600 permissions, then atomically
+/// renames it into place. This avoids a TOCTOU window where the file exists
+/// with the default umask before permissions are tightened.
 fn save_binding(key_dir: &Path, binding: &HostBinding) -> Result<(), ClaimError> {
+    use std::io::Write;
+
     let binding_path = key_dir.join(BINDING_FILENAME);
+    let tmp_path = key_dir.join(".host_binding.json.tmp");
     let json = serde_json::to_string_pretty(binding)
         .map_err(|e| ClaimError::Io(std::io::Error::other(e)))?;
 
-    std::fs::write(&binding_path, json.as_bytes()).map_err(ClaimError::Io)?;
-
-    // Set file permissions to 0600 (owner read/write only) on Unix.
-    #[cfg(unix)]
+    // Write to temp file with restrictive permissions from the start.
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&binding_path, perms).map_err(ClaimError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .map_err(ClaimError::Io)?;
+            file.write_all(json.as_bytes()).map_err(ClaimError::Io)?;
+            file.sync_all().map_err(ClaimError::Io)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp_path, json.as_bytes()).map_err(ClaimError::Io)?;
+        }
     }
+
+    // Atomic rename into place.
+    std::fs::rename(&tmp_path, &binding_path).map_err(ClaimError::Io)?;
 
     Ok(())
 }

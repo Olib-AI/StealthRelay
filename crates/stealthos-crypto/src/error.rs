@@ -71,6 +71,10 @@ pub enum CryptoError {
     /// Serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    /// A catch-all for contextual crypto errors (e.g., missing passphrase).
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Convenience alias used throughout the crate.

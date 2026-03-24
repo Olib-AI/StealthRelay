@@ -86,8 +86,18 @@ struct SetupQuery {
 /// merged with the health router via `Router::merge`.
 pub fn setup_router(state: Arc<SetupState>) -> Router {
     Router::new()
+        .route("/", get(root_handler))
         .route("/setup", get(setup_handler))
         .with_state(state)
+}
+
+/// GET / — redirects to /setup (with token) when unclaimed, shows guide when claimed.
+async fn root_handler(State(state): State<Arc<SetupState>>) -> impl IntoResponse {
+    if state.is_claimed() {
+        (StatusCode::OK, Html(claimed_page()))
+    } else {
+        (StatusCode::OK, Html(unclaimed_root_page()))
+    }
 }
 
 /// GET /setup?token=<TOKEN>
@@ -359,15 +369,15 @@ fn render_qr_to_svg(data: &str) -> String {
     svg
 }
 
-/// HTML page shown after the server has been claimed.
-fn claimed_page() -> String {
+/// HTML page shown when visiting `/` before claiming.
+fn unclaimed_root_page() -> String {
     String::from(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay - Server Claimed</title>
+<title>StealthOS Relay</title>
 <style>
   body {
     margin: 0; padding: 0;
@@ -380,20 +390,471 @@ fn claimed_page() -> String {
     align-items: center;
     text-align: center;
   }
-  .container { max-width: 400px; padding: 32px 24px; }
-  .check { font-size: 3em; margin-bottom: 16px; }
+  .container { max-width: 420px; padding: 32px 24px; }
   h1 { font-size: 1.4em; color: #fff; margin: 0 0 12px 0; }
   p { color: #9999bb; line-height: 1.6; }
+  code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
 </style>
 </head>
 <body>
 <div class="container">
-  <div class="check">&#x2705;</div>
-  <h1>Server Claimed</h1>
+  <h1>StealthOS Relay</h1>
   <p>
-    This server has been claimed and is ready to accept connections.
-    You can close this page.
+    This server is waiting to be claimed.<br>
+    Check the server logs for the setup URL with the security token.
   </p>
+</div>
+</body>
+</html>"#,
+    )
+}
+
+/// HTML page shown after the server has been claimed.
+/// Includes step-by-step guides for setting up free HTTPS tunnels.
+fn claimed_page() -> String {
+    String::from(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StealthOS Relay - Server Ready</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0e6;
+    line-height: 1.6;
+  }
+  .page { max-width: 720px; margin: 0 auto; padding: 32px 24px 64px; }
+  .hero {
+    text-align: center;
+    padding: 40px 0 32px;
+    border-bottom: 1px solid #1e1e36;
+    margin-bottom: 32px;
+  }
+  .hero .icon { font-size: 3em; margin-bottom: 12px; }
+  .hero h1 { font-size: 1.6em; color: #fff; margin: 0 0 8px; }
+  .hero p { color: #9999bb; margin: 0; font-size: 0.95em; }
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 16px;
+  }
+  .status-item {
+    background: #1a1a2e;
+    border: 1px solid #2a2a44;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 0.85em;
+  }
+  .status-item .label { color: #7777aa; }
+  .status-item .value { color: #88cc88; font-family: monospace; }
+  h2 {
+    font-size: 1.25em;
+    color: #fff;
+    margin: 36px 0 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1e1e36;
+  }
+  h3 { font-size: 1.05em; color: #ccccee; margin: 24px 0 8px; }
+  p, li { color: #b0b0cc; font-size: 0.92em; }
+  a { color: #6699ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .next-step {
+    background: #1a1a2e;
+    border: 1px solid #2a2a44;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 20px 0;
+  }
+  .next-step h3 { margin-top: 0; color: #fff; }
+  .tunnel-option {
+    background: #12121f;
+    border: 1px solid #22223a;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .tunnel-option h3 {
+    margin: 0 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tunnel-option .badge {
+    font-size: 0.7em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: normal;
+  }
+  .badge-easy { background: #1a3a2a; color: #66cc88; }
+  .badge-rec  { background: #1a2a3a; color: #66aaff; }
+  .tunnel-option .tagline {
+    color: #7777aa;
+    font-size: 0.85em;
+    margin: 0 0 12px;
+  }
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 32px;
+    margin-bottom: 10px;
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    width: 22px; height: 22px;
+    background: #2a2a44;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 22px;
+    font-size: 0.75em;
+    color: #8888bb;
+  }
+  code {
+    background: #1a1a2e;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    color: #ccccee;
+  }
+  pre {
+    background: #0d0d18;
+    border: 1px solid #22223a;
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    font-size: 0.85em;
+    line-height: 1.5;
+    margin: 10px 0;
+  }
+  pre code { background: none; padding: 0; color: #ccddee; }
+  .copy-wrap { position: relative; }
+  .copy-wrap button {
+    position: absolute;
+    top: 8px; right: 8px;
+    background: #2a2a44;
+    border: 1px solid #3a3a55;
+    color: #aaaacc;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 0.75em;
+    cursor: pointer;
+  }
+  .copy-wrap button:hover { background: #3a3a55; }
+  .note {
+    background: rgba(100, 150, 255, 0.06);
+    border: 1px solid rgba(100, 150, 255, 0.15);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 0.85em;
+    color: #99aacc;
+    margin: 12px 0;
+  }
+  .warn {
+    background: rgba(255, 180, 50, 0.06);
+    border: 1px solid rgba(255, 180, 50, 0.15);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 0.85em;
+    color: #ccaa66;
+    margin: 12px 0;
+  }
+  .footer {
+    text-align: center;
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid #1e1e36;
+    color: #555577;
+    font-size: 0.8em;
+  }
+  .footer a { color: #6677aa; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="hero">
+    <div class="icon">&#x2705;</div>
+    <h1>Server Claimed &amp; Running</h1>
+    <p>Your StealthOS Relay is ready. Now let's make it reachable from the internet.</p>
+    <div class="status-bar">
+      <div class="status-item">
+        <span class="label">WebSocket</span>
+        <span class="value">ws://localhost:9090</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Status</span>
+        <span class="value">Online</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="next-step">
+    <h3>What's next?</h3>
+    <p>
+      Your relay is running on your local network, but your friends can't reach it from the
+      internet yet. You need a <strong>secure tunnel</strong> that gives your server a public
+      HTTPS address &mdash; no port forwarding, no domain purchase, completely free.
+    </p>
+    <p>Pick one of the options below. We recommend starting with <strong>ngrok</strong> if
+    you want the fastest setup, or <strong>Cloudflare Tunnel</strong> for a permanent solution.</p>
+  </div>
+
+  <!-- ── Option 1: ngrok ────────────────────────────────────── -->
+  <div class="tunnel-option">
+    <h3>
+      ngrok
+      <span class="badge badge-easy">Easiest</span>
+    </h3>
+    <p class="tagline">One command, instant HTTPS. Free tier includes 1 static domain.</p>
+
+    <ol class="steps">
+      <li>
+        Create a free account at
+        <a href="https://ngrok.com/signup" target="_blank" rel="noopener">ngrok.com/signup</a>
+      </li>
+      <li>
+        Install ngrok:
+        <div class="copy-wrap">
+          <pre><code># macOS
+brew install ngrok
+
+# Linux (snap)
+sudo snap install ngrok
+
+# Or download from https://ngrok.com/download</code></pre>
+        </div>
+      </li>
+      <li>
+        Add your auth token (from the ngrok dashboard):
+        <div class="copy-wrap">
+          <pre><code>ngrok config add-authtoken YOUR_TOKEN</code></pre>
+        </div>
+      </li>
+      <li>
+        Start the tunnel:
+        <div class="copy-wrap">
+          <pre><code>ngrok tcp 9090</code></pre>
+        </div>
+        <div class="note">
+          ngrok will display a forwarding address like <code>tcp://0.tcp.ngrok.io:12345</code>.
+          Use this as your server URL in the StealthOS app.
+        </div>
+      </li>
+      <li>
+        <strong>For a permanent address</strong>, claim your free static domain in the
+        <a href="https://dashboard.ngrok.com/domains" target="_blank" rel="noopener">ngrok dashboard</a>, then:
+        <div class="copy-wrap">
+          <pre><code>ngrok tcp --domain=your-name.ngrok-free.app 9090</code></pre>
+        </div>
+      </li>
+    </ol>
+    <div class="note">
+      <strong>Free tier:</strong> 1 static domain, 1 online ngrok process, 20,000 connections/month.
+      Plenty for personal use.
+    </div>
+  </div>
+
+  <!-- ── Option 2: Cloudflare Tunnel ────────────────────────── -->
+  <div class="tunnel-option">
+    <h3>
+      Cloudflare Tunnel
+      <span class="badge badge-rec">Recommended for permanent setup</span>
+    </h3>
+    <p class="tagline">Unlimited bandwidth, no port forwarding, keeps your IP hidden. Requires a free Cloudflare account.</p>
+
+    <ol class="steps">
+      <li>
+        Create a free account at
+        <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">dash.cloudflare.com</a>
+      </li>
+      <li>
+        Install cloudflared:
+        <div class="copy-wrap">
+          <pre><code># macOS
+brew install cloudflared
+
+# Ubuntu / Debian
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+  | sudo tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
+  | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update && sudo apt install cloudflared
+
+# Or download from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/</code></pre>
+        </div>
+      </li>
+      <li>
+        Log in to Cloudflare:
+        <div class="copy-wrap">
+          <pre><code>cloudflared tunnel login</code></pre>
+        </div>
+        <p>This opens a browser window to authorize your account.</p>
+      </li>
+      <li>
+        Create a tunnel:
+        <div class="copy-wrap">
+          <pre><code>cloudflared tunnel create stealth-relay</code></pre>
+        </div>
+      </li>
+      <li>
+        Route traffic to your relay:
+        <div class="copy-wrap">
+          <pre><code>cloudflared tunnel route dns stealth-relay relay.yourdomain.com</code></pre>
+        </div>
+      </li>
+      <li>
+        Start the tunnel:
+        <div class="copy-wrap">
+          <pre><code>cloudflared tunnel --url ws://localhost:9090 run stealth-relay</code></pre>
+        </div>
+      </li>
+      <li>
+        Use <code>wss://relay.yourdomain.com</code> as your server URL in the StealthOS app.
+      </li>
+    </ol>
+    <div class="note">
+      <strong>Free tier:</strong> Unlimited bandwidth, unlimited tunnels.
+      You need a domain on Cloudflare (can transfer an existing one, or buy one from ~$10/year).
+    </div>
+    <div class="note">
+      <strong>Don't have a domain?</strong> Use the quick tunnel instead &mdash; no domain needed:
+      <pre><code>cloudflared tunnel --url ws://localhost:9090</code></pre>
+      This gives you a temporary <code>https://xxxx-xxxx.trycloudflare.com</code> address.
+      It changes every time you restart, but it's great for testing.
+    </div>
+  </div>
+
+  <!-- ── Option 3: Tailscale Funnel ─────────────────────────── -->
+  <div class="tunnel-option">
+    <h3>
+      Tailscale Funnel
+      <span class="badge badge-easy">No domain needed</span>
+    </h3>
+    <p class="tagline">Expose your relay over HTTPS using your Tailscale network. Free for personal use.</p>
+
+    <ol class="steps">
+      <li>
+        Create a free account at
+        <a href="https://tailscale.com/signup" target="_blank" rel="noopener">tailscale.com</a>
+        and install Tailscale on this machine.
+        <div class="copy-wrap">
+          <pre><code># macOS
+brew install tailscale
+
+# Ubuntu / Debian
+curl -fsSL https://tailscale.com/install.sh | sh
+
+# Or see https://tailscale.com/download</code></pre>
+        </div>
+      </li>
+      <li>
+        Connect to your Tailscale network:
+        <div class="copy-wrap">
+          <pre><code>sudo tailscale up</code></pre>
+        </div>
+      </li>
+      <li>
+        Enable Funnel for port 9090:
+        <div class="copy-wrap">
+          <pre><code>sudo tailscale funnel 9090</code></pre>
+        </div>
+      </li>
+      <li>
+        Tailscale will show you your public URL, something like:
+        <code>https://your-machine.tailnet-name.ts.net</code>
+        <p>Use this as your server URL in the StealthOS app (it supports WebSocket over HTTPS).</p>
+      </li>
+    </ol>
+    <div class="note">
+      <strong>Free tier:</strong> Up to 3 users, HTTPS included, no domain needed.
+      Your URL is based on your machine name and Tailscale account.
+    </div>
+  </div>
+
+  <!-- ── Comparison ──────────────────────────────────────────── -->
+  <h2>Which one should I pick?</h2>
+  <table style="width:100%; border-collapse:collapse; font-size:0.88em; margin-top:12px;">
+    <thead>
+      <tr style="border-bottom:1px solid #2a2a44; text-align:left;">
+        <th style="padding:8px; color:#9999bb;"></th>
+        <th style="padding:8px; color:#9999bb;">ngrok</th>
+        <th style="padding:8px; color:#9999bb;">Cloudflare</th>
+        <th style="padding:8px; color:#9999bb;">Tailscale</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom:1px solid #1e1e36;">
+        <td style="padding:8px; color:#8888bb;">Setup time</td>
+        <td style="padding:8px;">~2 min</td>
+        <td style="padding:8px;">~10 min</td>
+        <td style="padding:8px;">~5 min</td>
+      </tr>
+      <tr style="border-bottom:1px solid #1e1e36;">
+        <td style="padding:8px; color:#8888bb;">Needs domain?</td>
+        <td style="padding:8px;">No</td>
+        <td style="padding:8px;">Yes (or use quick tunnel)</td>
+        <td style="padding:8px;">No</td>
+      </tr>
+      <tr style="border-bottom:1px solid #1e1e36;">
+        <td style="padding:8px; color:#8888bb;">Permanent URL</td>
+        <td style="padding:8px;">1 free static domain</td>
+        <td style="padding:8px;">Yes (your domain)</td>
+        <td style="padding:8px;">Yes (*.ts.net)</td>
+      </tr>
+      <tr style="border-bottom:1px solid #1e1e36;">
+        <td style="padding:8px; color:#8888bb;">Bandwidth</td>
+        <td style="padding:8px;">1 GB/mo free</td>
+        <td style="padding:8px;">Unlimited</td>
+        <td style="padding:8px;">Unlimited</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; color:#8888bb;">Best for</td>
+        <td style="padding:8px;">Quick testing</td>
+        <td style="padding:8px;">Permanent setup</td>
+        <td style="padding:8px;">Personal use</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="warn">
+    <strong>Important:</strong> After setting up your tunnel, update the server URL in the
+    StealthOS app to the new <code>wss://</code> address. Your friends will use this address
+    in their invitation links.
+  </div>
+
+  <h2>Verify it works</h2>
+  <p>Once your tunnel is running, test from any device:</p>
+  <div class="copy-wrap">
+    <pre><code># Replace with your tunnel URL
+curl -i --http1.1 \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" \
+  -H "Sec-WebSocket-Key: dGVzdA==" \
+  https://your-tunnel-url/</code></pre>
+  </div>
+  <p>You should see a <code>101 Switching Protocols</code> response. That means your relay
+  is live and reachable from the internet.</p>
+
+  <div class="footer">
+    <p>
+      <a href="https://github.com/Olib-AI/StealthRelay" target="_blank" rel="noopener">StealthRelay</a>
+      by <a href="https://www.olib.ai" target="_blank" rel="noopener">Olib AI</a>
+      &mdash;
+      <a href="https://www.stealthos.app" target="_blank" rel="noopener">StealthOS</a>
+    </p>
+  </div>
+
 </div>
 </body>
 </html>"#,

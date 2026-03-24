@@ -189,37 +189,55 @@ impl HostIdentity {
     /// Magic number for the integrity-protected key file format.
     const KEY_FILE_MAGIC: &'static [u8; 4] = b"STKY";
 
+    /// v3 format version byte (encrypted-at-rest).
+    const KEY_FILE_V3: u8 = 0x03;
+
+    /// PBKDF2 iteration count for passphrase-based key derivation.
+    /// 600,000 iterations of HMAC-SHA256, aligned with OWASP 2023 guidance.
+    const PBKDF2_ITERATIONS: u32 = 600_000;
+
     /// Persist the seed to a file with restrictive permissions (0o600).
     ///
-    /// # File Format (v2, 68 bytes)
+    /// If `passphrase` is `Some`, the seed is encrypted at rest using
+    /// ChaCha20-Poly1305 with a key derived via PBKDF2-HMAC-SHA256 (v3
+    /// format). Otherwise, the seed is stored in the legacy v2 plaintext
+    /// format.
+    ///
+    /// # File Format — v2 (plaintext, 68 bytes)
     ///
     /// ```text
     /// [0..4]   magic "STKY"
-    /// [4..36]  32-byte seed
+    /// [4..36]  32-byte seed (plaintext)
     /// [36..68] 32-byte BLAKE2b-256 MAC over magic || seed
+    /// ```
+    ///
+    /// # File Format — v3 (encrypted, 85 bytes)
+    ///
+    /// ```text
+    /// [0..4]   magic "STKY"
+    /// [4..5]   version 0x03
+    /// [5..21]  16-byte PBKDF2 salt (random)
+    /// [21..33] 12-byte ChaCha20-Poly1305 nonce (random)
+    /// [33..65] 32-byte encrypted seed
+    /// [65..81] 16-byte Poly1305 authentication tag
+    /// [81..85] 4-byte sentinel "DONE" (detects wrong passphrase vs corruption)
     /// ```
     ///
     /// # Security Properties
     ///
     /// - File permissions are set to owner-only read/write (mode 0o600).
     /// - Only the seed is stored — keys are re-derived on load.
-    /// - A BLAKE2b-256 MAC detects file corruption or tampering.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        use blake2::Blake2b;
-        use blake2::digest::FixedOutput;
-        use blake2::digest::Update;
-        use blake2::digest::consts::U32;
+    /// - v3: passphrase → PBKDF2-HMAC-SHA256 (600k iterations) → 32-byte key
+    ///   → ChaCha20-Poly1305 AEAD encrypts the seed. The salt and nonce are
+    ///   generated from `OsRng`.
+    pub fn save_with_passphrase(&self, path: &Path, passphrase: Option<&str>) -> Result<()> {
         use std::fs;
         use std::io::Write;
 
-        let mut payload = Vec::with_capacity(68);
-        payload.extend_from_slice(Self::KEY_FILE_MAGIC);
-        payload.extend_from_slice(&self.seed.0);
-
-        let mut hasher = Blake2b::<U32>::default();
-        hasher.update(&payload);
-        let mac = hasher.finalize_fixed();
-        payload.extend_from_slice(&mac);
+        let payload = match passphrase {
+            Some(pp) if !pp.is_empty() => self.serialize_v3(pp.as_bytes()),
+            _ => self.serialize_v2(),
+        };
 
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -232,37 +250,99 @@ impl HostIdentity {
         Ok(())
     }
 
+    /// Convenience wrapper that reads the passphrase from
+    /// `STEALTH_KEY_PASSPHRASE` environment variable.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let passphrase = std::env::var("STEALTH_KEY_PASSPHRASE").ok();
+        self.save_with_passphrase(path, passphrase.as_deref())
+    }
+
     /// Load a host identity from a previously saved seed file.
     ///
-    /// # File Format (68 bytes)
-    ///
-    /// ```text
-    /// [0..4]   magic "STKY"
-    /// [4..36]  32-byte seed
-    /// [36..68] 32-byte BLAKE2b-256 MAC over magic || seed
-    /// ```
-    ///
-    /// # Security Properties
-    ///
-    /// - Validates file size (exactly 68 bytes).
-    /// - Verifies the BLAKE2b-256 MAC with constant-time comparison to
-    ///   detect corruption or tampering.
-    /// - Re-derives all keys from the loaded seed.
-    pub fn load(path: &Path) -> Result<Self> {
-        use blake2::Blake2b;
-        use blake2::digest::FixedOutput;
-        use blake2::digest::Update;
-        use blake2::digest::consts::U32;
-
+    /// Automatically detects v2 (plaintext) or v3 (encrypted) format.
+    /// For v3 files, `passphrase` must be `Some`. For v2 files, it is ignored.
+    pub fn load_with_passphrase(path: &Path, passphrase: Option<&str>) -> Result<Self> {
         let data = std::fs::read(path)?;
 
-        if data.len() != 68 {
+        if data.len() < 5 {
             return Err(CryptoError::InvalidKeyLength);
         }
 
         if &data[..4] != Self::KEY_FILE_MAGIC {
             return Err(CryptoError::IntegrityCheckFailed);
         }
+
+        // Detect format by size: v3 = 85 bytes, v2 = 68 bytes.
+        if data.len() == 85 && data[4] == Self::KEY_FILE_V3 {
+            Self::load_v3(&data, passphrase)
+        } else if data.len() == 68 {
+            Self::load_v2(&data)
+        } else {
+            Err(CryptoError::InvalidKeyLength)
+        }
+    }
+
+    /// Convenience wrapper that reads the passphrase from
+    /// `STEALTH_KEY_PASSPHRASE` environment variable.
+    pub fn load(path: &Path) -> Result<Self> {
+        let passphrase = std::env::var("STEALTH_KEY_PASSPHRASE").ok();
+        Self::load_with_passphrase(path, passphrase.as_deref())
+    }
+
+    /// Serialize seed in v2 plaintext format (68 bytes).
+    fn serialize_v2(&self) -> Vec<u8> {
+        use blake2::Blake2b;
+        use blake2::digest::FixedOutput;
+        use blake2::digest::Update;
+        use blake2::digest::consts::U32;
+
+        let mut payload = Vec::with_capacity(68);
+        payload.extend_from_slice(Self::KEY_FILE_MAGIC);
+        payload.extend_from_slice(&self.seed.0);
+
+        let mut hasher = Blake2b::<U32>::default();
+        hasher.update(&payload);
+        let mac = hasher.finalize_fixed();
+        payload.extend_from_slice(&mac);
+        payload
+    }
+
+    /// Serialize seed in v3 encrypted format (85 bytes).
+    fn serialize_v3(&self, passphrase: &[u8]) -> Vec<u8> {
+        use chacha20poly1305::aead::Aead;
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        let key = pbkdf2_derive(passphrase, &salt, Self::PBKDF2_ITERATIONS);
+        let cipher = ChaCha20Poly1305::new((&key).into());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext = cipher
+            .encrypt(nonce, self.seed.0.as_slice())
+            .expect("ChaCha20-Poly1305 encryption should not fail");
+
+        let mut payload = Vec::with_capacity(85);
+        payload.extend_from_slice(Self::KEY_FILE_MAGIC); // [0..4]
+        payload.push(Self::KEY_FILE_V3); // [4]
+        payload.extend_from_slice(&salt); // [5..21]
+        payload.extend_from_slice(&nonce_bytes); // [21..33]
+        payload.extend_from_slice(&ciphertext); // [33..81] (32 + 16 tag)
+        payload.extend_from_slice(b"DONE"); // [81..85] sentinel
+        payload
+    }
+
+    /// Load from v2 plaintext format.
+    fn load_v2(data: &[u8]) -> Result<Self> {
+        use blake2::Blake2b;
+        use blake2::digest::FixedOutput;
+        use blake2::digest::Update;
+        use blake2::digest::consts::U32;
+
+        debug_assert!(data.len() == 68);
 
         // Recompute MAC over magic || seed.
         let mut hasher = Blake2b::<U32>::default();
@@ -277,6 +357,50 @@ impl HostIdentity {
 
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&data[4..36]);
+        Ok(Self::from_seed(seed))
+    }
+
+    /// Load from v3 encrypted format.
+    fn load_v3(data: &[u8], passphrase: Option<&str>) -> Result<Self> {
+        use chacha20poly1305::aead::Aead;
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
+
+        debug_assert!(data.len() == 85);
+
+        // Verify sentinel to help distinguish wrong passphrase from corruption.
+        if &data[81..85] != b"DONE" {
+            return Err(CryptoError::IntegrityCheckFailed);
+        }
+
+        let passphrase = passphrase.ok_or_else(|| {
+            CryptoError::Other(
+                "key file is encrypted but no passphrase provided (set STEALTH_KEY_PASSPHRASE)"
+                    .into(),
+            )
+        })?;
+
+        if passphrase.is_empty() {
+            return Err(CryptoError::Other("passphrase is empty".into()));
+        }
+
+        let salt = &data[5..21];
+        let nonce_bytes = &data[21..33];
+        let ciphertext = &data[33..81]; // 32 encrypted + 16 tag = 48 bytes
+
+        let key = pbkdf2_derive(passphrase.as_bytes(), salt, Self::PBKDF2_ITERATIONS);
+        let cipher = ChaCha20Poly1305::new((&key).into());
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| CryptoError::Other("decryption failed — wrong passphrase?".into()))?;
+
+        if plaintext.len() != 32 {
+            return Err(CryptoError::InvalidKeyLength);
+        }
+
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&plaintext);
         Ok(Self::from_seed(seed))
     }
 
@@ -347,6 +471,20 @@ impl HostPublicKeys {
     pub fn fingerprint_eq(&self, other: &[u8; 32]) -> bool {
         self.fingerprint.ct_eq(other).into()
     }
+}
+
+/// Derive a 32-byte encryption key from a passphrase using PBKDF2-HMAC-SHA256.
+///
+/// This is a standard password-based key derivation function suitable for
+/// encrypting key material at rest. The iteration count should be at least
+/// 600,000 per OWASP 2023 recommendations.
+fn pbkdf2_derive(passphrase: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    use hmac::Hmac;
+
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2::<Hmac<Sha256>>(passphrase, salt, iterations, &mut key)
+        .expect("32-byte output is valid for PBKDF2-HMAC-SHA256");
+    key
 }
 
 /// Trait for platform-specific file permission support.
@@ -466,5 +604,80 @@ mod tests {
         let pk = id.public_keys();
         let expected = compute_fingerprint(&pk.ed25519, &pk.x25519);
         assert_eq!(id.fingerprint(), expected);
+    }
+
+    #[test]
+    fn save_and_load_v3_encrypted() {
+        let dir = std::env::temp_dir().join("stealthos_test_identity_v3");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_v3.key");
+
+        let id = HostIdentity::generate();
+        let passphrase = "test-passphrase-123";
+
+        // Save with passphrase (v3 format).
+        id.save_with_passphrase(&path, Some(passphrase)).unwrap();
+
+        // Verify v3 format: 85 bytes, version byte 0x03.
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data.len(), 85, "v3 file should be 85 bytes");
+        assert_eq!(&data[..4], b"STKY");
+        assert_eq!(data[4], 0x03);
+        assert_eq!(&data[81..85], b"DONE");
+
+        // Load with same passphrase.
+        let loaded = HostIdentity::load_with_passphrase(&path, Some(passphrase)).unwrap();
+        assert_eq!(id.fingerprint(), loaded.fingerprint());
+        assert_eq!(id.public_keys().ed25519, loaded.public_keys().ed25519);
+
+        // Wrong passphrase must fail.
+        let result = HostIdentity::load_with_passphrase(&path, Some("wrong-passphrase"));
+        assert!(result.is_err(), "wrong passphrase must fail");
+
+        // Missing passphrase must fail.
+        let result = HostIdentity::load_with_passphrase(&path, None);
+        assert!(result.is_err(), "missing passphrase must fail");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn v2_file_loads_without_passphrase() {
+        let dir = std::env::temp_dir().join("stealthos_test_identity_v2_compat");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_v2_compat.key");
+
+        // Save without passphrase (v2).
+        let id = HostIdentity::generate();
+        id.save_with_passphrase(&path, None).unwrap();
+
+        // Should be 68 bytes (v2).
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data.len(), 68);
+
+        // Loads fine without passphrase.
+        let loaded = HostIdentity::load_with_passphrase(&path, None).unwrap();
+        assert_eq!(id.fingerprint(), loaded.fingerprint());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn empty_passphrase_saves_v2() {
+        let dir = std::env::temp_dir().join("stealthos_test_identity_empty_pp");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_empty_pp.key");
+
+        let id = HostIdentity::generate();
+        id.save_with_passphrase(&path, Some("")).unwrap();
+
+        // Empty passphrase should fall back to v2.
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(data.len(), 68, "empty passphrase should produce v2 format");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

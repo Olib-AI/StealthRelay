@@ -212,6 +212,16 @@ create_dirs_and_config() {
 
     $SUDO_CMD mkdir -p "$LOG_DIR"
 
+    # On macOS with LaunchAgent (non-root), the service runs as the current
+    # user but directories were created with sudo. Fix ownership so the
+    # binary can write keys and config.
+    if [ "$OS" = "darwin" ] && [ "$USE_SUDO" = true ]; then
+        $SUDO_CMD chown -R "$(whoami)" "$DATA_DIR"
+        if [ "$CONFIG_DIR" != "$DATA_DIR" ]; then
+            $SUDO_CMD chown -R "$(whoami)" "$CONFIG_DIR"
+        fi
+    fi
+
     if [ -f "$CONFIG_PATH" ]; then
         info "Config already exists at ${CONFIG_PATH}, keeping it"
         return

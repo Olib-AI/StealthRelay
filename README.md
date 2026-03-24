@@ -19,6 +19,60 @@ The relay operates on a zero-knowledge model: deploy it on your own infrastructu
 
 Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 166 unit tests, and 30 E2E tests.
 
+## Quick Start
+
+### 1. Install
+
+**One-line install** (Linux / macOS / Raspberry Pi):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash
+```
+
+**Windows** (run PowerShell as Administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.ps1 | iex
+```
+
+The installer downloads a pre-built binary, verifies its SHA256 checksum, creates a system service, and starts the server. No Docker, no dependencies.
+
+> **Prefer Docker?** See [Docker Compose](#docker-compose) or [One-Click Cloud Deploy](#one-click-deploy) below.
+
+### 2. Claim the Server
+
+After installation, a **setup page** opens automatically in your browser:
+
+<p align="center">
+  <code>http://localhost:9091/setup?token=&lt;TOKEN&gt;</code>
+</p>
+
+The setup page displays a **QR code** — scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
+
+> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden — even if someone can reach port 9091.
+
+> **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
+
+Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
+- Enter your server URL (`ws://your-ip:9090`)
+- Tap **Scan QR Code** and point your camera at the setup page
+- Or tap **Enter Code Manually** and paste the code
+
+The server is now bound to your device. A **recovery key** is shown once — **save it securely**. It is the only way to reclaim the server if you lose your device.
+
+### 3. Create an Invitation in the App
+
+Once claimed, tap **"Invite a Friend"** in the pool lobby. Share the generated link or QR code.
+
+### 4. Share and Connect
+
+When friends open the invitation:
+- The server forwards their join request to you
+- You approve or reject from your device
+- Any connected member can also create invite links — but **you always approve**
+
+Chat, play games, share files — all end-to-end encrypted. The server routes messages but can never read them.
+
 ## How It Works
 
 ```mermaid
@@ -27,8 +81,8 @@ sequenceDiagram
     participant Server as Your Server
     participant Friends as Friends
 
-    Host->>Server: 1. Deploy Docker
-    Host->>Server: 2. Scan QR from logs
+    Host->>Server: 1. Install (one-liner)
+    Host->>Server: 2. Scan QR from setup page
     Note over Server: Server claimed
 
     Host->>Server: 3. Create invitation
@@ -202,60 +256,6 @@ All display names received from clients are sanitized before logging or storage:
 - `no-new-privileges` security option
 - 256 MB memory limit
 - tmpfs for `/tmp` with `noexec,nosuid`
-
-## Quick Start
-
-### 1. Install
-
-**One-line install** (Linux / macOS / Raspberry Pi):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash
-```
-
-**Windows** (run PowerShell as Administrator):
-
-```powershell
-irm https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.ps1 | iex
-```
-
-The installer downloads a pre-built binary, verifies its SHA256 checksum, creates a system service, and starts the server. No Docker, no dependencies.
-
-> **Prefer Docker?** See [Docker Compose](#docker-compose) or [One-Click Cloud Deploy](#one-click-deploy) below.
-
-### 2. Claim the Server
-
-After installation, a **setup page** opens automatically in your browser:
-
-<p align="center">
-  <code>http://localhost:9091/setup?token=&lt;TOKEN&gt;</code>
-</p>
-
-The setup page displays a **QR code** — scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
-
-> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden — even if someone can reach port 9091.
-
-> **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
-
-Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
-- Enter your server URL (`ws://your-ip:9090`)
-- Tap **Scan QR Code** and point your camera at the setup page
-- Or tap **Enter Code Manually** and paste the code
-
-The server is now bound to your device. A **recovery key** is shown once — **save it securely**. It is the only way to reclaim the server if you lose your device.
-
-### 3. Create an Invitation in the App
-
-Once claimed, tap **"Invite a Friend"** in the pool lobby. Share the generated link or QR code.
-
-### 4. Share and Connect
-
-When friends open the invitation:
-- The server forwards their join request to you
-- You approve or reject from your device
-- Any connected member can also create invite links — but **you always approve**
-
-Chat, play games, share files — all end-to-end encrypted. The server routes messages but can never read them.
 
 ## Deployment
 

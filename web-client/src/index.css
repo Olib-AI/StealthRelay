@@ -1,0 +1,138 @@
+@import "tailwindcss";
+
+@theme {
+  --color-slate-950: #000000;
+  --color-slate-900: #1C1C1E;
+  --color-slate-800: #2C2C2E;
+  --color-slate-700: #38383A;
+  --color-slate-600: #48484A;
+  --color-slate-500: rgba(235, 235, 245, 0.3);
+  --color-slate-400: rgba(235, 235, 245, 0.6);
+  --color-slate-300: rgba(235, 235, 245, 0.8);
+  --color-slate-200: #EBEBF5;
+  --color-slate-100: #F2F2F7;
+  --color-glass: #1C1C1E;
+  --color-glass-border: transparent;
+  --color-ios-page: #000000;
+  --color-ios-surface: #1C1C1E;
+  --color-ios-tertiary: #2C2C2E;
+  --color-ios-separator: #38383A;
+  --color-ios-blue: #007AFF;
+  --color-ios-green: #30D158;
+  --color-ios-orange: #FF9F0A;
+  --color-ios-red: #FF453A;
+  --color-ios-purple: #BF5AF2;
+  --color-ios-cyan: #64D2FF;
+}
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #38383A transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: #38383A;
+    border-radius: 3px;
+  }
+
+  html, body, #root {
+    height: 100dvh;
+    overflow: hidden;
+    background: #000000;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', system-ui, sans-serif;
+  }
+
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  input, textarea {
+    outline: none;
+    font-size: 16px; /* prevents iOS zoom on focus */
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    background: #1C1C1E;
+    border: none;
+    border-radius: 12px;
+  }
+
+  .animate-drop {
+    animation: drop 0.3s ease-in forwards;
+  }
+
+  .animate-pulse-glow {
+    animation: pulse-glow 1.5s ease-in-out infinite;
+  }
+
+  .animate-explode {
+    animation: explode 0.3s ease-out;
+  }
+
+  .animate-slide-up {
+    animation: slide-up 0.3s ease-out;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.2s ease-out;
+  }
+
+  .animate-bubble-pulse {
+    animation: bubble-pulse 0.3s ease-out;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@keyframes drop {
+  from { transform: translateY(-100%); opacity: 0.5; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(59, 130, 246, 0.4); }
+  50% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.8); }
+}
+
+@keyframes explode {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.4); }
+  100% { transform: scale(1); }
+}
+
+@keyframes slide-up {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes bubble-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}

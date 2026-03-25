@@ -24,8 +24,8 @@ metrics_bind = "127.0.0.1:9091"
 # Maximum number of concurrent WebSocket connections.
 max_connections = 500
 
-# Maximum size of a single WebSocket message in bytes (64 KiB).
-max_message_size = 65536
+# Maximum size of a single WebSocket message in bytes (2 MiB).
+max_message_size = 2097152
 
 # Seconds of inactivity before a connection is closed (10 minutes).
 idle_timeout = 600

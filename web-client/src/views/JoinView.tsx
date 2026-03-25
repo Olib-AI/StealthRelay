@@ -1,0 +1,189 @@
+import { useState, useCallback } from 'react';
+import { Link2, QrCode, Shield, Loader2, AlertCircle, ArrowRight } from 'lucide-react';
+import { useConnectionStore } from '../stores/connection.ts';
+import { usePoolStore } from '../stores/pool.ts';
+import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts';
+import { transport } from '../transport/websocket.ts';
+import ProfileSetup from '../components/ProfileSetup.tsx';
+import QRScanner from '../components/QRScanner.tsx';
+
+function JoinView() {
+  const [inviteUrl, setInviteUrl] = useState('');
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [isValid, setIsValid] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const status = useConnectionStore((s) => s.status);
+  const error = useConnectionStore((s) => s.error);
+  const powProgress = useConnectionStore((s) => s.powProgress);
+  const userProfile = usePoolStore((s) => s.userProfile);
+
+  const validateUrl = useCallback((url: string) => {
+    setInviteUrl(url);
+    setParseError(null);
+    setIsValid(false);
+
+    if (url.trim().length === 0) return;
+
+    try {
+      const parsed = parseInvitationUrl(url);
+      if (isInvitationExpired(parsed)) {
+        setParseError('This invitation has expired.');
+        return;
+      }
+      setIsValid(true);
+    } catch (err) {
+      setParseError(err instanceof Error ? err.message : 'Invalid invitation URL');
+    }
+  }, []);
+
+  function handleJoin() {
+    if (!isValid || userProfile.displayName.trim().length === 0) return;
+    transport.connect(inviteUrl);
+  }
+
+  function handleQRScan(result: string) {
+    setShowScanner(false);
+    validateUrl(result);
+  }
+
+  async function handlePaste() {
+    try {
+      const text = await navigator.clipboard.readText();
+      validateUrl(text);
+    } catch {
+      // Clipboard access denied
+    }
+  }
+
+  const isConnecting = status === 'connecting' || status === 'waiting_approval';
+
+  return (
+    <div className="flex-1 flex flex-col items-center min-h-0 overflow-y-auto px-4 py-6 sm:justify-center bg-black">
+      <div className="w-full max-w-md space-y-5">
+        {/* Header */}
+        <div className="text-center space-y-2">
+          <div className="inline-flex items-center justify-center h-20 w-20 rounded-full mb-2" style={{ background: 'linear-gradient(135deg, #007AFF, #BF5AF2)' }}>
+            <Shield className="h-10 w-10 text-white" />
+          </div>
+          <h1 className="text-[28px] font-bold text-white">StealthRelay</h1>
+          <p className="text-[15px]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+            Join a pool to chat and play games with friends
+          </p>
+        </div>
+
+        {/* Profile Setup */}
+        <div className="bg-[#1C1C1E] rounded-xl p-4">
+          <h2 className="text-[15px] font-semibold text-white mb-3">Your Profile</h2>
+          <ProfileSetup />
+        </div>
+
+        {/* Join Section */}
+        <div className="bg-[#1C1C1E] rounded-xl p-4 space-y-3">
+          <h2 className="text-[15px] font-semibold text-white">Join a Pool</h2>
+
+          {/* Invitation URL input */}
+          <div className="space-y-2">
+            <div className="relative">
+              <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+                <Link2 className="h-4 w-4" />
+              </div>
+              <input
+                type="text"
+                value={inviteUrl}
+                onChange={(e) => validateUrl(e.target.value)}
+                placeholder="stealth://invite/..."
+                className="w-full pl-9 pr-16 py-3 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-[15px] text-white placeholder-[rgba(235,235,245,0.3)] focus:border-[#007AFF] transition-colors"
+                disabled={isConnecting}
+              />
+              <button
+                type="button"
+                onClick={handlePaste}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#007AFF] font-medium px-2 py-1 rounded-md bg-[#2C2C2E]"
+                disabled={isConnecting}
+              >
+                Paste
+              </button>
+            </div>
+
+            {parseError && (
+              <div className="flex items-start gap-2 text-xs text-[#FF453A]">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>{parseError}</span>
+              </div>
+            )}
+
+            {isValid && (
+              <p className="text-xs text-[#30D158] flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#30D158]" />
+                Valid invitation
+              </p>
+            )}
+          </div>
+
+          {/* QR Scanner button */}
+          <button
+            type="button"
+            onClick={() => setShowScanner(true)}
+            className="w-full flex items-center justify-center gap-2 py-3 bg-[#1C1C1E] border border-[#38383A] rounded-xl text-[15px] transition-colors"
+            style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            disabled={isConnecting}
+          >
+            <QrCode className="h-4 w-4" />
+            Scan QR Code
+          </button>
+
+          {/* Join button */}
+          <button
+            type="button"
+            onClick={handleJoin}
+            disabled={!isValid || isConnecting || userProfile.displayName.trim().length === 0}
+            className="w-full flex items-center justify-center gap-2 py-4 bg-[#007AFF] hover:bg-[#0071E3] disabled:bg-[#2C2C2E] disabled:text-[rgba(235,235,245,0.3)] text-white text-[17px] font-semibold rounded-xl transition-colors disabled:cursor-not-allowed"
+          >
+            {isConnecting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {status === 'waiting_approval' ? 'Waiting for host approval...' : 'Connecting...'}
+              </>
+            ) : (
+              <>
+                Join Pool
+                <ArrowRight className="h-4 w-4" />
+              </>
+            )}
+          </button>
+
+          {/* PoW progress */}
+          {powProgress !== null && (
+            <div className="space-y-1">
+              <p className="text-xs" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Solving proof-of-work challenge...</p>
+              <div className="h-1 bg-[#2C2C2E] rounded-full overflow-hidden">
+                <div className="h-full bg-[#007AFF] animate-pulse" style={{ width: '60%' }} />
+              </div>
+              <p className="text-[10px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>{powProgress.toLocaleString()} hashes tried</p>
+            </div>
+          )}
+
+          {/* Error display */}
+          {error && status === 'failed' && (
+            <div className="flex items-start gap-2 p-3 bg-[rgba(255,69,58,0.1)] rounded-xl">
+              <AlertCircle className="h-4 w-4 text-[#FF453A] shrink-0 mt-0.5" />
+              <p className="text-xs text-[#FF453A]">{error}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <p className="text-center text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+          End-to-end encrypted. No account required.
+        </p>
+      </div>
+
+      {/* QR Scanner modal */}
+      {showScanner && (
+        <QRScanner onScan={handleQRScan} onClose={() => setShowScanner(false)} />
+      )}
+    </div>
+  );
+}
+
+export default JoinView;

@@ -1478,7 +1478,7 @@ impl MessageHandler {
         // target_peer_ids, each triggering a DashMap lookup and potential
         // buffer_message call.
         const MAX_FORWARD_TARGETS: usize = 64;
-        const MAX_FORWARD_DATA_LEN: usize = 65_536; // 64 KiB
+        const MAX_FORWARD_DATA_LEN: usize = 2_097_152; // 2 MiB
 
         if let Some(ref targets) = target_peer_ids
             && targets.len() > MAX_FORWARD_TARGETS

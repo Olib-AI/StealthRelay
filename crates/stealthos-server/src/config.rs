@@ -122,7 +122,7 @@ const fn default_max_connections() -> usize {
     500
 }
 const fn default_max_message_size() -> usize {
-    65_536
+    2_097_152
 }
 const fn default_idle_timeout() -> u64 {
     600

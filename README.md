@@ -556,6 +556,20 @@ cargo run -p stealthos-server -- serve
 docker build -t stealth-relay .
 ```
 
+## Web Client
+
+A React web app is included in `web-client/` so friends without StealthOS or an iPhone can join your pool from any browser. It connects to the same relay server using the same E2E encrypted protocol.
+
+```bash
+cd web-client
+npm install
+npm run build
+```
+
+Serve the `web-client/dist/` folder from any static hosting (Nginx, Caddy, Vercel, Netlify, etc.). Users visit the page, paste an invitation link or scan the QR code, and join your pool — no app install required.
+
+The web client supports group and private chat, voice messages, image sharing, reactions, polls, and multiplayer games (Chess, Connect Four, Chain Reaction).
+
 ## Recovery
 
 If you lose access to your device:

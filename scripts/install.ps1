@@ -210,37 +210,69 @@ block_duration_secs = 600
     Write-Success "Config generated"
 }
 
-# ── Windows Service ───────────────────────────────────────────────────────────
+# ── Windows Service (via WinSW wrapper) ───────────────────────────────────────
+
+$WinSWUrl = "https://github.com/winsw/winsw/releases/download/v3.0.0-alpha.11/WinSW-net461.exe"
+$WinSWPath = Join-Path $InstallDir "StealthRelay.exe"
+$WinSWConfig = Join-Path $InstallDir "StealthRelay.xml"
 
 function Register-RelayService {
     Write-Info "Registering Windows Service..."
 
+    # Download WinSW service wrapper
+    Write-Info "Downloading service wrapper..."
+    Invoke-WebRequest -Uri $WinSWUrl -OutFile $WinSWPath
+
+    # Create WinSW XML config
+    $xml = @"
+<service>
+  <id>$ServiceName</id>
+  <name>$ServiceDisplayName</name>
+  <description>Zero-knowledge WebSocket relay for StealthOS</description>
+  <executable>$BinaryPath</executable>
+  <arguments>serve --config "$ConfigPath"</arguments>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+  <logpath>$DataDir</logpath>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="5 sec"/>
+</service>
+"@
+    Set-Content -Path $WinSWConfig -Value $xml -Encoding UTF8
+
+    # Uninstall existing service if present
     $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($existingService) {
-        Write-Info "Service already exists, updating..."
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        sc.exe delete $ServiceName | Out-Null
+        Write-Info "Removing existing service..."
+        & $WinSWPath stop 2>$null | Out-Null
+        & $WinSWPath uninstall 2>$null | Out-Null
         Start-Sleep -Seconds 2
     }
 
-    New-Service -Name $ServiceName `
-        -BinaryPathName "`"$BinaryPath`" serve --config `"$ConfigPath`"" `
-        -DisplayName $ServiceDisplayName `
-        -StartupType Automatic `
-        -ErrorAction Stop
-    # -Description requires PowerShell 7+; use sc.exe for PS 5.1 compat
-    sc.exe description $ServiceName "Zero-knowledge WebSocket relay for StealthOS" 2>$null | Out-Null
+    # Install the service
+    & $WinSWPath install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fatal "Failed to install service"
+    }
 
     Write-Success "Windows Service registered"
 }
 
 function Start-RelayService {
     Write-Info "Starting service..."
-    Start-Service -Name $ServiceName
+    & $WinSWPath start
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fatal "Failed to start service"
+    }
     Write-Success "Service started"
 }
 
 function Stop-RelayService {
+    if (Test-Path $WinSWPath) {
+        & $WinSWPath stop 2>$null | Out-Null
+    }
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq "Running") {
         Stop-Service -Name $ServiceName -Force
@@ -304,8 +336,14 @@ function Do-Uninstall {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc) {
         Write-Info "Stopping and removing service..."
-        Stop-RelayService
-        sc.exe delete $ServiceName | Out-Null
+        if (Test-Path $WinSWPath) {
+            & $WinSWPath stop 2>$null | Out-Null
+            & $WinSWPath uninstall 2>$null | Out-Null
+        } else {
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $ServiceName 2>$null | Out-Null
+        }
+        Start-Sleep -Seconds 2
         Write-Success "Service removed"
     }
 

@@ -352,15 +352,15 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
   }
 
   return (
-    <div className="border-t border-[#38383A] bg-[#1C1C1E]">
+    <div style={{ borderTopWidth: '1px', borderTopStyle: 'solid', borderTopColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
       {/* Reply preview */}
       {replyingTo && (
-        <div className="flex items-center gap-2 px-4 py-1.5 bg-[#2C2C2E] border-l-2 border-[#007AFF]">
+        <div className="flex items-center gap-2 px-4 py-1.5 border-l-2 border-[#007AFF]" style={{ backgroundColor: 'var(--bg-tertiary)' }}>
           <div className="flex-1 min-w-0">
             <p className="text-[12px] text-[#007AFF]">Replying to {replyingTo.senderName}</p>
-            <p className="text-[12px] truncate" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>{replyingTo.text}</p>
+            <p className="text-[12px] truncate" style={{ color: 'var(--text-secondary)' }}>{replyingTo.text}</p>
           </div>
-          <button type="button" onClick={() => setReplyingTo(null)} style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+          <button type="button" onClick={() => setReplyingTo(null)} style={{ color: 'var(--text-secondary)' }}>
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -368,10 +368,10 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
 
       {/* Poll creator */}
       {showPoll && (
-        <div className="p-3 bg-[#2C2C2E] border-b border-[#38383A] space-y-2 animate-slide-up">
+        <div className="p-3 space-y-2 animate-slide-up" style={{ backgroundColor: 'var(--bg-tertiary)', borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' }}>
           <div className="flex items-center justify-between">
-            <span className="text-[13px] font-medium text-white">Create Poll</span>
-            <button type="button" onClick={() => setShowPoll(false)} style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+            <span className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>Create Poll</span>
+            <button type="button" onClick={() => setShowPoll(false)} style={{ color: 'var(--text-secondary)' }}>
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -380,7 +380,8 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             value={pollQuestion}
             onChange={(e) => setPollQuestion(e.target.value)}
             placeholder="Question"
-            className="w-full px-2 py-1.5 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-[15px] text-white"
+            className="w-full px-2 py-1.5 rounded-[10px] text-[15px]"
+            style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
           />
           {pollOptions.map((opt, idx) => (
             <div key={idx} className="flex gap-1">
@@ -393,7 +394,8 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
                   setPollOptions(copy);
                 }}
                 placeholder={`Option ${idx + 1}`}
-                className="flex-1 px-2 py-1 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-[15px] text-white"
+                className="flex-1 px-2 py-1 rounded-[10px] text-[15px]"
+                style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
               />
               {pollOptions.length > 2 && (
                 <button type="button" onClick={() => setPollOptions(pollOptions.filter((_, i) => i !== idx))} className="text-[#FF453A] text-xs px-1">
@@ -404,7 +406,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           ))}
           <div className="flex items-center justify-between">
             <button type="button" onClick={() => setPollOptions([...pollOptions, ''])} className="text-[13px] text-[#007AFF]">+ Add option</button>
-            <label className="flex items-center gap-1.5 text-[12px]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+            <label className="flex items-center gap-1.5 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
               <input type="checkbox" checked={pollAllowChange} onChange={(e) => setPollAllowChange(e.target.checked)} className="rounded" />
               Allow vote change
             </label>
@@ -427,7 +429,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
 
       {/* Voice preview */}
       {voicePreview && (
-        <div className="flex items-center gap-2 px-4 py-2 bg-[#2C2C2E] border-b border-[#38383A] animate-slide-up">
+        <div className="flex items-center gap-2 px-4 py-2 animate-slide-up" style={{ backgroundColor: 'var(--bg-tertiary)', borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' }}>
           <button
             type="button"
             onClick={togglePreviewPlay}
@@ -436,10 +438,10 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             {isPreviewPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-0.5" />}
           </button>
           <div className="flex-1 min-w-0">
-            <div className="h-1.5 rounded-full bg-[#38383A] overflow-hidden">
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--separator)' }}>
               <div className="h-full w-full bg-[#007AFF] rounded-full" />
             </div>
-            <span className="text-[10px] mt-0.5" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>{formatRecordingTime(voicePreview.duration)}</span>
+            <span className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{formatRecordingTime(voicePreview.duration)}</span>
           </div>
           <button
             type="button"
@@ -460,7 +462,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
 
       {/* Image preview */}
       {imagePreview && (
-        <div className="p-3 bg-[#2C2C2E] border-b border-[#38383A] space-y-2 animate-slide-up">
+        <div className="p-3 space-y-2 animate-slide-up" style={{ backgroundColor: 'var(--bg-tertiary)', borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' }}>
           <div className="flex items-start gap-2">
             <img
               src={imagePreview.dataUrl}
@@ -474,7 +476,8 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
                 onChange={(e) => setImageCaption(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); sendImage(); } }}
                 placeholder="Add a caption (optional)"
-                className="w-full px-2 py-1.5 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-[15px] text-white placeholder-[rgba(235,235,245,0.3)] focus:border-[#007AFF] transition-colors"
+                className="w-full px-2 py-1.5 rounded-[10px] text-[15px] focus:border-[#007AFF] transition-colors"
+                style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
               />
               <div className="flex items-center gap-2">
                 <button
@@ -512,12 +515,12 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <div className="h-2.5 w-2.5 rounded-full bg-[#FF453A] animate-pulse shrink-0" />
           <span className="text-[15px] text-[#FF453A] font-medium tabular-nums">{formatRecordingTime(recordingDuration)}</span>
           <div className="flex-1 flex items-center justify-center">
-            <span className="text-[12px]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Recording...</span>
+            <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>Recording...</span>
           </div>
           <button
             type="button"
             onClick={cancelRecording}
-            className="transition-colors shrink-0" style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            className="transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
           >
             <X className="h-5 w-5" />
           </button>
@@ -533,13 +536,14 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
         <div className="relative flex items-center gap-2 px-3 py-2">
           {/* Mentions dropdown */}
           {showMentions && (
-            <div className="absolute bottom-full mb-1 left-3 bg-[#1C1C1E] rounded-xl p-1 w-48 max-h-32 overflow-y-auto z-20 animate-fade-in">
+            <div className="absolute bottom-full mb-1 left-3 rounded-xl p-1 w-48 max-h-32 overflow-y-auto z-20 animate-fade-in" style={{ backgroundColor: 'var(--bg-surface)' }}>
               {peers.filter((p) => p.peerId !== localPeerId).map((peer) => (
                 <button
                   key={peer.peerId}
                   type="button"
                   onClick={() => insertMention(peer.displayName)}
-                  className="w-full text-left px-2 py-1.5 text-[13px] text-white hover:bg-[#2C2C2E] rounded-lg flex items-center gap-1.5"
+                  className="w-full text-left px-2 py-1.5 text-[13px] rounded-lg flex items-center gap-1.5"
+                  style={{ color: 'var(--text-primary)' }}
                 >
                   <AtSign className="h-3 w-3 text-[#007AFF]" />
                   {peer.displayName}
@@ -556,7 +560,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <button
             type="button"
             onClick={() => { setShowEmoji(!showEmoji); setShowPoll(false); }}
-            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
           >
             <Smile className="h-5 w-5" />
           </button>
@@ -564,7 +568,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <button
             type="button"
             onClick={() => { setShowPoll(!showPoll); setShowEmoji(false); }}
-            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
           >
             <BarChart3 className="h-5 w-5" />
           </button>
@@ -573,7 +577,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             type="button"
             onClick={handleImagePick}
             className="h-9 w-9 flex items-center justify-center transition-colors shrink-0"
-            style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            style={{ color: 'var(--text-secondary)' }}
             aria-label="Share image"
           >
             <Image className="h-5 w-5" />
@@ -586,7 +590,8 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
             placeholder="Type a message..."
-            className="flex-1 px-4 py-2.5 bg-[#2C2C2E] rounded-[20px] text-[15px] text-white placeholder-[rgba(235,235,245,0.3)] focus:ring-0 transition-colors"
+            className="flex-1 px-4 py-2.5 rounded-[20px] text-[15px] focus:ring-0 transition-colors"
+            style={{ backgroundColor: 'var(--bg-input)', color: 'var(--text-primary)' }}
           />
 
           {text.trim().length > 0 ? (

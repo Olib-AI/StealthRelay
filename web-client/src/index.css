@@ -25,10 +25,68 @@
   --color-ios-cyan: #64D2FF;
 }
 
+/* Light mode (default) */
+:root {
+  --bg-page: #F2F2F7;
+  --bg-surface: #F2F2F7;
+  --bg-secondary: #FFFFFF;
+  --bg-tertiary: #E5E5EA;
+  --bg-input: #E5E5EA;
+  --separator: #E5E5EA;
+  --text-primary: #000000;
+  --text-secondary: rgba(60, 60, 67, 0.6);
+  --text-tertiary: rgba(60, 60, 67, 0.3);
+  --bubble-incoming: #E5E5EA;
+  --bubble-outgoing: #007AFF;
+  --bubble-incoming-text: #000000;
+  --bubble-outgoing-text: #FFFFFF;
+  --system-msg-bg: #E5E5EA;
+  --scrollbar-thumb: #C7C7CC;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-page: #000000;
+    --bg-surface: #1C1C1E;
+    --bg-secondary: #1C1C1E;
+    --bg-tertiary: #2C2C2E;
+    --bg-input: #2C2C2E;
+    --separator: #38383A;
+    --text-primary: #FFFFFF;
+    --text-secondary: rgba(235, 235, 245, 0.6);
+    --text-tertiary: rgba(235, 235, 245, 0.3);
+    --bubble-incoming: #2C2C2E;
+    --bubble-outgoing: #007AFF;
+    --bubble-incoming-text: #FFFFFF;
+    --bubble-outgoing-text: #FFFFFF;
+    --system-msg-bg: #2C2C2E;
+    --scrollbar-thumb: #38383A;
+  }
+}
+
+/* Manual dark mode override */
+:root[data-theme="dark"] {
+  --bg-page: #000000;
+  --bg-surface: #1C1C1E;
+  --bg-secondary: #1C1C1E;
+  --bg-tertiary: #2C2C2E;
+  --bg-input: #2C2C2E;
+  --separator: #38383A;
+  --text-primary: #FFFFFF;
+  --text-secondary: rgba(235, 235, 245, 0.6);
+  --text-tertiary: rgba(235, 235, 245, 0.3);
+  --bubble-incoming: #2C2C2E;
+  --bubble-outgoing: #007AFF;
+  --bubble-incoming-text: #FFFFFF;
+  --bubble-outgoing-text: #FFFFFF;
+  --system-msg-bg: #2C2C2E;
+  --scrollbar-thumb: #38383A;
+}
+
 @layer base {
   * {
     scrollbar-width: thin;
-    scrollbar-color: #38383A transparent;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
   }
 
   ::-webkit-scrollbar {
@@ -40,14 +98,14 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background-color: #38383A;
+    background-color: var(--scrollbar-thumb);
     border-radius: 3px;
   }
 
   html, body, #root {
     height: 100dvh;
     overflow: hidden;
-    background: #000000;
+    background: var(--bg-page);
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', system-ui, sans-serif;
   }
 
@@ -66,7 +124,7 @@
 
 @layer utilities {
   .glass-card {
-    background: #1C1C1E;
+    background: var(--bg-surface);
     border: none;
     border-radius: 12px;
   }

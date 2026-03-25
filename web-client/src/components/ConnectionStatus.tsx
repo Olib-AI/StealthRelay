@@ -21,7 +21,7 @@ function ConnectionStatus() {
     <div className="flex flex-col">
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: c.dotColor }} />
-        <span className="text-[13px] font-medium text-white">{c.text}</span>
+        <span className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>{c.text}</span>
       </div>
       {error && (
         <p className="mt-1 text-[12px] text-[#FF453A] max-w-xs truncate">{error}</p>

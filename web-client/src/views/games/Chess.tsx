@@ -510,6 +510,16 @@ function Chess({ onBack }: ChessProps) {
 
   const kingInCheckSq = gameState.inCheck ? findKing(gameState.board, currentColor) : -1;
 
+  // Last move squares for highlight (convert from iOS wire format: webRow = 7 - iosRow)
+  const lastMoveSquares = useMemo(() => {
+    const history = gameState.moveHistory;
+    if (history.length === 0) return new Set<number>();
+    const last = history[history.length - 1]!;
+    const fromSq = (7 - last.fromRow) * 8 + last.fromCol;
+    const toSq = (7 - last.toRow) * 8 + last.toCol;
+    return new Set([fromSq, toSq]);
+  }, [gameState.moveHistory]);
+
   const currentPlayer = session?.players.find((p) => p.playerIndex === gameState.currentPlayerIndex);
   const winner = gameState.winnerIndex !== undefined ? session?.players.find((p) => p.playerIndex === gameState.winnerIndex) : null;
 
@@ -522,6 +532,14 @@ function Chess({ onBack }: ChessProps) {
     const isSelected = sq === selectedSquare;
     const isLegalTarget = legalMoveSet.has(sq);
     const isKingCheck = sq === kingInCheckSq;
+    const isLastMove = lastMoveSquares.has(sq);
+
+    // Square background: base color → last move overlay → selected overlay → check
+    const baseBg = isLight ? '#EDD9B8' : '#B3875C';
+    const bgColor = isKingCheck ? 'rgba(239,68,68,0.5)'
+      : isSelected ? 'rgba(115,165,64,0.5)'
+      : isLastMove ? (isLight ? '#F5F682' : '#B9CA43')
+      : baseBg;
 
     return (
       <button
@@ -529,10 +547,9 @@ function Chess({ onBack }: ChessProps) {
         type="button"
         onClick={() => handleSquareClick(sq)}
         className={`aspect-square flex items-center justify-center text-[clamp(1.1rem,4vw,1.6rem)] relative transition-all
-          ${isLight ? 'bg-[#EDD9B8]' : 'bg-[#B3875C]'}
-          ${isSelected ? 'bg-[#73A540]/50' : ''}
-          ${isKingCheck ? 'ring-2 ring-red-500 ring-inset bg-red-400/50' : ''}
+          ${isKingCheck ? 'ring-2 ring-red-500 ring-inset' : ''}
         `}
+        style={{ backgroundColor: bgColor }}
       >
         {piece && (
           <img
@@ -559,12 +576,12 @@ function Chess({ onBack }: ChessProps) {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm">
-        <button type="button" onClick={onBack} className="text-slate-400 hover:text-white transition-colors">
+      <div className="flex items-center gap-3 px-4 py-3 backdrop-blur-sm" style={{ borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
+        <button type="button" onClick={onBack} className="transition-colors" style={{ color: 'var(--text-secondary)' }}>
           <ArrowLeft className="h-5 w-5" />
         </button>
         <span className="text-lg">♟️</span>
-        <span className="text-sm font-medium text-white flex-1">Chess</span>
+        <span className="text-sm font-medium flex-1" style={{ color: 'var(--text-primary)' }}>Chess</span>
         <button type="button" onClick={handleQuit} className="text-red-400 hover:text-red-300 transition-colors flex items-center gap-1 text-xs">
           <LogOut className="h-3.5 w-3.5" /> Leave
         </button>
@@ -584,7 +601,7 @@ function Chess({ onBack }: ChessProps) {
                   colorIndex={peer?.avatarColorIndex ?? player.profile?.avatarColorIndex ?? 0}
                   size="sm"
                 />
-                <p className="text-xs font-medium text-white truncate">{peer?.displayName ?? player.name}</p>
+                <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{peer?.displayName ?? player.name}</p>
                 {gameState.capturedPieces[capturedColor].length > 0 && (
                   <div className="flex gap-0.5 flex-wrap flex-1 justify-end bg-[#B3875C]/40 rounded px-1.5 py-0.5">
                     {gameState.capturedPieces[capturedColor].map((pt, i) => (
@@ -606,7 +623,7 @@ function Chess({ onBack }: ChessProps) {
           {/* Self info + captured pieces */}
           <div className="flex items-center gap-2 w-full mt-1.5 px-0.5">
             <PeerAvatar emoji={userProfile.avatarEmoji} colorIndex={userProfile.avatarColorIndex} size="sm" />
-            <p className="text-xs font-medium text-white truncate">{userProfile.displayName} (you)</p>
+            <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{userProfile.displayName} (you)</p>
             {(() => {
               const capColor = myColor === 'white' ? 'black' as const : 'white' as const;
               const pieces = gameState.capturedPieces[capColor];
@@ -624,7 +641,7 @@ function Chess({ onBack }: ChessProps) {
         {/* Status */}
         <div className="mt-2 text-center">
           {!gameState.gameOver && (
-            <p className="text-sm text-slate-300">
+            <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
               {isMyTurn ? (gameState.inCheck ? 'You are in check! Your turn.' : 'Your turn') : `${currentPlayer?.name ?? 'Opponent'}'s turn`}
             </p>
           )}
@@ -634,14 +651,15 @@ function Chess({ onBack }: ChessProps) {
         {promotionSquare && (
           <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
             <div className="glass-card p-4 space-y-3 animate-slide-up w-full max-w-xs">
-              <p className="text-sm font-medium text-white text-center">Promote pawn to:</p>
+              <p className="text-sm font-medium text-center" style={{ color: 'var(--text-primary)' }}>Promote pawn to:</p>
               <div className="flex gap-2 sm:gap-3 justify-center">
                 {(['queen', 'rook', 'bishop', 'knight'] as const).map((type) => (
                   <button
                     key={type}
                     type="button"
                     onClick={() => handlePromotion(type)}
-                    className="h-12 w-12 sm:h-14 sm:w-14 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center transition-colors p-2"
+                    className="h-12 w-12 sm:h-14 sm:w-14 rounded-lg flex items-center justify-center transition-colors p-2"
+                    style={{ backgroundColor: 'var(--bg-tertiary)' }}
                   >
                     <img src={PIECE_SVG[myColor][type]} alt={type} className="w-full h-full" />
                   </button>
@@ -654,7 +672,7 @@ function Chess({ onBack }: ChessProps) {
         {/* Game over */}
         {gameState.gameOver && (
           <div className="glass-card p-5 text-center space-y-3 animate-slide-up mt-2">
-            <h3 className="text-lg font-bold text-white">
+            <h3 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
               {gameState.isCheckmate
                 ? winner?.id === localPeerId ? 'Checkmate! You won! 🎉' : `Checkmate! ${winner?.name ?? 'Opponent'} wins!`
                 : 'Stalemate - Draw!'}
@@ -663,7 +681,7 @@ function Chess({ onBack }: ChessProps) {
               <button type="button" onClick={handleRematch} className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors">
                 <RotateCcw className="h-4 w-4" /> Rematch
               </button>
-              <button type="button" onClick={handleQuit} className="px-4 py-2 border border-slate-700 text-slate-300 text-sm rounded-lg hover:bg-slate-800 transition-colors">
+              <button type="button" onClick={handleQuit} className="px-4 py-2 text-sm rounded-lg transition-colors" style={{ borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-secondary)' }}>
                 Back to Lobby
               </button>
             </div>
@@ -673,13 +691,13 @@ function Chess({ onBack }: ChessProps) {
         {/* Move history — scrollable, doesn't push the board */}
         {gameState.moveHistory.length > 0 && (
           <div className="w-full max-w-[min(100%,24rem)] mt-2">
-            <p className="text-xs text-slate-500 mb-1">Move History</p>
+            <p className="text-xs mb-1" style={{ color: 'var(--text-tertiary)' }}>Move History</p>
             <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
               {gameState.moveHistory.map((move, i) => {
                 const files = 'abcdefgh';
                 const notation = `${files[move.fromCol] ?? '?'}${move.fromRow + 1}→${files[move.toCol] ?? '?'}${move.toRow + 1}`;
                 return (
-                  <span key={i} className={`text-[11px] px-1.5 py-0.5 rounded ${i % 2 === 0 ? 'bg-slate-800 text-slate-300' : 'bg-slate-800/50 text-slate-400'}`}>
+                  <span key={i} className="text-[11px] px-1.5 py-0.5 rounded" style={{ backgroundColor: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
                     {Math.floor(i / 2) + 1}{i % 2 === 0 ? '.' : '...'} {notation}
                   </span>
                 );

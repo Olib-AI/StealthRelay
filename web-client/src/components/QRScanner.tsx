@@ -54,13 +54,13 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}>
-      <div className="bg-[#1C1C1E] rounded-[20px] w-full max-w-sm p-4 space-y-3">
+      <div className="rounded-[20px] w-full max-w-sm p-4 space-y-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-white">
+          <div className="flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
             <Camera className="h-5 w-5" />
             <h3 className="text-[15px] font-semibold">Scan Invitation QR</h3>
           </div>
-          <button type="button" onClick={onClose} className="transition-colors" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+          <button type="button" onClick={onClose} className="transition-colors" style={{ color: 'var(--text-secondary)' }}>
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -71,7 +71,7 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
           <p className="text-[12px] text-[#FF453A] text-center">{error}</p>
         )}
 
-        <p className="text-[12px] text-center" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+        <p className="text-[12px] text-center" style={{ color: 'var(--text-tertiary)' }}>
           Point your camera at a StealthRelay invitation QR code
         </p>
       </div>

@@ -249,7 +249,7 @@ function ChatView({ onBack }: ChatViewProps) {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-[#38383A] bg-[#1C1C1E]">
+      <div className="flex items-center gap-3 px-4 py-3" style={{ borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
         <button type="button" onClick={onBack} className="text-[#007AFF] transition-colors">
           <ArrowLeft className="h-5 w-5" />
         </button>
@@ -258,7 +258,7 @@ function ChatView({ onBack }: ChatViewProps) {
           {currentView === 'group' ? (
             <>
               <Users className="h-4 w-4 text-[#007AFF]" />
-              <span className="text-[17px] font-semibold text-white">Group Chat</span>
+              <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Group Chat</span>
             </>
           ) : selectedPrivatePeerId ? (
             <>
@@ -267,31 +267,32 @@ function ChatView({ onBack }: ChatViewProps) {
                 return peer ? (
                   <>
                     <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
-                    <span className="text-[17px] font-semibold text-white">{peer.displayName}</span>
+                    <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
                     {peerSymmetricKeys[selectedPrivatePeerId] && (
                       <Lock className="h-3 w-3 text-[#30D158]" />
                     )}
                   </>
                 ) : (
-                  <span className="text-[17px] font-semibold text-white">Private Chat</span>
+                  <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Private Chat</span>
                 );
               })()}
             </>
           ) : (
             <>
               <User className="h-4 w-4 text-[#BF5AF2]" />
-              <span className="text-[17px] font-semibold text-white">Private Messages</span>
+              <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Private Messages</span>
             </>
           )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex bg-[#1C1C1E] px-2 py-1.5 gap-1">
+      <div className="flex px-2 py-1.5 gap-1" style={{ backgroundColor: 'var(--bg-surface)' }}>
         <button
           type="button"
           onClick={() => { setCurrentView('group'); setSelectedPrivatePeerId(null); }}
-          className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-colors relative ${currentView === 'group' ? 'bg-[rgba(0,122,255,0.1)] text-[#007AFF]' : 'text-[rgba(235,235,245,0.6)]'}`}
+          className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-colors relative ${currentView === 'group' ? 'bg-[rgba(0,122,255,0.1)] text-[#007AFF]' : ''}`}
+          style={currentView !== 'group' ? { color: 'var(--text-secondary)' } : undefined}
         >
           Group Chat
           {currentView !== 'group' && unreadGroup > 0 && (
@@ -303,7 +304,8 @@ function ChatView({ onBack }: ChatViewProps) {
         <button
           type="button"
           onClick={() => setCurrentView('private')}
-          className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-colors relative ${currentView === 'private' ? 'bg-[rgba(0,122,255,0.1)] text-[#007AFF]' : 'text-[rgba(235,235,245,0.6)]'}`}
+          className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-colors relative ${currentView === 'private' ? 'bg-[rgba(0,122,255,0.1)] text-[#007AFF]' : ''}`}
+          style={currentView !== 'private' ? { color: 'var(--text-secondary)' } : undefined}
         >
           Private Messages
           {currentView !== 'private' && totalPrivateUnread > 0 && (
@@ -316,9 +318,9 @@ function ChatView({ onBack }: ChatViewProps) {
 
       {/* Private peer list (when no peer selected) */}
       {currentView === 'private' && !selectedPrivatePeerId && (
-        <div className="flex-1 overflow-y-auto bg-black">
+        <div className="flex-1 overflow-y-auto" style={{ backgroundColor: 'var(--bg-page)' }}>
           {otherPeers.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+            <div className="flex flex-col items-center justify-center h-full" style={{ color: 'var(--text-tertiary)' }}>
               <User className="h-8 w-8 mb-2 opacity-50" />
               <p className="text-[15px]">No peers to message</p>
             </div>
@@ -331,12 +333,13 @@ function ChatView({ onBack }: ChatViewProps) {
                 key={peer.peerId}
                 type="button"
                 onClick={() => setSelectedPrivatePeerId(peer.peerId)}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${index < otherPeers.length - 1 ? 'border-b border-[#38383A]' : ''}`}
+                className="w-full flex items-center gap-3 px-4 py-2.5 transition-colors"
+                style={index < otherPeers.length - 1 ? { borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' } : undefined}
               >
                 <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
                 <div className="flex-1 min-w-0 text-left">
                   <div className="flex items-center justify-between">
-                    <span className="text-[15px] font-medium text-white truncate">{peer.displayName}</span>
+                    <span className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
                     {unread > 0 && (
                       <span className="h-5 min-w-5 px-1.5 rounded-full bg-[#FF453A] text-white text-[10px] font-bold flex items-center justify-center">
                         {unread}
@@ -344,7 +347,7 @@ function ChatView({ onBack }: ChatViewProps) {
                     )}
                   </div>
                   {lastMsg && (
-                    <p className="text-[12px] truncate mt-0.5" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>{lastMsg.text ?? '...'}</p>
+                    <p className="text-[12px] truncate mt-0.5" style={{ color: 'var(--text-tertiary)' }}>{lastMsg.text ?? '...'}</p>
                   )}
                 </div>
                 {peerSymmetricKeys[peer.peerId] && (
@@ -359,9 +362,9 @@ function ChatView({ onBack }: ChatViewProps) {
       {/* Messages area */}
       {(currentView === 'group' || (currentView === 'private' && selectedPrivatePeerId)) && (
         <>
-          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 bg-black">
+          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3" style={{ backgroundColor: 'var(--bg-page)' }}>
             {currentMessages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+              <div className="flex flex-col items-center justify-center h-full" style={{ color: 'var(--text-tertiary)' }}>
                 <MessageSquare className="h-8 w-8 mb-2 opacity-50" />
                 <p className="text-[15px]">No messages yet</p>
                 <p className="text-[12px] mt-1">Start the conversation</p>

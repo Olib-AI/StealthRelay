@@ -7,6 +7,7 @@ import { transport } from '../transport/websocket.ts';
 import ConnectionStatus from '../components/ConnectionStatus.tsx';
 import PeerList from '../components/PeerList.tsx';
 import ProfileSetup from '../components/ProfileSetup.tsx';
+import ThemeToggle from '../components/ThemeToggle.tsx';
 
 const GAME_NAMES: Record<string, string> = {
   connect_four: 'Connect Four',
@@ -31,14 +32,14 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-black">
+    <div className="flex-1 flex flex-col min-h-0" style={{ backgroundColor: 'var(--bg-page)' }}>
       {/* Top bar */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#38383A] bg-[#1C1C1E]">
+      <div className="flex items-center justify-between px-4 py-3" style={{ borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
         <ConnectionStatus />
         <button
           type="button"
           onClick={() => setShowSettings(!showSettings)}
-          className="transition-colors" style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+          className="transition-colors" style={{ color: 'var(--text-secondary)' }}
         >
           <Settings className="h-5 w-5" />
         </button>
@@ -46,7 +47,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="px-4 py-3 bg-[#1C1C1E] border-b border-[#38383A] animate-slide-up">
+        <div className="px-4 py-3 space-y-3 animate-slide-up" style={{ backgroundColor: 'var(--bg-surface)', borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' }}>
           <ProfileSetup
             compact
             onDone={() => {
@@ -54,24 +55,28 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
               transport.updateProfile();
             }}
           />
+          <div className="flex items-center justify-between pt-2" style={{ borderTopWidth: '1px', borderTopStyle: 'solid', borderTopColor: 'var(--separator)' }}>
+            <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>Appearance</span>
+            <ThemeToggle />
+          </div>
         </div>
       )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* Pool info card */}
-        <div className="bg-[#1C1C1E] rounded-xl p-4 space-y-3">
+        <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: 'rgba(0, 122, 255, 0.1)' }}>
               <Globe className="h-5 w-5 text-[#007AFF]" />
             </div>
             <div className="min-w-0 flex-1">
-              <h2 className="text-[17px] font-semibold text-white truncate">{poolInfo?.name ?? 'Pool'}</h2>
-              <p className="text-[12px] truncate" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>{serverUrl}</p>
+              <h2 className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{poolInfo?.name ?? 'Pool'}</h2>
+              <p className="text-[12px] truncate" style={{ color: 'var(--text-tertiary)' }}>{serverUrl}</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-4 text-[12px]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+          <div className="flex items-center gap-4 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
             <span className="flex items-center gap-1">
               <Users className="h-3.5 w-3.5" />
               {peers.length + 1} / {poolInfo?.maxPeers ?? '?'} peers
@@ -80,8 +85,8 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
         </div>
 
         {/* Peers */}
-        <div className="bg-[#1C1C1E] rounded-xl p-4">
-          <h3 className="text-[15px] font-semibold text-white mb-3 flex items-center gap-2">
+        <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--bg-surface)' }}>
+          <h3 className="text-[15px] font-semibold mb-3 flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
             <Users className="h-4 w-4" />
             Connected Peers
           </h3>
@@ -106,7 +111,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-[15px] font-medium text-[#30D158]">Return to {gameName}</p>
-                <p className="text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>Game in progress</p>
+                <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>Game in progress</p>
               </div>
             </button>
           );
@@ -124,7 +129,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
               <MessageSquare className="h-6 w-6 text-[#007AFF]" />
             </div>
             <span className="text-[15px] font-medium text-[#007AFF]">Chat</span>
-            <span className="text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>Group & private messages</span>
+            <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>Group & private messages</span>
           </button>
 
           <button
@@ -137,7 +142,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
               <Gamepad2 className="h-6 w-6 text-[#BF5AF2]" />
             </div>
             <span className="text-[15px] font-medium text-[#BF5AF2]">Games</span>
-            <span className="text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>Play with friends</span>
+            <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>Play with friends</span>
           </button>
         </div>
 

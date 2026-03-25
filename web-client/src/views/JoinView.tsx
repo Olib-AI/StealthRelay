@@ -6,6 +6,7 @@ import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts
 import { transport } from '../transport/websocket.ts';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import QRScanner from '../components/QRScanner.tsx';
+import ThemeToggle from '../components/ThemeToggle.tsx';
 
 function JoinView() {
   const [inviteUrl, setInviteUrl] = useState('');
@@ -58,33 +59,33 @@ function JoinView() {
   const isConnecting = status === 'connecting' || status === 'waiting_approval';
 
   return (
-    <div className="flex-1 flex flex-col items-center min-h-0 overflow-y-auto px-4 py-6 sm:justify-center bg-black">
+    <div className="flex-1 flex flex-col items-center min-h-0 overflow-y-auto px-4 py-6 sm:justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
       <div className="w-full max-w-md space-y-5">
         {/* Header */}
         <div className="text-center space-y-2">
           <div className="inline-flex items-center justify-center h-20 w-20 rounded-full mb-2" style={{ background: 'linear-gradient(135deg, #007AFF, #BF5AF2)' }}>
             <Shield className="h-10 w-10 text-white" />
           </div>
-          <h1 className="text-[28px] font-bold text-white">StealthRelay</h1>
-          <p className="text-[15px]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+          <h1 className="text-[28px] font-bold" style={{ color: 'var(--text-primary)' }}>StealthRelay</h1>
+          <p className="text-[15px]" style={{ color: 'var(--text-secondary)' }}>
             Join a pool to chat and play games with friends
           </p>
         </div>
 
         {/* Profile Setup */}
-        <div className="bg-[#1C1C1E] rounded-xl p-4">
-          <h2 className="text-[15px] font-semibold text-white mb-3">Your Profile</h2>
+        <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--bg-surface)' }}>
+          <h2 className="text-[15px] font-semibold mb-3" style={{ color: 'var(--text-primary)' }}>Your Profile</h2>
           <ProfileSetup />
         </div>
 
         {/* Join Section */}
-        <div className="bg-[#1C1C1E] rounded-xl p-4 space-y-3">
-          <h2 className="text-[15px] font-semibold text-white">Join a Pool</h2>
+        <div className="rounded-xl p-4 space-y-3" style={{ backgroundColor: 'var(--bg-surface)' }}>
+          <h2 className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>Join a Pool</h2>
 
           {/* Invitation URL input */}
           <div className="space-y-2">
             <div className="relative">
-              <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
+              <div className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-tertiary)' }}>
                 <Link2 className="h-4 w-4" />
               </div>
               <input
@@ -92,13 +93,15 @@ function JoinView() {
                 value={inviteUrl}
                 onChange={(e) => validateUrl(e.target.value)}
                 placeholder="stealth://invite/..."
-                className="w-full pl-9 pr-16 py-3 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-[15px] text-white placeholder-[rgba(235,235,245,0.3)] focus:border-[#007AFF] transition-colors"
+                className="w-full pl-9 pr-16 py-3 rounded-[10px] text-[15px] focus:border-[#007AFF] transition-colors"
+                style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
                 disabled={isConnecting}
               />
               <button
                 type="button"
                 onClick={handlePaste}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#007AFF] font-medium px-2 py-1 rounded-md bg-[#2C2C2E]"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[#007AFF] font-medium px-2 py-1 rounded-md"
+                style={{ backgroundColor: 'var(--bg-tertiary)' }}
                 disabled={isConnecting}
               >
                 Paste
@@ -124,8 +127,8 @@ function JoinView() {
           <button
             type="button"
             onClick={() => setShowScanner(true)}
-            className="w-full flex items-center justify-center gap-2 py-3 bg-[#1C1C1E] border border-[#38383A] rounded-xl text-[15px] transition-colors"
-            style={{ color: 'rgba(235, 235, 245, 0.6)' }}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-[15px] transition-colors"
+            style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-secondary)' }}
             disabled={isConnecting}
           >
             <QrCode className="h-4 w-4" />
@@ -137,7 +140,8 @@ function JoinView() {
             type="button"
             onClick={handleJoin}
             disabled={!isValid || isConnecting || userProfile.displayName.trim().length === 0}
-            className="w-full flex items-center justify-center gap-2 py-4 bg-[#007AFF] hover:bg-[#0071E3] disabled:bg-[#2C2C2E] disabled:text-[rgba(235,235,245,0.3)] text-white text-[17px] font-semibold rounded-xl transition-colors disabled:cursor-not-allowed"
+            className="w-full flex items-center justify-center gap-2 py-4 bg-[#007AFF] hover:bg-[#0071E3] text-white text-[17px] font-semibold rounded-xl transition-colors disabled:cursor-not-allowed"
+            style={(!isValid || isConnecting || userProfile.displayName.trim().length === 0) ? { backgroundColor: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' } : undefined}
           >
             {isConnecting ? (
               <>
@@ -155,11 +159,11 @@ function JoinView() {
           {/* PoW progress */}
           {powProgress !== null && (
             <div className="space-y-1">
-              <p className="text-xs" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Solving proof-of-work challenge...</p>
-              <div className="h-1 bg-[#2C2C2E] rounded-full overflow-hidden">
+              <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>Solving proof-of-work challenge...</p>
+              <div className="h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--bg-tertiary)' }}>
                 <div className="h-full bg-[#007AFF] animate-pulse" style={{ width: '60%' }} />
               </div>
-              <p className="text-[10px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>{powProgress.toLocaleString()} hashes tried</p>
+              <p className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>{powProgress.toLocaleString()} hashes tried</p>
             </div>
           )}
 
@@ -172,10 +176,13 @@ function JoinView() {
           )}
         </div>
 
-        {/* Footer */}
-        <p className="text-center text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>
-          End-to-end encrypted. No account required.
-        </p>
+        {/* Theme + Footer */}
+        <div className="flex flex-col items-center gap-3">
+          <ThemeToggle />
+          <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+            End-to-end encrypted. No account required.
+          </p>
+        </div>
       </div>
 
       {/* QR Scanner modal */}

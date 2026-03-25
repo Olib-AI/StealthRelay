@@ -31,13 +31,14 @@ function ProfileSetup({ compact = false, onDone }: ProfileSetupProps) {
     <div className="space-y-4">
       {/* Name input */}
       <div>
-        <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Display Name</label>
+        <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Display Name</label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
           maxLength={32}
-          className="w-full px-3 py-2.5 bg-[#1C1C1E] border border-[#38383A] rounded-[10px] text-white text-[15px] focus:border-[#007AFF] transition-colors"
+          className="w-full px-3 py-2.5 rounded-[10px] text-[15px] focus:border-[#007AFF] transition-colors"
+          style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
           placeholder="Enter your name"
         />
       </div>
@@ -53,7 +54,7 @@ function ProfileSetup({ compact = false, onDone }: ProfileSetupProps) {
           {selectedEmoji}
         </button>
         <div className="flex-1 min-w-0">
-          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Color</label>
+          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Color</label>
           <div className="flex gap-1.5 sm:gap-2 flex-wrap">
             {AVATAR_COLORS.map((color, idx) => (
               <button
@@ -73,14 +74,15 @@ function ProfileSetup({ compact = false, onDone }: ProfileSetupProps) {
       {/* Emoji grid */}
       {showEmojiGrid && (
         <div>
-          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>Avatar Emoji</label>
+          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Avatar Emoji</label>
           <div className="grid grid-cols-6 sm:grid-cols-8 gap-1 sm:gap-1.5">
             {AVATAR_EMOJIS.map((emoji) => (
               <button
                 key={emoji}
                 type="button"
                 onClick={() => setSelectedEmoji(emoji)}
-                className={`aspect-square rounded-lg flex items-center justify-center text-base sm:text-lg transition-all ${emoji === selectedEmoji ? 'bg-[#007AFF]' : 'bg-[#1C1C1E] hover:bg-[#2C2C2E]'}`}
+                className="aspect-square rounded-lg flex items-center justify-center text-base sm:text-lg transition-all"
+                style={emoji === selectedEmoji ? { backgroundColor: '#007AFF' } : { backgroundColor: 'var(--bg-surface)' }}
               >
                 {emoji}
               </button>

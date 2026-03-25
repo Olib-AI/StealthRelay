@@ -56,8 +56,8 @@ function App() {
   const showChess = isGameActive && activeGameType === 'chess';
 
   return (
-    <div className="h-dvh flex items-center justify-center bg-black">
-      <div className="relative w-full max-w-[430px] h-dvh sm:max-h-[932px] flex flex-col bg-black text-white overflow-hidden sm:rounded-2xl sm:border sm:border-[#38383A] sm:shadow-2xl sm:shadow-black/50">
+    <div className="h-dvh flex items-center justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
+      <div className="relative w-full max-w-[430px] h-dvh sm:max-h-[932px] flex flex-col overflow-hidden sm:rounded-2xl sm:border sm:shadow-2xl sm:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
         {effectiveView === 'join' && <JoinView />}
         {effectiveView === 'lobby' && (
           <LobbyView

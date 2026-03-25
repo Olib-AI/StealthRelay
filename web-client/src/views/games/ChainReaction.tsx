@@ -224,12 +224,12 @@ function ChainReaction({ onBack }: ChainReactionProps) {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm">
-        <button type="button" onClick={onBack} className="text-slate-400 hover:text-white transition-colors">
+      <div className="flex items-center gap-3 px-4 py-3 backdrop-blur-sm" style={{ borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
+        <button type="button" onClick={onBack} className="transition-colors" style={{ color: 'var(--text-secondary)' }}>
           <ArrowLeft className="h-5 w-5" />
         </button>
         <span className="text-lg">💥</span>
-        <span className="text-sm font-medium text-white flex-1">Chain Reaction</span>
+        <span className="text-sm font-medium flex-1" style={{ color: 'var(--text-primary)' }}>Chain Reaction</span>
         <button type="button" onClick={handleQuit} className="text-red-400 hover:text-red-300 transition-colors flex items-center gap-1 text-xs">
           <LogOut className="h-3.5 w-3.5" /> Leave
         </button>
@@ -247,8 +247,8 @@ function ChainReaction({ onBack }: ChainReactionProps) {
             return (
               <div
                 key={player.id}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all ${isCurrentTurn ? 'ring-2 bg-slate-800' : 'opacity-50'}`}
-                style={{ outlineColor: isCurrentTurn ? color : undefined }}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all ${isCurrentTurn ? 'ring-2' : 'opacity-50'}`}
+                style={{ outlineColor: isCurrentTurn ? color : undefined, backgroundColor: isCurrentTurn ? 'var(--bg-tertiary)' : undefined }}
               >
                 <PeerAvatar
                   emoji={peer?.avatarEmoji ?? player.profile?.avatarEmoji ?? '😀'}
@@ -256,7 +256,7 @@ function ChainReaction({ onBack }: ChainReactionProps) {
                   size="sm"
                 />
                 <div>
-                  <p className="text-xs font-medium text-white">
+                  <p className="text-xs font-medium" style={{ color: 'var(--text-primary)' }}>
                     {isLocal ? userProfile.displayName : (peer?.displayName ?? player.name)}
                   </p>
                   <div className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
@@ -301,7 +301,7 @@ function ChainReaction({ onBack }: ChainReactionProps) {
 
         {/* Status */}
         {!gameState.gameOver && currentPlayer && (
-          <p className="text-sm text-slate-300">
+          <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
             {currentPlayer.id === localPeerId ? 'Your turn' : `${currentPlayer.name}'s turn`}
           </p>
         )}
@@ -309,7 +309,7 @@ function ChainReaction({ onBack }: ChainReactionProps) {
         {/* Game over */}
         {gameState.gameOver && (
           <div className="glass-card p-5 text-center space-y-3 animate-slide-up">
-            <h3 className="text-lg font-bold text-white">
+            <h3 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
               {winner
                 ? winner.id === localPeerId ? 'You won! 🎉' : `${winner.name} wins!`
                 : 'Game Over!'}
@@ -318,7 +318,7 @@ function ChainReaction({ onBack }: ChainReactionProps) {
               <button type="button" onClick={handleRematch} className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors">
                 <RotateCcw className="h-4 w-4" /> Rematch
               </button>
-              <button type="button" onClick={handleQuit} className="px-4 py-2 border border-slate-700 text-slate-300 text-sm rounded-lg hover:bg-slate-800 transition-colors">
+              <button type="button" onClick={handleQuit} className="px-4 py-2 text-sm rounded-lg transition-colors" style={{ borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-secondary)' }}>
                 Back to Lobby
               </button>
             </div>

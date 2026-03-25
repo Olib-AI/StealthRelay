@@ -13,7 +13,7 @@ function PeerList() {
   return (
     <div>
       {/* Self */}
-      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-[#38383A]">
+      <div className="flex items-center gap-3 px-4 py-2.5" style={{ borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' }}>
         <PeerAvatar
           emoji={userProfile.avatarEmoji}
           colorIndex={userProfile.avatarColorIndex}
@@ -21,16 +21,16 @@ function PeerList() {
           isHost={localPeerId === poolInfo?.hostPeerId}
         />
         <div className="min-w-0 flex-1">
-          <p className="text-[15px] font-medium text-white truncate">
+          <p className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
             {userProfile.displayName}
-            <span className="text-[12px] ml-1.5" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>(you)</span>
+            <span className="text-[12px] ml-1.5" style={{ color: 'var(--text-tertiary)' }}>(you)</span>
           </p>
         </div>
       </div>
 
       {/* Other peers */}
       {otherPeers.map((peer, index) => (
-          <div key={peer.peerId} className={`flex items-center gap-3 px-4 py-2.5 transition-colors ${index < otherPeers.length - 1 ? 'border-b border-[#38383A]' : ''}`}>
+          <div key={peer.peerId} className="flex items-center gap-3 px-4 py-2.5 transition-colors" style={index < otherPeers.length - 1 ? { borderBottomWidth: '1px', borderBottomStyle: 'solid', borderBottomColor: 'var(--separator)' } : undefined}>
             <PeerAvatar
               emoji={peer.avatarEmoji}
               colorIndex={peer.avatarColorIndex}
@@ -38,7 +38,7 @@ function PeerList() {
               isHost={peer.peerId === poolInfo?.hostPeerId}
             />
             <div className="min-w-0 flex-1">
-              <p className="text-[15px] font-medium text-white truncate">
+              <p className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
                 {peer.displayName}
                 {peer.peerId === poolInfo?.hostPeerId && (
                   <span className="ml-1.5 text-[10px] font-bold text-white px-1.5 py-0.5 rounded-full bg-[#FF9F0A]">HOST</span>

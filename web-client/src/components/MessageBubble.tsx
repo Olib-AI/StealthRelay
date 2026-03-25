@@ -109,12 +109,12 @@ function VoicePlayer({ voiceData, voiceDuration, isSelf }: VoicePlayerProps) {
         type="button"
         onClick={togglePlay}
         className="h-8 w-8 rounded-full flex items-center justify-center shrink-0 transition-colors"
-        style={{ backgroundColor: isSelf ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.1)' }}
+        style={{ backgroundColor: isSelf ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)' }}
       >
-        {isPlaying ? <Pause className="h-3.5 w-3.5 text-white" /> : <Play className="h-3.5 w-3.5 text-white ml-0.5" />}
+        {isPlaying ? <Pause className="h-3.5 w-3.5" style={{ color: 'inherit' }} /> : <Play className="h-3.5 w-3.5 ml-0.5" style={{ color: 'inherit' }} />}
       </button>
       <div className="flex-1 flex flex-col gap-0.5">
-        <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: isSelf ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.15)' }}>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: isSelf ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)' }}>
           <div
             className="h-full rounded-full transition-all duration-100"
             style={{ width: `${progress}%`, backgroundColor: isSelf ? 'rgba(255,255,255,0.8)' : '#007AFF' }}
@@ -150,7 +150,8 @@ function ImageLightbox({ src, onClose }: ImageLightboxProps) {
       <button
         type="button"
         onClick={onClose}
-        className="absolute top-4 right-4 h-8 w-8 rounded-full bg-[#2C2C2E] flex items-center justify-center text-white transition-colors z-10"
+        className="absolute top-4 right-4 h-8 w-8 rounded-full flex items-center justify-center text-white transition-colors z-10"
+        style={{ backgroundColor: 'var(--bg-tertiary)' }}
       >
         <X className="h-5 w-5" />
       </button>
@@ -217,7 +218,7 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
   if (message.contentType === 'system') {
     return (
       <div className="flex justify-center py-1">
-        <span className="text-[12px] px-3 py-1 rounded-full bg-[#2C2C2E]" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>
+        <span className="text-[12px] px-3 py-1 rounded-full" style={{ backgroundColor: 'var(--system-msg-bg)', color: 'var(--text-secondary)' }}>
           {message.text}
         </span>
       </div>
@@ -233,16 +234,16 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
       <div className={`max-w-[75%] min-w-0 ${isSelf ? 'items-end' : 'items-start'} flex flex-col`}>
         {/* Sender name */}
         {!isSelf && (
-          <span className="text-[11px] font-medium mb-0.5 px-1" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>{message.senderName}</span>
+          <span className="text-[11px] font-medium mb-0.5 px-1" style={{ color: 'var(--text-secondary)' }}>{message.senderName}</span>
         )}
 
         {/* Reply preview */}
         {message.replyTo && (
           <div
             className={`text-[12px] px-2 py-1 mb-0.5 rounded-lg max-w-full truncate ${isSelf ? 'self-end border-l-2 border-white/60' : 'self-start border-l-2 border-[#007AFF]'}`}
-            style={{ backgroundColor: isSelf ? 'rgba(0, 122, 255, 0.3)' : '#2C2C2E', color: 'rgba(235, 235, 245, 0.6)' }}
+            style={{ backgroundColor: isSelf ? 'rgba(0, 122, 255, 0.3)' : 'var(--bubble-incoming)', color: 'var(--text-secondary)' }}
           >
-            <span className="font-medium text-white">{message.replyTo.senderName}: </span>
+            <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{message.replyTo.senderName}: </span>
             {message.replyTo.previewText}
           </div>
         )}
@@ -252,10 +253,15 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
           className={`px-3 py-2 text-[15px] break-words relative ${
             message.contentType === 'emoji' && message.emoji && !message.text
               ? ''
-              : isSelf
-                ? 'bg-[#007AFF] text-white rounded-[16px]'
-                : 'bg-[#2C2C2E] text-white rounded-[16px]'
+              : 'rounded-[16px]'
           }`}
+          style={
+            message.contentType === 'emoji' && message.emoji && !message.text
+              ? undefined
+              : isSelf
+                ? { backgroundColor: 'var(--bubble-outgoing)', color: 'var(--bubble-outgoing-text)' }
+                : { backgroundColor: 'var(--bubble-incoming)', color: 'var(--bubble-incoming-text)' }
+          }
         >
           {/* Voice content */}
           {message.contentType === 'voice' && message.voiceData && (
@@ -311,7 +317,7 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
                       style={{ width: `${pct}%`, backgroundColor: 'rgba(0, 122, 255, 0.15)' }}
                     />
                     <span className="relative z-10">{option}</span>
-                    <span className="relative z-10 float-right" style={{ color: 'rgba(235, 235, 245, 0.6)' }}>{votes.length} ({pct}%)</span>
+                    <span className="relative z-10 float-right opacity-60">{votes.length} ({pct}%)</span>
                   </button>
                 );
               })}
@@ -333,19 +339,21 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
         {/* Timestamp + actions below bubble */}
         <div className={`flex items-center gap-1.5 px-1 mt-0.5 ${isSelf ? 'flex-row-reverse' : 'flex-row'}`}>
           {message.isEncrypted && <Lock className="h-2.5 w-2.5 text-[#30D158]" />}
-          <span className="text-[11px]" style={{ color: 'rgba(235, 235, 245, 0.3)' }}>{time}</span>
+          <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{time}</span>
           <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               type="button"
               onClick={() => setReplyingTo(message)}
-              className="h-5 w-5 rounded-full bg-[#2C2C2E] flex items-center justify-center text-white/50 hover:text-white transition-colors"
+              className="h-5 w-5 rounded-full flex items-center justify-center transition-colors"
+              style={{ backgroundColor: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}
             >
               <Reply className="h-2.5 w-2.5" />
             </button>
             <button
               type="button"
               onClick={() => setShowReactions(!showReactions)}
-              className="h-5 w-5 rounded-full bg-[#2C2C2E] flex items-center justify-center text-white/50 hover:text-white transition-colors"
+              className="h-5 w-5 rounded-full flex items-center justify-center transition-colors"
+              style={{ backgroundColor: 'var(--bg-tertiary)', color: 'var(--text-tertiary)' }}
             >
               <SmilePlus className="h-2.5 w-2.5" />
             </button>
@@ -362,12 +370,12 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
                 onClick={() => handleReaction(emoji)}
                 className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs transition-colors"
                 style={{
-                  backgroundColor: localPeerId && reactors.includes(localPeerId) ? 'rgba(0, 122, 255, 0.2)' : '#2C2C2E',
+                  backgroundColor: localPeerId && reactors.includes(localPeerId) ? 'rgba(0, 122, 255, 0.2)' : 'var(--bg-tertiary)',
                   border: localPeerId && reactors.includes(localPeerId) ? '1px solid rgba(0, 122, 255, 0.5)' : '1px solid transparent',
                 }}
               >
                 <span>{emoji}</span>
-                <span style={{ color: 'rgba(235, 235, 245, 0.6)' }}>{reactors.length}</span>
+                <span style={{ color: 'var(--text-secondary)' }}>{reactors.length}</span>
               </button>
             ))}
           </div>
@@ -375,13 +383,16 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
 
         {/* Reaction picker */}
         {showReactions && (
-          <div className={`flex gap-1 mt-1 p-1.5 rounded-xl bg-[#2C2C2E] animate-fade-in ${isSelf ? 'self-end' : 'self-start'}`}>
+          <div className={`flex gap-1 mt-1 p-1.5 rounded-xl animate-fade-in ${isSelf ? 'self-end' : 'self-start'}`} style={{ backgroundColor: 'var(--bg-tertiary)' }}>
             {REACTION_EMOJIS.map((emoji) => (
               <button
                 key={emoji}
                 type="button"
                 onClick={() => handleReaction(emoji)}
-                className="h-7 w-7 rounded-lg flex items-center justify-center hover:bg-[#38383A] transition-colors text-sm"
+                className="h-7 w-7 rounded-lg flex items-center justify-center transition-colors text-sm"
+                style={{ backgroundColor: 'transparent' }}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--separator)')}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
               >
                 {emoji}
               </button>

@@ -300,29 +300,40 @@ function Wait-ForHealth {
 # ── Show setup URL ────────────────────────────────────────────────────────────
 
 function Show-SetupUrl {
-    # For Windows service, the setup URL is in the service log output.
-    # Since Windows services don't have easy log access like journalctl,
-    # we'll try to read from the Application event log or start the binary
-    # briefly to capture the URL.
+    # Extract setup URL from WinSW stderr log (the relay prints it there)
+    $setupUrl = ""
+    $errLog = Join-Path $DataDir "StealthRelay.err.log"
+    if (Test-Path $errLog) {
+        $match = Select-String -Path $errLog -Pattern "http://[^ ]*setup\?token=[a-f0-9]+" | Select-Object -Last 1
+        if ($match) {
+            $setupUrl = $match.Matches[0].Value
+            # Replace 0.0.0.0 with 127.0.0.1 for Windows compatibility
+            $setupUrl = $setupUrl -replace "0\.0\.0\.0", "127.0.0.1"
+        }
+    }
 
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor White
     Write-Host "  StealthOS Relay is running!" -ForegroundColor White
     Write-Host ""
-    Write-Host "  To claim your server, run this command to see the setup URL:" -ForegroundColor White
+
+    if ($setupUrl) {
+        Write-Host "  Open this URL to claim your server:" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  $setupUrl" -ForegroundColor Green
+    } else {
+        Write-Host "  Check the log for the setup URL:" -ForegroundColor White
+        Write-Host "  Get-Content `"$errLog`" | Select-String setup" -ForegroundColor Cyan
+    }
+
     Write-Host ""
-    Write-Host "  & `"$BinaryPath`" serve --config `"$ConfigPath`"" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  (Stop the service first: Stop-Service $ServiceName)" -ForegroundColor Gray
-    Write-Host "  Or check: http://127.0.0.1:9091/setup" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  WebSocket relay:  ws://0.0.0.0:9090" -ForegroundColor White
+    Write-Host "  WebSocket relay:  ws://127.0.0.1:9090" -ForegroundColor White
     Write-Host "  Health check:     http://127.0.0.1:9091/health" -ForegroundColor White
     Write-Host "================================================================" -ForegroundColor White
     Write-Host ""
 
-    if (-not $NoBrowser) {
-        Start-Process "http://127.0.0.1:9091/health"
+    if (-not $NoBrowser -and $setupUrl) {
+        Start-Process $setupUrl
     }
 }
 

@@ -66,8 +66,11 @@ export function deriveSharedKey(peerPublicKey: Uint8Array): Uint8Array {
 }
 
 function toRawBuffer(bytes: Uint8Array): ArrayBuffer {
-  // Ensure we get exactly the bytes we want, not a larger backing buffer
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  // Copy to a fresh ArrayBuffer to avoid SharedArrayBuffer type issues
+  // and ensure we get exactly the bytes we want, not a larger backing buffer
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  return buf;
 }
 
 export async function encryptMessage(plaintext: string, keyBytes: Uint8Array): Promise<string> {

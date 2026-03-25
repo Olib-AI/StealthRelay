@@ -256,8 +256,9 @@ function GameChatOverlay() {
       {isOpen && (
         <div
           className="fixed z-[41] rounded-2xl shadow-xl shadow-black/40 flex flex-col overflow-hidden"
-          style={{ backgroundColor: 'rgba(0, 0, 0, 0.85)', backdropFilter: 'blur(20px)' }}
           style={{
+            backgroundColor: 'rgba(0, 0, 0, 0.85)',
+            backdropFilter: 'blur(20px)',
             width: PANEL_WIDTH,
             height: PANEL_HEIGHT,
             left: panelLeft,

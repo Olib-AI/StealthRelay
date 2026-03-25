@@ -8,11 +8,6 @@ import { appleTimestamp } from '../../utils/time.ts';
 import type { ChessAction, ChessPiece, ChessState, ChessPieceType, ChessColor, GameControlPayload } from '../../protocol/messages.ts';
 import PeerAvatar from '../../components/PeerAvatar.tsx';
 
-const PIECE_SYMBOLS: Record<ChessColor, Record<ChessPieceType, string>> = {
-  white: { king: '♔', queen: '♕', rook: '♖', bishop: '♗', knight: '♘', pawn: '♙' },
-  black: { king: '♚', queen: '♛', rook: '♜', bishop: '♝', knight: '♞', pawn: '♟' },
-};
-
 const PIECE_SVG: Record<ChessColor, Record<ChessPieceType, string>> = {
   white: {
     king: '/chess/chess-king-white.svg',

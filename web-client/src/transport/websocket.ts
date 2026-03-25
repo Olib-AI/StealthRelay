@@ -477,7 +477,7 @@ class WebSocketTransport {
         let isPrivate = payload.isPrivateChat === true;
         const symmetricKey = useChatStore.getState().peerSymmetricKeys[fromPeerId];
 
-        let text = '[Encrypted message]';
+        let text: string | undefined = '[Encrypted message]';
         let decryptedMsg: EncryptedChatMessage | null = null;
         let didDecrypt = false;
 

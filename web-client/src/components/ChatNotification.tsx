@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { MessageSquare, User } from 'lucide-react';
 import { useChatStore } from '../stores/chat.ts';
 import type { ChatMessage } from '../stores/chat.ts';
@@ -30,7 +30,7 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
       prevPrivateCounts[pid] = msgs.length;
     }
 
-    const unsub = useChatStore.subscribe((state, prevState) => {
+    const unsub = useChatStore.subscribe((state) => {
       const localPeerId = useConnectionStore.getState().localPeerId;
       const chatTab = state.currentView;
       const selectedPeer = state.selectedPrivatePeerId;

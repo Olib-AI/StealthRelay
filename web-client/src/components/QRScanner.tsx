@@ -9,7 +9,6 @@ interface QRScannerProps {
 
 function QRScanner({ onScan, onClose }: QRScannerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const scannerRef = useRef<Html5Qrcode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const hasScanned = useRef(false);
 
@@ -18,45 +17,63 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
     if (!container) return;
 
     const scannerId = 'qr-scanner-element';
-    let scannerDiv = container.querySelector(`#${scannerId}`);
-    if (!scannerDiv) {
-      scannerDiv = document.createElement('div');
-      scannerDiv.id = scannerId;
-      container.appendChild(scannerDiv);
-    }
+    // Clean any previous scanner div
+    const existing = container.querySelector(`#${scannerId}`);
+    if (existing) existing.remove();
+
+    const scannerDiv = document.createElement('div');
+    scannerDiv.id = scannerId;
+    container.appendChild(scannerDiv);
 
     const scanner = new Html5Qrcode(scannerId);
-    scannerRef.current = scanner;
-    let isRunning = false;
+    let running = false;
+
+    // Use a responsive qrbox that fits the container
+    const containerWidth = container.clientWidth;
+    const qrboxSize = Math.min(Math.floor(containerWidth * 0.8), 250);
 
     scanner
       .start(
         { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        {
+          fps: 15,
+          qrbox: { width: qrboxSize, height: qrboxSize },
+          aspectRatio: 1.0,
+        },
         (text) => {
-          if (!hasScanned.current && text.includes('stealth://invite/')) {
+          if (hasScanned.current) return;
+          // Accept any scanned text — the invitation parser will validate it
+          // The QR might contain stealth://invite/..., stealth://claim/..., or a URL
+          if (text && text.trim().length > 0) {
             hasScanned.current = true;
-            isRunning = false;
+            running = false;
             scanner.stop().catch(() => {});
-            onScan(text);
+            onScan(text.trim());
           }
         },
         () => {},
       )
       .then(() => {
-        isRunning = true;
+        running = true;
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        setError(`Camera access denied or unavailable: ${msg}`);
+        if (msg.includes('NotAllowedError') || msg.includes('denied')) {
+          setError('Camera access denied. Please allow camera access and try again.');
+        } else if (msg.includes('NotFoundError') || msg.includes('no camera')) {
+          setError('No camera found on this device.');
+        } else {
+          setError(`Camera unavailable: ${msg}`);
+        }
       });
 
     return () => {
-      if (isRunning) {
+      if (running) {
+        running = false;
         scanner.stop().then(() => scanner.clear()).catch(() => {});
       }
     };
-  }, [onScan]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}>
@@ -71,7 +88,7 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
           </button>
         </div>
 
-        <div ref={containerRef} className="rounded-xl overflow-hidden bg-black aspect-square" />
+        <div ref={containerRef} className="rounded-xl overflow-hidden bg-black w-full" style={{ minHeight: 280 }} />
 
         {error && (
           <p className="text-[12px] text-[#FF453A] text-center">{error}</p>

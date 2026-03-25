@@ -53,6 +53,12 @@ The setup page displays a **QR code** — scan it with the StealthOS app to clai
 
 > **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
 
+> **Remote server (SSH)?** The setup page binds to `127.0.0.1:9091` and isn't accessible remotely. Use SSH port forwarding to access it from your local browser:
+> ```bash
+> ssh -L 9091:localhost:9091 user@your-server
+> ```
+> Then open `http://localhost:9091/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs — check with `sudo journalctl -u stealth-relay | grep setup`.
+
 Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
 - Enter your server URL (`ws://your-ip:9090`)
 - Tap **Scan QR Code** and point your camera at the setup page
@@ -558,17 +564,26 @@ docker build -t stealth-relay .
 
 ## Web Client
 
-A React web app is included in `web-client/` so friends without StealthOS or an iPhone can join your pool from any browser. It connects to the same relay server using the same E2E encrypted protocol.
+A React web app lets friends without StealthOS or an iPhone join your pool from any browser. Same E2E encrypted protocol, no app install required.
+
+**Hosted version:** [web.stealthos.app](https://web.stealthos.app) — paste an invitation link and join instantly.
+
+**Self-host with Docker:**
+
+```bash
+docker run -d -p 8080:80 ghcr.io/olib-ai/stealth-relay-web:latest
+```
+
+**Or build from source:**
 
 ```bash
 cd web-client
 npm install
 npm run build
+# Serve web-client/dist/ with any static hosting (Nginx, Caddy, Vercel, etc.)
 ```
 
-Serve the `web-client/dist/` folder from any static hosting (Nginx, Caddy, Vercel, Netlify, etc.). Users visit the page, paste an invitation link or scan the QR code, and join your pool — no app install required.
-
-The web client supports group and private chat, voice messages, image sharing, reactions, polls, and multiplayer games (Chess, Connect Four, Chain Reaction).
+Supports group and private chat, voice messages, image sharing, reactions, polls, and multiplayer games (Chess, Connect Four, Chain Reaction).
 
 ## Recovery
 

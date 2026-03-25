@@ -59,7 +59,7 @@ function JoinView() {
   const isConnecting = status === 'connecting' || status === 'waiting_approval';
 
   return (
-    <div className="flex-1 flex flex-col items-center min-h-0 overflow-y-auto px-4 py-6 sm:justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
+    <div className="flex-1 flex flex-col items-center min-h-0 overflow-y-auto px-4 py-6" style={{ backgroundColor: 'var(--bg-page)' }}>
       <div className="w-full max-w-md space-y-5">
         {/* Header */}
         <div className="text-center space-y-2">

@@ -27,6 +27,7 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
 
     const scanner = new Html5Qrcode(scannerId);
     scannerRef.current = scanner;
+    let isRunning = false;
 
     scanner
       .start(
@@ -35,20 +36,25 @@ function QRScanner({ onScan, onClose }: QRScannerProps) {
         (text) => {
           if (!hasScanned.current && text.includes('stealth://invite/')) {
             hasScanned.current = true;
+            isRunning = false;
             scanner.stop().catch(() => {});
             onScan(text);
           }
         },
         () => {},
       )
+      .then(() => {
+        isRunning = true;
+      })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         setError(`Camera access denied or unavailable: ${msg}`);
       });
 
     return () => {
-      scanner.stop().catch(() => {});
-      scanner.clear();
+      if (isRunning) {
+        scanner.stop().then(() => scanner.clear()).catch(() => {});
+      }
     };
   }, [onScan]);
 

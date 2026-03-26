@@ -352,7 +352,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
   }
 
   return (
-    <div style={{ borderTopWidth: '1px', borderTopStyle: 'solid', borderTopColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)' }}>
+    <div className="shrink-0" style={{ borderTopWidth: '1px', borderTopStyle: 'solid', borderTopColor: 'var(--separator)', backgroundColor: 'var(--bg-surface)', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
       {/* Reply preview */}
       {replyingTo && (
         <div className="flex items-center gap-2 px-4 py-1.5 border-l-2 border-[#007AFF]" style={{ backgroundColor: 'var(--bg-tertiary)' }}>
@@ -533,7 +533,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           </button>
         </div>
       ) : (
-        <div className="relative flex items-center gap-2 px-3 py-2">
+        <div className="relative flex items-center gap-1.5 px-2 py-2">
           {/* Mentions dropdown */}
           {showMentions && (
             <div className="absolute bottom-full mb-1 left-3 rounded-xl p-1 w-48 max-h-32 overflow-y-auto z-20 animate-fade-in" style={{ backgroundColor: 'var(--bg-surface)' }}>
@@ -560,7 +560,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <button
             type="button"
             onClick={() => { setShowEmoji(!showEmoji); setShowPoll(false); }}
-            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
+            className="h-8 w-8 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
           >
             <Smile className="h-5 w-5" />
           </button>
@@ -568,7 +568,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <button
             type="button"
             onClick={() => { setShowPoll(!showPoll); setShowEmoji(false); }}
-            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
+            className="h-8 w-8 flex items-center justify-center transition-colors shrink-0" style={{ color: 'var(--text-secondary)' }}
           >
             <BarChart3 className="h-5 w-5" />
           </button>
@@ -576,7 +576,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
           <button
             type="button"
             onClick={handleImagePick}
-            className="h-9 w-9 flex items-center justify-center transition-colors shrink-0"
+            className="h-8 w-8 flex items-center justify-center transition-colors shrink-0"
             style={{ color: 'var(--text-secondary)' }}
             aria-label="Share image"
           >
@@ -589,8 +589,8 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             value={text}
             onChange={handleTextChange}
             onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
-            className="flex-1 px-4 py-2.5 rounded-[20px] text-[15px] focus:ring-0 transition-colors"
+            placeholder="Message..."
+            className="flex-1 min-w-0 px-3 py-2 rounded-full text-[15px] focus:ring-0 transition-colors"
             style={{ backgroundColor: 'var(--bg-input)', color: 'var(--text-primary)' }}
           />
 
@@ -598,7 +598,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             <button
               type="button"
               onClick={handleSend}
-              className="h-10 w-10 rounded-full bg-[#007AFF] flex items-center justify-center text-white transition-colors shrink-0"
+              className="h-9 w-9 rounded-full bg-[#007AFF] flex items-center justify-center text-white transition-colors shrink-0"
             >
               <Send className="h-4 w-4" />
             </button>
@@ -606,7 +606,7 @@ function ChatInput({ onSendMessage, onSendPoll, onSendVoice, onSendImage }: Chat
             <button
               type="button"
               onClick={startRecording}
-              className="h-10 w-10 rounded-full bg-[#007AFF] flex items-center justify-center text-white transition-colors shrink-0"
+              className="h-9 w-9 rounded-full bg-[#007AFF] flex items-center justify-center text-white transition-colors shrink-0"
               aria-label="Record voice message"
             >
               <Mic className="h-4 w-4" />

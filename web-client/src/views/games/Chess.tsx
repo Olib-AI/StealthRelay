@@ -506,19 +506,20 @@ function Chess({ onBack }: ChessProps) {
     }
   }, [gameState, session?.sessionID]);
 
-  if (!gameState) return null;
-
-  const kingInCheckSq = gameState.inCheck ? findKing(gameState.board, currentColor) : -1;
-
   // Last move squares for highlight (convert from iOS wire format: webRow = 7 - iosRow)
   const lastMoveSquares = useMemo(() => {
+    if (!gameState) return new Set<number>();
     const history = gameState.moveHistory;
     if (history.length === 0) return new Set<number>();
     const last = history[history.length - 1]!;
     const fromSq = (7 - last.fromRow) * 8 + last.fromCol;
     const toSq = (7 - last.toRow) * 8 + last.toCol;
     return new Set([fromSq, toSq]);
-  }, [gameState.moveHistory]);
+  }, [gameState?.moveHistory]);
+
+  if (!gameState) return null;
+
+  const kingInCheckSq = gameState.inCheck ? findKing(gameState.board, currentColor) : -1;
 
   const currentPlayer = session?.players.find((p) => p.playerIndex === gameState.currentPlayerIndex);
   const winner = gameState.winnerIndex !== undefined ? session?.players.find((p) => p.playerIndex === gameState.winnerIndex) : null;

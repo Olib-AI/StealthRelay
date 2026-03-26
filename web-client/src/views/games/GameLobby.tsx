@@ -1,4 +1,4 @@
-import { ArrowLeft, Swords, X, Check, Play } from 'lucide-react';
+import { ArrowLeft, Swords, X, Check, Play, CircleDot, Zap, Crown } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useGameStore } from '../../stores/game.ts';
 import { useConnectionStore } from '../../stores/connection.ts';
@@ -12,9 +12,9 @@ import PeerAvatar from '../../components/PeerAvatar.tsx';
 const textEncoder = new TextEncoder();
 
 const GAMES = [
-  { type: 'connect_four' as const, name: 'Connect Four', icon: '🔴🟡', description: 'Drop pieces and get 4 in a row', players: '2 players' },
-  { type: 'chain_reaction' as const, name: 'Chain Reaction', icon: '💥', description: 'Strategic orb placement with chain explosions', players: '2-4 players' },
-  { type: 'chess' as const, name: 'Chess', icon: '♟️', description: 'Classic chess', players: '2 players' },
+  { type: 'connect_four' as const, name: 'Connect Four', color: '#FF453A', description: 'Drop pieces and get 4 in a row', players: '2 players' },
+  { type: 'chain_reaction' as const, name: 'Chain Reaction', color: '#FF9F0A', description: 'Strategic orb placement with chain explosions', players: '2-4 players' },
+  { type: 'chess' as const, name: 'Chess', color: '#5856D6', description: 'Classic chess', players: '2 players' },
 ] as const;
 
 interface GameLobbyProps {
@@ -290,26 +290,33 @@ function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
       )}
 
       {/* Game cards */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {GAMES.map((game) => (
-          <button
-            key={game.type}
-            type="button"
-            onClick={() => handleInvite(game.type)}
-            disabled={!!currentSession}
-            className="w-full rounded-xl p-4 flex items-center gap-4 transition-colors text-left group disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{ backgroundColor: 'var(--bg-surface)' }}
-          >
-            <div className="h-14 w-14 rounded-full flex items-center justify-center text-2xl shrink-0 group-hover:scale-105 transition-transform" style={{ backgroundColor: 'rgba(191, 90, 242, 0.15)' }}>
-              {game.icon}
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>{game.name}</h3>
-              <p className="text-[13px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{game.description}</p>
-              <p className="text-[11px] mt-1" style={{ color: 'var(--text-tertiary)' }}>{game.players}</p>
-            </div>
-          </button>
-        ))}
+      <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6" style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 24px)' }}>
+        <p className="text-[13px] font-semibold uppercase tracking-wider mb-3 px-1" style={{ color: 'var(--text-tertiary)' }}>
+          Choose a game
+        </p>
+        <div className="grid grid-cols-1 gap-3">
+          {GAMES.map((game) => (
+            <button
+              key={game.type}
+              type="button"
+              onClick={() => handleInvite(game.type)}
+              disabled={!!currentSession}
+              className="w-full rounded-2xl p-5 flex items-center gap-4 active:scale-[0.97] transition-transform text-left disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ backgroundColor: 'var(--bg-secondary)' }}
+            >
+              <div className="h-16 w-16 rounded-2xl flex items-center justify-center shrink-0" style={{ backgroundColor: game.color + '18' }}>
+                {game.type === 'connect_four' && <CircleDot className="h-7 w-7" style={{ color: game.color }} />}
+                {game.type === 'chain_reaction' && <Zap className="h-7 w-7" style={{ color: game.color }} />}
+                {game.type === 'chess' && <Crown className="h-7 w-7" style={{ color: game.color }} />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>{game.name}</h3>
+                <p className="text-[14px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>{game.description}</p>
+                <p className="text-[12px] mt-1.5 font-medium" style={{ color: 'var(--text-tertiary)' }}>{game.players}</p>
+              </div>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

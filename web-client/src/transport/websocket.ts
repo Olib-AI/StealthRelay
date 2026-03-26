@@ -88,8 +88,19 @@ class WebSocketTransport {
   private openWebSocket(): void {
     if (!this.serverUrl) return;
 
+    // On secure pages, ws:// is blocked by mixed content policy.
+    // In dev, route through Vite's WS proxy; in prod, upgrade to wss://.
+    let url = this.serverUrl;
+    if (window.location.protocol === 'https:' && url.startsWith('ws://')) {
+      if (import.meta.env.DEV) {
+        url = `wss://${window.location.host}/ws-proxy/${encodeURIComponent(url)}`;
+      } else {
+        url = 'wss://' + url.slice(5);
+      }
+    }
+
     try {
-      this.ws = new WebSocket(this.serverUrl);
+      this.ws = new WebSocket(url);
     } catch (err) {
       useConnectionStore.getState().setError(`Failed to connect: ${err instanceof Error ? err.message : 'Unknown error'}`);
       useConnectionStore.getState().setStatus('failed');

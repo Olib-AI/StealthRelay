@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { Link2, QrCode, Shield, Loader2, AlertCircle, ArrowRight } from 'lucide-react';
+import { Link2, QrCode, Loader2, AlertCircle, ArrowRight } from 'lucide-react';
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts';
@@ -63,9 +63,7 @@ function JoinView() {
       <div className="w-full max-w-md space-y-5">
         {/* Header */}
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center h-20 w-20 rounded-full mb-2" style={{ background: 'linear-gradient(135deg, #007AFF, #BF5AF2)' }}>
-            <Shield className="h-10 w-10 text-white" />
-          </div>
+          <img src="/logo.png" alt="StealthOS" className="h-20 w-20 mb-2 mx-auto" />
           <h1 className="text-[28px] font-bold" style={{ color: 'var(--text-primary)' }}>StealthRelay</h1>
           <p className="text-[15px]" style={{ color: 'var(--text-secondary)' }}>
             Join a pool to chat and play games with friends
@@ -177,7 +175,7 @@ function JoinView() {
         </div>
 
         {/* Theme + Footer */}
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex flex-col items-center gap-3" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
           <ThemeToggle />
           <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
             End-to-end encrypted. No account required.

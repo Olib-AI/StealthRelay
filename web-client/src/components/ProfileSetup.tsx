@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { AVATAR_EMOJIS, AVATAR_COLORS } from '../protocol/constants.ts';
 import { usePoolStore } from '../stores/pool.ts';
-import { Check } from 'lucide-react';
+import { Check, ChevronDown } from 'lucide-react';
 
 interface ProfileSetupProps {
   compact?: boolean;
@@ -14,7 +14,7 @@ function ProfileSetup({ compact = false, onDone }: ProfileSetupProps) {
   const [name, setName] = useState(userProfile.displayName);
   const [selectedEmoji, setSelectedEmoji] = useState(userProfile.avatarEmoji);
   const [selectedColor, setSelectedColor] = useState(userProfile.avatarColorIndex);
-  const [showEmojiGrid, setShowEmojiGrid] = useState(!compact);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   function handleSave() {
     const trimmed = name.trim();
@@ -43,46 +43,48 @@ function ProfileSetup({ compact = false, onDone }: ProfileSetupProps) {
         />
       </div>
 
-      {/* Preview + color */}
-      <div className="flex items-center gap-3 sm:gap-4">
+      {/* Avatar + color row */}
+      <div className="flex items-center gap-3">
+        {/* Emoji avatar with tap indicator */}
         <button
           type="button"
-          onClick={() => setShowEmojiGrid(!showEmojiGrid)}
-          className="h-12 w-12 sm:h-14 sm:w-14 rounded-full flex items-center justify-center text-xl sm:text-2xl shrink-0 transition-transform hover:scale-110"
+          onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+          className="relative h-12 w-12 rounded-full flex items-center justify-center text-xl shrink-0 transition-transform active:scale-95"
           style={{ backgroundColor: AVATAR_COLORS[selectedColor]! }}
         >
           {selectedEmoji}
+          <span className="absolute -bottom-0.5 -right-0.5 h-5 w-5 rounded-full flex items-center justify-center" style={{ backgroundColor: 'var(--bg-tertiary)', border: '2px solid var(--bg-surface)' }}>
+            <ChevronDown className="h-2.5 w-2.5" style={{ color: 'var(--text-secondary)' }} />
+          </span>
         </button>
-        <div className="flex-1 min-w-0">
-          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Color</label>
-          <div className="flex gap-1.5 sm:gap-2 flex-wrap">
-            {AVATAR_COLORS.map((color, idx) => (
-              <button
-                key={color}
-                type="button"
-                onClick={() => setSelectedColor(idx)}
-                className="h-6 w-6 sm:h-7 sm:w-7 rounded-full flex items-center justify-center transition-transform hover:scale-110"
-                style={{ backgroundColor: color }}
-              >
-                {idx === selectedColor && <Check className="h-3 w-3 sm:h-3.5 sm:w-3.5 text-white" />}
-              </button>
-            ))}
-          </div>
+
+        {/* Color swatches - no label, vertically centered */}
+        <div className="flex gap-2 flex-wrap items-center">
+          {AVATAR_COLORS.map((color, idx) => (
+            <button
+              key={color}
+              type="button"
+              onClick={() => setSelectedColor(idx)}
+              className="h-7 w-7 rounded-full flex items-center justify-center transition-transform active:scale-90"
+              style={{ backgroundColor: color, boxShadow: idx === selectedColor ? `0 0 0 2px var(--bg-surface), 0 0 0 3.5px ${color}` : undefined }}
+            >
+              {idx === selectedColor && <Check className="h-3.5 w-3.5 text-white" />}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Emoji grid */}
-      {showEmojiGrid && (
-        <div>
-          <label className="block text-[12px] font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Avatar Emoji</label>
-          <div className="grid grid-cols-6 sm:grid-cols-8 gap-1 sm:gap-1.5">
+      {/* Emoji picker overlay */}
+      {showEmojiPicker && (
+        <div className="rounded-xl p-3 animate-fade-in" style={{ backgroundColor: 'var(--bg-tertiary)' }}>
+          <div className="grid grid-cols-8 gap-1">
             {AVATAR_EMOJIS.map((emoji) => (
               <button
                 key={emoji}
                 type="button"
-                onClick={() => setSelectedEmoji(emoji)}
-                className="aspect-square rounded-lg flex items-center justify-center text-base sm:text-lg transition-all"
-                style={emoji === selectedEmoji ? { backgroundColor: '#007AFF' } : { backgroundColor: 'var(--bg-surface)' }}
+                onClick={() => { setSelectedEmoji(emoji); setShowEmojiPicker(false); }}
+                className="aspect-square rounded-lg flex items-center justify-center text-lg transition-all active:scale-90"
+                style={emoji === selectedEmoji ? { backgroundColor: '#007AFF' } : undefined}
               >
                 {emoji}
               </button>

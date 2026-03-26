@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useConnectionStore } from './stores/connection.ts';
 import { useGameStore } from './stores/game.ts';
 import JoinView from './views/JoinView.tsx';
@@ -49,6 +49,16 @@ function App() {
     }
   }, []);
 
+  // Track view changes for transition animation
+  const prevViewRef = useRef(effectiveView);
+  const [viewKey, setViewKey] = useState(0);
+  useEffect(() => {
+    if (prevViewRef.current !== effectiveView) {
+      prevViewRef.current = effectiveView;
+      setViewKey((k) => k + 1);
+    }
+  }, [effectiveView]);
+
   // Game views stay mounted while a game session is active so navigation
   // to chat/lobby and back does not destroy in-progress game state.
   const showConnectFour = isGameActive && activeGameType === 'connect_four';
@@ -57,18 +67,22 @@ function App() {
 
   return (
     <div className="h-dvh flex items-center justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
-      <div className="relative w-full max-w-[430px] h-dvh sm:max-h-[932px] flex flex-col overflow-hidden sm:rounded-2xl sm:border sm:shadow-2xl sm:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
-        {effectiveView === 'join' && <JoinView />}
-        {effectiveView === 'lobby' && (
-          <LobbyView
-            onNavigateChat={() => setView('chat')}
-            onNavigateGames={() => setView('game_lobby')}
-            onReturnToGame={isGameActive && activeGameType ? () => setView(activeGameType) : undefined}
-          />
-        )}
-        {effectiveView === 'chat' && <ChatView onBack={() => setView('lobby')} />}
-        {effectiveView === 'game_lobby' && (
-          <GameLobby onBack={() => setView('lobby')} onStartGame={handleStartGame} />
+      <div className="relative w-full h-dvh flex flex-col overflow-hidden lg:max-w-[430px] lg:max-h-[932px] lg:rounded-2xl lg:border lg:shadow-2xl lg:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
+        {(effectiveView === 'join' || effectiveView === 'lobby' || effectiveView === 'chat' || effectiveView === 'game_lobby') && (
+          <div key={viewKey} className="flex-1 flex flex-col min-h-0 animate-view-enter">
+            {effectiveView === 'join' && <JoinView />}
+            {effectiveView === 'lobby' && (
+              <LobbyView
+                onNavigateChat={() => setView('chat')}
+                onNavigateGames={() => setView('game_lobby')}
+                onReturnToGame={isGameActive && activeGameType ? () => setView(activeGameType) : undefined}
+              />
+            )}
+            {effectiveView === 'chat' && <ChatView onBack={() => setView('lobby')} />}
+            {effectiveView === 'game_lobby' && (
+              <GameLobby onBack={() => setView('lobby')} onStartGame={handleStartGame} />
+            )}
+          </div>
         )}
         {showConnectFour && (
           <div className={effectiveView === 'connect_four' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>

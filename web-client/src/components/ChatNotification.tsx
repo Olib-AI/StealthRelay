@@ -5,6 +5,7 @@ import type { ChatMessage } from '../stores/chat.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import PeerAvatar from './PeerAvatar.tsx';
+import { sendNotification } from '../hooks/useNotifications.ts';
 
 interface Toast {
   id: string;
@@ -49,6 +50,12 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
             return [...prev, { id, message: newMsg, isPrivate: false }].slice(-3);
           });
           setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+          const senderPeer = usePoolStore.getState().peers.find(p => p.peerId === newMsg.senderID);
+          sendNotification(
+            senderPeer?.displayName ?? newMsg.senderName ?? 'Group Chat',
+            newMsg.text ?? (newMsg.contentType === 'image' ? 'Sent a photo' : newMsg.contentType === 'voice' ? 'Sent a voice message' : 'New message'),
+            'group-' + newMsg.id
+          );
         }
       }
       prevGroupCount = groupCount;
@@ -67,6 +74,12 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
               return [...prev, { id, message: newMsg, isPrivate: true, peerId }].slice(-3);
             });
             setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+            const privatePeer = usePoolStore.getState().peers.find(p => p.peerId === newMsg.senderID);
+            sendNotification(
+              privatePeer?.displayName ?? newMsg.senderName ?? 'Private Message',
+              newMsg.text ?? (newMsg.contentType === 'image' ? 'Sent a photo' : newMsg.contentType === 'voice' ? 'Sent a voice message' : 'New message'),
+              'private-' + newMsg.id
+            );
           }
         }
         prevPrivateCounts[peerId] = curr;

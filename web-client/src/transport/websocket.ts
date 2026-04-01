@@ -46,6 +46,13 @@ import type {
   ChainReactionAction,
   ChessState,
   ChessAction,
+  LudoBoardState,
+  LudoAction,
+  LudoPlayer,
+  LudoTokenPosition,
+  DiceRolledPayload,
+  TokenMovedPayload,
+  TurnChangedPayload,
 } from '../protocol/messages.ts';
 
 const textEncoder = new TextEncoder();
@@ -321,6 +328,9 @@ class WebSocketTransport {
         }
         if (gameStore.chessState && !gameStore.chessState.gameOver) {
           gameStore.setChessState({ ...gameStore.chessState, gameOver: true, winnerIndex: localPlayer?.playerIndex, isCheckmate: false, isStalemate: false });
+        }
+        if (gameStore.ludoState && gameStore.ludoState.gamePhase !== 'finished') {
+          gameStore.setLudoState({ ...gameStore.ludoState, gamePhase: 'finished', winnerPlayerIndex: localPlayer?.playerIndex ?? null });
         }
       }
     }
@@ -733,6 +743,9 @@ class WebSocketTransport {
           if (gameStore.chessState && !gameStore.chessState.gameOver) {
             gameStore.setChessState({ ...gameStore.chessState, gameOver: true, winnerIndex: localPlayer?.playerIndex, isCheckmate: false, isStalemate: false });
           }
+          if (gameStore.ludoState && gameStore.ludoState.gamePhase !== 'finished') {
+            gameStore.setLudoState({ ...gameStore.ludoState, gamePhase: 'finished', winnerPlayerIndex: localPlayer?.playerIndex ?? null });
+          }
           break;
         }
         case 'rematch': {
@@ -743,6 +756,7 @@ class WebSocketTransport {
             useGameStore.getState().setConnectFourState(null);
             useGameStore.getState().setChainReactionState(null);
             useGameStore.getState().setChessState(null);
+            useGameStore.getState().setLudoState(null);
           }
           break;
         }
@@ -767,6 +781,18 @@ class WebSocketTransport {
         useGameStore.getState().setChainReactionState(state as unknown as ChainReactionState);
       } else if (gameType === 'chess') {
         useGameStore.getState().setChessState(state as unknown as ChessState);
+      } else if (gameType === 'ludo') {
+        // iOS sends LudoBroadcast via sendGameState.
+        // LudoBroadcast has { type, timestamp, payload } where payload is base64-encoded inner data.
+        // We need to unwrap and dispatch based on broadcast type.
+        const incoming = state as Record<string, unknown>;
+        if (incoming.type && incoming.payload !== undefined) {
+          // This is a LudoBroadcast from iOS
+          this.handleLudoBroadcast(incoming);
+        } else if (incoming.players) {
+          // This is a raw LudoBoardState (from web host or direct state sync)
+          useGameStore.getState().setLudoState(this.normalizeLudoState(incoming));
+        }
       }
     } catch {
       // Invalid game state
@@ -785,9 +811,225 @@ class WebSocketTransport {
         this.applyChainReactionAction(action as unknown as ChainReactionAction);
       } else if (gameType === 'chess') {
         this.applyChessAction(action as unknown as ChessAction);
+      } else if (gameType === 'ludo') {
+        const incoming = action as Record<string, unknown>;
+        if (
+          typeof incoming.type === 'string' &&
+          typeof incoming.playerID === 'string' &&
+          typeof incoming.turnNumber === 'number' &&
+          typeof incoming.timestamp === 'number'
+        ) {
+          useGameStore.getState().setLudoAction({
+            type: incoming.type as LudoAction['type'],
+            playerID: incoming.playerID,
+            turnNumber: incoming.turnNumber,
+            timestamp: incoming.timestamp,
+            ...(typeof incoming.payload === 'string' ? { payload: incoming.payload } : {}),
+          });
+        } else if (incoming.type && incoming.payload !== undefined && typeof incoming.timestamp === 'number') {
+          // Could be a LudoBroadcast routed through game_action
+          this.handleLudoBroadcast(incoming);
+        }
       }
     } catch {
       // Invalid game action
+    }
+  }
+
+  /**
+   * Normalize a LudoTokenPosition from iOS Swift enum encoding to web format.
+   * Swift encodes enums with associated values as: {"board": {"step": 5}}
+   * Web expects: { type: "board", step: 5 }
+   */
+  private normalizeLudoPosition(pos: unknown): LudoTokenPosition {
+    if (!pos || typeof pos !== 'object') return { type: 'yard' };
+    const obj = pos as Record<string, unknown>;
+    // Already in web format
+    if (typeof obj.type === 'string') return obj as unknown as LudoTokenPosition;
+    // Swift enum format
+    if ('yard' in obj) return { type: 'yard' };
+    if ('home' in obj) return { type: 'home' };
+    if ('board' in obj) {
+      const inner = obj.board as Record<string, unknown> | undefined;
+      return { type: 'board', step: (inner?.step as number) ?? 0 };
+    }
+    if ('homeColumn' in obj) {
+      const inner = obj.homeColumn as Record<string, unknown> | undefined;
+      return { type: 'homeColumn', step: (inner?.step as number) ?? 0 };
+    }
+    return { type: 'yard' };
+  }
+
+  /** Normalize all token positions and token structure in a LudoBoardState from iOS format */
+  private normalizeLudoState(state: Record<string, unknown>): LudoBoardState {
+    const s = state as unknown as LudoBoardState;
+    if (!s.players) return s;
+    return {
+      ...s,
+      players: s.players.map(p => ({
+        ...p,
+        // iOS LudoPlayer.tokenIndex is computed from id.tokenIndex — normalize
+        playerIndex: p.playerIndex ?? (p as unknown as Record<string, unknown>).id as number ?? 0,
+        tokens: (p.tokens ?? []).map(t => {
+          const raw = t as unknown as Record<string, unknown>;
+          // iOS LudoToken has { id: { playerIndex, tokenIndex }, position }
+          // Web expects { tokenIndex, position }
+          let tokenIndex = t.tokenIndex;
+          if (tokenIndex === undefined || tokenIndex === null) {
+            const tid = raw.id as Record<string, unknown> | undefined;
+            tokenIndex = (tid?.tokenIndex as number) ?? 0;
+          }
+          return {
+            ...t,
+            tokenIndex,
+            position: this.normalizeLudoPosition(t.position ?? raw.position),
+          };
+        }),
+      })),
+    };
+  }
+
+  /** Normalize a TokenMovedPayload from iOS */
+  private normalizeTokenMovedPayload(payload: Record<string, unknown>): TokenMovedPayload {
+    const p = payload as unknown as TokenMovedPayload;
+    // iOS also serializes capturedToken as { playerIndex, tokenIndex } nested in LudoTokenID
+    let capturedToken = p.capturedToken;
+    if (capturedToken && (capturedToken as unknown as Record<string, unknown>).playerIndex === undefined) {
+      capturedToken = null;
+    }
+    return {
+      ...p,
+      from: this.normalizeLudoPosition(p.from),
+      to: this.normalizeLudoPosition(p.to),
+      capturedToken,
+    };
+  }
+
+  private handleLudoBroadcast(broadcast: Record<string, unknown>): void {
+    const broadcastType = broadcast.type as string;
+    const payloadRaw = broadcast.payload;
+
+    // iOS encodes LudoBroadcast.payload as Swift Data, which serializes as base64 in JSON
+    let innerPayload: Record<string, unknown> | null = null;
+    if (typeof payloadRaw === 'string') {
+      try {
+        const decoded = textDecoder.decode(base64Decode(payloadRaw));
+        innerPayload = JSON.parse(decoded);
+      } catch { /* not base64 or not JSON */ }
+    } else if (typeof payloadRaw === 'object' && payloadRaw !== null) {
+      // Web host sends payload as direct object
+      innerPayload = payloadRaw as Record<string, unknown>;
+    }
+
+    const gameStore = useGameStore.getState();
+
+    switch (broadcastType) {
+      case 'stateSync':
+      case 'gameStarted': {
+        // innerPayload is the full LudoBoardState
+        if (innerPayload?.players) {
+          gameStore.setLudoState(this.normalizeLudoState(innerPayload));
+        }
+        break;
+      }
+      case 'diceRolled': {
+        // innerPayload is DiceRolledPayload — update lastDiceRoll on current state
+        if (innerPayload && gameStore.ludoState) {
+          const dp = innerPayload as unknown as DiceRolledPayload;
+          gameStore.setLudoState({
+            ...gameStore.ludoState,
+            lastDiceRoll: dp.rollValue,
+          });
+        }
+        break;
+      }
+      case 'tokenMoved': {
+        // innerPayload is TokenMovedPayload — apply the move to local state
+        if (innerPayload && gameStore.ludoState) {
+          const mp = this.normalizeTokenMovedPayload(innerPayload);
+          const players = gameStore.ludoState.players.map(p => {
+            if (p.playerIndex !== mp.playerIndex) {
+              // Handle capture — send captured token back to yard
+              if (mp.capturedToken && p.playerIndex === mp.capturedToken.playerIndex) {
+                return {
+                  ...p,
+                  tokens: p.tokens.map(t =>
+                    t.tokenIndex === mp.capturedToken!.tokenIndex
+                      ? { ...t, position: { type: 'yard' as const } }
+                      : t
+                  ),
+                };
+              }
+              return p;
+            }
+            return {
+              ...p,
+              tokens: p.tokens.map(t =>
+                t.tokenIndex === mp.tokenIndex
+                  ? { ...t, position: mp.to }
+                  : t
+              ),
+            };
+          });
+          gameStore.setLudoState({
+            ...gameStore.ludoState,
+            players,
+            lastDiceRoll: null,
+          });
+        }
+        break;
+      }
+      case 'turnChanged': {
+        if (innerPayload && gameStore.ludoState) {
+          const tc = innerPayload as unknown as TurnChangedPayload;
+          gameStore.setLudoState({
+            ...gameStore.ludoState,
+            currentPlayerIndex: tc.currentPlayerIndex,
+            turnNumber: tc.turnNumber,
+            lastDiceRoll: null,
+            consecutiveSixes: 0,
+          });
+        }
+        break;
+      }
+      case 'playerFinished': {
+        if (innerPayload && gameStore.ludoState) {
+          const pf = innerPayload as { playerIndex: number; finishOrder: number[] };
+          const players = gameStore.ludoState.players.map(p =>
+            p.playerIndex === pf.playerIndex ? { ...p, isFinished: true } : p
+          );
+          gameStore.setLudoState({
+            ...gameStore.ludoState,
+            players,
+            finishOrder: pf.finishOrder,
+          });
+        }
+        break;
+      }
+      case 'gameEnded': {
+        if (innerPayload && gameStore.ludoState) {
+          const ge = innerPayload as { winnerPlayerIndex?: number; winnerTeamIndex?: number; finishOrder: number[] };
+          gameStore.setLudoState({
+            ...gameStore.ludoState,
+            gamePhase: 'finished',
+            winnerPlayerIndex: ge.winnerPlayerIndex ?? null,
+            winnerTeamIndex: ge.winnerTeamIndex ?? null,
+            finishOrder: ge.finishOrder ?? gameStore.ludoState.finishOrder,
+          });
+        }
+        break;
+      }
+      case 'playerUpdate': {
+        if (innerPayload && gameStore.ludoState) {
+          const pu = innerPayload as { players?: LudoPlayer[] };
+          if (pu.players) {
+            gameStore.setLudoState({ ...gameStore.ludoState, players: pu.players });
+          }
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
 

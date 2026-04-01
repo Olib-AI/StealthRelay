@@ -1,4 +1,4 @@
-import { ArrowLeft, Swords, X, Check, Play, CircleDot, Zap, Crown } from 'lucide-react';
+import { ArrowLeft, Swords, X, Check, Play, CircleDot, Zap, Crown, Dice5 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useGameStore } from '../../stores/game.ts';
 import { useConnectionStore } from '../../stores/connection.ts';
@@ -15,11 +15,12 @@ const GAMES = [
   { type: 'connect_four' as const, name: 'Connect Four', color: '#FF453A', description: 'Drop pieces and get 4 in a row', players: '2 players' },
   { type: 'chain_reaction' as const, name: 'Chain Reaction', color: '#FF9F0A', description: 'Strategic orb placement with chain explosions', players: '2-4 players' },
   { type: 'chess' as const, name: 'Chess', color: '#5856D6', description: 'Classic chess', players: '2 players' },
+  { type: 'ludo' as const, name: 'Ludo', color: '#16A34A', description: 'Classic board game — race your tokens home', players: '2-4 players' },
 ] as const;
 
 interface GameLobbyProps {
   onBack: () => void;
-  onStartGame: (type: 'connect_four' | 'chain_reaction' | 'chess') => void;
+  onStartGame: (type: 'connect_four' | 'chain_reaction' | 'chess' | 'ludo') => void;
 }
 
 function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
@@ -31,7 +32,7 @@ function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
   const peers = usePoolStore((s) => s.peers);
   const userProfile = usePoolStore((s) => s.userProfile);
 
-  function handleInvite(gameType: 'connect_four' | 'chain_reaction' | 'chess') {
+  function handleInvite(gameType: 'connect_four' | 'chain_reaction' | 'chess' | 'ludo') {
     if (!localPeerId) return;
 
     const sessionID = uuidv4().toUpperCase();
@@ -188,7 +189,7 @@ function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
 
     useGameStore.getState().setSession(playingSession);
     useGameStore.getState().setGameActive(true);
-    useGameStore.getState().setActiveGameType(session.gameType as 'connect_four' | 'chain_reaction' | 'chess');
+    useGameStore.getState().setActiveGameType(session.gameType as 'connect_four' | 'chain_reaction' | 'chess' | 'ludo');
 
     // Broadcast start to all peers
     const startData = base64Encode(textEncoder.encode(JSON.stringify(playingSession)));
@@ -203,7 +204,7 @@ function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
 
   // If game is active, redirect to game
   if (isGameActive && activeGameType) {
-    onStartGame(activeGameType);
+    onStartGame(activeGameType as 'connect_four' | 'chain_reaction' | 'chess' | 'ludo');
     return null;
   }
 
@@ -308,6 +309,7 @@ function GameLobby({ onBack, onStartGame }: GameLobbyProps) {
                 {game.type === 'connect_four' && <CircleDot className="h-7 w-7" style={{ color: game.color }} />}
                 {game.type === 'chain_reaction' && <Zap className="h-7 w-7" style={{ color: game.color }} />}
                 {game.type === 'chess' && <Crown className="h-7 w-7" style={{ color: game.color }} />}
+                {game.type === 'ludo' && <Dice5 className="h-7 w-7" style={{ color: game.color }} />}
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>{game.name}</h3>

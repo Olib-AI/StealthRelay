@@ -13,6 +13,7 @@ const GAME_NAMES: Record<string, string> = {
   connect_four: 'Connect Four',
   chain_reaction: 'Chain Reaction',
   chess: 'Chess',
+  ludo: 'Ludo',
 };
 
 function formatServerUrl(url: string | null): string {

@@ -508,8 +508,8 @@ function Chess({ onBack }: ChessProps) {
 
   // Last move squares for highlight (convert from iOS wire format: webRow = 7 - iosRow)
   const lastMoveSquares = useMemo(() => {
-    if (!gameState) return new Set<number>();
-    const history = gameState.moveHistory;
+    const history = gameState?.moveHistory;
+    if (!history) return new Set<number>();
     if (history.length === 0) return new Set<number>();
     const last = history[history.length - 1]!;
     const fromSq = (7 - last.fromRow) * 8 + last.fromCol;

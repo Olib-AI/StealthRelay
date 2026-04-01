@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { useConnectionStore } from './stores/connection.ts';
 import { useGameStore } from './stores/game.ts';
 import JoinView from './views/JoinView.tsx';
@@ -8,11 +8,13 @@ import GameLobby from './views/games/GameLobby.tsx';
 import ConnectFour from './views/games/ConnectFour.tsx';
 import ChainReaction from './views/games/ChainReaction.tsx';
 import Chess from './views/games/Chess.tsx';
+import Ludo from './views/games/Ludo.tsx';
 import GameChatOverlay from './components/GameChatOverlay.tsx';
 import ChatNotification from './components/ChatNotification.tsx';
+import GameInvitationBanner from './components/GameInvitationBanner.tsx';
 import { useChatStore } from './stores/chat.ts';
 
-type AppView = 'join' | 'lobby' | 'chat' | 'game_lobby' | 'connect_four' | 'chain_reaction' | 'chess';
+type AppView = 'join' | 'lobby' | 'chat' | 'game_lobby' | 'connect_four' | 'chain_reaction' | 'chess' | 'ludo';
 
 function App() {
   const status = useConnectionStore((s) => s.status);
@@ -33,12 +35,16 @@ function App() {
     return view;
   })();
 
-  const handleStartGame = useCallback((type: 'connect_four' | 'chain_reaction' | 'chess') => {
+  const handleStartGame = useCallback((type: 'connect_four' | 'chain_reaction' | 'chess' | 'ludo') => {
     setView(type);
   }, []);
 
   const handleGameBack = useCallback(() => {
     setView('lobby');
+  }, []);
+
+  const handleNavigateToGames = useCallback(() => {
+    setView('game_lobby');
   }, []);
 
   const handleNotificationNav = useCallback((chatView: 'group' | 'private', peerId?: string) => {
@@ -49,27 +55,18 @@ function App() {
     }
   }, []);
 
-  // Track view changes for transition animation
-  const prevViewRef = useRef(effectiveView);
-  const [viewKey, setViewKey] = useState(0);
-  useEffect(() => {
-    if (prevViewRef.current !== effectiveView) {
-      prevViewRef.current = effectiveView;
-      setViewKey((k) => k + 1);
-    }
-  }, [effectiveView]);
-
   // Game views stay mounted while a game session is active so navigation
   // to chat/lobby and back does not destroy in-progress game state.
   const showConnectFour = isGameActive && activeGameType === 'connect_four';
   const showChainReaction = isGameActive && activeGameType === 'chain_reaction';
   const showChess = isGameActive && activeGameType === 'chess';
+  const showLudo = isGameActive && activeGameType === 'ludo';
 
   return (
     <div className="h-dvh flex items-center justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
       <div className="relative w-full h-dvh flex flex-col overflow-hidden lg:max-w-[430px] lg:max-h-[932px] lg:rounded-2xl lg:border lg:shadow-2xl lg:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
         {(effectiveView === 'join' || effectiveView === 'lobby' || effectiveView === 'chat' || effectiveView === 'game_lobby') && (
-          <div key={viewKey} className="flex-1 flex flex-col min-h-0 animate-view-enter">
+          <div key={effectiveView} className="flex-1 flex flex-col min-h-0 animate-view-enter">
             {effectiveView === 'join' && <JoinView />}
             {effectiveView === 'lobby' && (
               <LobbyView
@@ -99,8 +96,16 @@ function App() {
             <Chess onBack={handleGameBack} />
           </div>
         )}
-        {isGameActive && (effectiveView === 'connect_four' || effectiveView === 'chain_reaction' || effectiveView === 'chess') && (
+        {showLudo && (
+          <div className={effectiveView === 'ludo' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
+            <Ludo onBack={handleGameBack} />
+          </div>
+        )}
+        {isGameActive && (effectiveView === 'connect_four' || effectiveView === 'chain_reaction' || effectiveView === 'chess' || effectiveView === 'ludo') && (
           <GameChatOverlay />
+        )}
+        {isConnected && effectiveView !== 'join' && (
+          <GameInvitationBanner onNavigateToGames={handleNavigateToGames} />
         )}
         {isConnected && effectiveView !== 'join' && (
           <ChatNotification currentView={effectiveView} onNavigateToChat={handleNotificationNav} />

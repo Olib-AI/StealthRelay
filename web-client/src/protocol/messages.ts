@@ -68,7 +68,7 @@ export interface PeerInfoPayload {
 
 export interface GameControlPayload {
   controlType: 'invite' | 'invite_response' | 'session_update' | 'ready' | 'start' | 'pause' | 'resume' | 'forfeit' | 'rematch';
-  gameType: 'chain_reaction' | 'connect_four' | 'prompt_party' | 'chess';
+  gameType: 'chain_reaction' | 'connect_four' | 'prompt_party' | 'chess' | 'ludo';
   sessionID?: string;
   data?: string;
 }
@@ -159,6 +159,86 @@ export interface GameInvitationResponse {
   accepted: boolean;
   responderPeerID: string;
   responderName: string;
+}
+
+/* Ludo types */
+export interface LudoTokenPosition {
+  type: 'yard' | 'board' | 'homeColumn' | 'home';
+  step?: number;
+}
+
+export interface LudoToken {
+  tokenIndex: number;
+  position: LudoTokenPosition;
+}
+
+export interface LudoPlayer {
+  id: string;
+  name: string;
+  playerIndex: number;
+  isHost: boolean;
+  isAI: boolean;
+  tokens: LudoToken[];
+  isConnected: boolean;
+  isFinished: boolean;
+  teamIndex?: number;
+}
+
+export interface LudoValidMove {
+  tokenIndex: number;
+  fromPosition: LudoTokenPosition;
+  toPosition: LudoTokenPosition;
+  capturesOpponent: { playerIndex: number; tokenIndex: number } | null;
+}
+
+export interface LudoBoardState {
+  players: LudoPlayer[];
+  currentPlayerIndex: number;
+  gamePhase: 'lobby' | 'playing' | 'finished' | 'paused';
+  gameMode: 'classic' | 'vs';
+  teams: { teamIndex: number; playerIndices: number[] }[];
+  lastDiceRoll: number | null;
+  turnNumber: number;
+  mustRollAgain: boolean;
+  consecutiveSixes: number;
+  winnerPlayerIndex: number | null;
+  winnerTeamIndex: number | null;
+  finishOrder: number[];
+}
+
+export interface LudoBroadcast {
+  type: 'gameStarted' | 'diceRolled' | 'tokenMoved' | 'turnChanged' | 'playerFinished' | 'gameEnded' | 'stateSync' | 'playerUpdate';
+  timestamp: number;
+  payload: string;
+}
+
+export interface LudoAction {
+  type: 'requestDiceRoll' | 'selectToken' | 'requestSync' | 'readyToggle' | 'forfeit';
+  playerID: string;
+  turnNumber: number;
+  timestamp: number;
+  payload?: string;
+}
+
+export interface DiceRolledPayload {
+  playerIndex: number;
+  rollValue: number;
+  validMoves: LudoValidMove[];
+  turnNumber: number;
+}
+
+export interface TokenMovedPayload {
+  playerIndex: number;
+  tokenIndex: number;
+  from: LudoTokenPosition;
+  to: LudoTokenPosition;
+  capturedToken: { playerIndex: number; tokenIndex: number } | null;
+  turnNumber: number;
+}
+
+export interface TurnChangedPayload {
+  currentPlayerIndex: number;
+  turnNumber: number;
 }
 
 /* Chess types */

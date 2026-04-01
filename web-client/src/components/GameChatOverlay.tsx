@@ -26,10 +26,20 @@ interface ToastData {
   text: string;
 }
 
+function getInitialOverlayPosition() {
+  return {
+    x: window.innerWidth - BUBBLE_SIZE - 40,
+    y: window.innerHeight - BUBBLE_SIZE - 80,
+  };
+}
+
+function getRenderableMessages(messages: ChatMessage[]) {
+  return messages.filter((m) => m.contentType === 'text' || m.contentType === 'emoji');
+}
+
 function GameChatOverlay() {
   const [isOpen, setIsOpen] = useState(false);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const [posInitialized, setPosInitialized] = useState(false);
+  const [pos, setPos] = useState(getInitialOverlayPosition);
   const [isDragging, setIsDragging] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [toast, setToast] = useState<ToastData | null>(null);
@@ -39,7 +49,7 @@ function GameChatOverlay() {
   const dragStartRef = useRef<{ x: number; y: number; posX: number; posY: number } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevMessageCountRef = useRef(0);
+  const prevMessageCountRef = useRef(getRenderableMessages(useChatStore.getState().groupMessages).length);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const groupMessages = useChatStore((s) => s.groupMessages);
@@ -47,58 +57,64 @@ function GameChatOverlay() {
   const userProfile = usePoolStore((s) => s.userProfile);
   const peers = usePoolStore((s) => s.peers);
 
-  // Initialize position on mount
-  useEffect(() => {
-    setPos({
-      x: window.innerWidth - BUBBLE_SIZE - 40,
-      y: window.innerHeight - BUBBLE_SIZE - 80,
-    });
-    setPosInitialized(true);
-  }, []);
-
   // Filter to only text/emoji messages for display
-  const chatMessages = groupMessages.filter(
-    (m) => m.contentType === 'text' || m.contentType === 'emoji',
-  );
+  const chatMessages = getRenderableMessages(groupMessages);
 
   const visibleMessages = chatMessages.slice(-MAX_VISIBLE_MESSAGES);
 
+  const clearToastTimer = useCallback(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+  }, []);
+
+  const clearNotifications = useCallback(() => {
+    clearToastTimer();
+    setUnreadCount(0);
+    setToast(null);
+  }, [clearToastTimer]);
+
+  const showToast = useCallback((msg: ChatMessage) => {
+    clearToastTimer();
+    const displayText = (msg.contentType === 'emoji' ? msg.emoji : msg.text) ?? '';
+    setToast({
+      id: msg.id,
+      senderEmoji: msg.senderAvatarEmoji ?? '\u{1F600}',
+      senderName: msg.senderName,
+      text: displayText.length > 40 ? displayText.slice(0, 40) + '\u2026' : displayText,
+    });
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, TOAST_DURATION_MS);
+  }, [clearToastTimer]);
+
   // Track new messages for unread count, toast, and pulse
   useEffect(() => {
-    const currentCount = chatMessages.length;
-    if (currentCount > prevMessageCountRef.current && prevMessageCountRef.current > 0) {
-      const newMessages = chatMessages.slice(prevMessageCountRef.current);
-      for (const msg of newMessages) {
-        if (msg.senderID === localPeerId) continue;
+    const unsubscribe = useChatStore.subscribe((state) => {
+      const nextMessages = getRenderableMessages(state.groupMessages);
+      const previousCount = prevMessageCountRef.current;
+      const currentCount = nextMessages.length;
 
-        if (!isOpen) {
-          setUnreadCount((c) => c + 1);
-          setPulseKey((k) => k + 1);
-
-          // Show toast for the latest message
-          if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-          const displayText = (msg.contentType === 'emoji' ? msg.emoji : msg.text) ?? '';
-          setToast({
-            id: msg.id,
-            senderEmoji: msg.senderAvatarEmoji ?? '\u{1F600}',
-            senderName: msg.senderName,
-            text: displayText.length > 40 ? displayText.slice(0, 40) + '\u2026' : displayText,
-          });
-          toastTimerRef.current = setTimeout(() => setToast(null), TOAST_DURATION_MS);
-        }
+      if (currentCount <= previousCount) {
+        prevMessageCountRef.current = currentCount;
+        return;
       }
-    }
-    prevMessageCountRef.current = currentCount;
-  }, [chatMessages.length, chatMessages, isOpen, localPeerId]);
 
-  // Reset unread when panel opens
-  useEffect(() => {
-    if (isOpen) {
-      setUnreadCount(0);
-      setToast(null);
-      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    }
-  }, [isOpen]);
+      const newMessages = nextMessages.slice(previousCount);
+      prevMessageCountRef.current = currentCount;
+
+      for (const msg of newMessages) {
+        if (msg.senderID === localPeerId || isOpen) continue;
+        setUnreadCount((count) => count + 1);
+        setPulseKey((key) => key + 1);
+        showToast(msg);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [isOpen, localPeerId, showToast]);
 
   // Auto-scroll to bottom when new message arrives and panel is open
   useEffect(() => {
@@ -118,6 +134,10 @@ function GameChatOverlay() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  useEffect(() => {
+    return () => clearToastTimer();
+  }, [clearToastTimer]);
 
   // Drag handlers
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
@@ -148,9 +168,13 @@ function GameChatOverlay() {
     setIsDragging(false);
 
     if (!wasDragging) {
-      setIsOpen((prev) => !prev);
+      const nextOpen = !isOpen;
+      if (nextOpen) {
+        clearNotifications();
+      }
+      setIsOpen(nextOpen);
     }
-  }, [isDragging]);
+  }, [clearNotifications, isDragging, isOpen]);
 
   // Send message
   const sendMessage = useCallback((text: string) => {
@@ -207,10 +231,9 @@ function GameChatOverlay() {
   }, [sendMessage]);
 
   const handleToastClick = useCallback(() => {
-    setToast(null);
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    clearNotifications();
     setIsOpen(true);
-  }, []);
+  }, [clearNotifications]);
 
   // Determine panel position: above or below bubble
   const panelAbove = pos.y > PANEL_HEIGHT + 12;
@@ -228,9 +251,6 @@ function GameChatOverlay() {
     }
     return '#FF9F0A'; // orange for remote
   }
-
-  // Don't render until position is initialized to avoid flash at 0,0
-  if (!posInitialized) return null;
 
   const unreadDisplay = unreadCount > 99 ? '99+' : String(unreadCount);
 

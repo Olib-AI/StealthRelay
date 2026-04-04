@@ -18,7 +18,7 @@ authors = ["Olib AI <dev@olib.ai>"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 
 # TLS
 tokio-rustls = "0.26"

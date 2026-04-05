@@ -18,7 +18,7 @@ authors = ["Olib AI <dev@olib.ai>"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 
 # TLS
 tokio-rustls = "0.26"
@@ -63,7 +63,7 @@ metrics-exporter-prometheus = "0.16"
 # Utilities
 bytes = "1.9"
 dashmap = "6.1"
-uuid = { version = "1.11", features = ["v7", "serde"] }
+uuid = { version = "1.23", features = ["v7", "serde"] }
 toml = "1.0"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }

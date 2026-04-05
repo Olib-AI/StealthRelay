@@ -88,7 +88,9 @@ format = "json"
 connections_per_minute = 30
 
 # Maximum messages per connection per second.
-messages_per_second = 60
+# Raised from 60 to 500 to support real-time voice/video calling.
+# Audio: ~50 frames/sec, Video: ~15 frames/sec, Group calls multiply by peer count.
+messages_per_second = 500
 
 # Maximum failed authentication attempts per IP before temporary block.
 max_failed_auth = 5

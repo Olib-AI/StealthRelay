@@ -31,13 +31,13 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 # Cryptographic primitives
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["hazmat", "rand_core"] }
-chacha20poly1305 = "0.10"
-aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
-hmac = "0.12"
-pbkdf2 = "0.12"
-blake2 = "0.10"
+chacha20poly1305 = "0.11.0-rc.3"
+aes-gcm = "0.11.0-rc.3"
+hkdf = "0.13"
+sha2 = "0.11"
+hmac = "0.13"
+pbkdf2 = "0.13.0-rc.10"
+blake2 = "0.11.0-rc.5"
 subtle = "2.6"
 rand = "0.8"
 rand_chacha = "0.3"
@@ -64,7 +64,7 @@ metrics-exporter-prometheus = "0.16"
 bytes = "1.9"
 dashmap = "6.1"
 uuid = { version = "1.23", features = ["v7", "serde"] }
-toml = "1.0"
+toml = "1.1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 

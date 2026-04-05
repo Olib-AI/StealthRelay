@@ -319,10 +319,10 @@ impl HostIdentity {
 
         let key = pbkdf2_derive(passphrase, &salt, Self::PBKDF2_ITERATIONS);
         let cipher = ChaCha20Poly1305::new((&key).into());
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = cipher
-            .encrypt(nonce, self.seed.0.as_slice())
+            .encrypt(&nonce, self.seed.0.as_slice())
             .expect("ChaCha20-Poly1305 encryption should not fail");
 
         let mut payload = Vec::with_capacity(85);
@@ -389,10 +389,13 @@ impl HostIdentity {
 
         let key = pbkdf2_derive(passphrase.as_bytes(), salt, Self::PBKDF2_ITERATIONS);
         let cipher = ChaCha20Poly1305::new((&key).into());
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_arr: [u8; 12] = nonce_bytes
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyLength)?;
+        let nonce = Nonce::from(nonce_arr);
 
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| CryptoError::Other("decryption failed — wrong passphrase?".into()))?;
 
         if plaintext.len() != 32 {

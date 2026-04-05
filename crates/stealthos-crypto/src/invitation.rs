@@ -24,7 +24,7 @@ use std::fmt;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use blake2::digest::FixedOutput;
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::Sha256;

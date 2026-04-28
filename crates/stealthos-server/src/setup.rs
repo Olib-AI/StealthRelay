@@ -480,7 +480,7 @@ fn render_qr_to_svg(data: &str) -> String {
     let total = width + margin * 2;
 
     let mut svg =
-        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total} {total}">"#,);
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total} {total}">"#);
     // White background.
     let _ = write!(
         svg,

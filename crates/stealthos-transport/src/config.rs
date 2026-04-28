@@ -50,7 +50,7 @@ impl Default for TransportConfig {
             max_connections: 500,
             max_message_size: 65_536, // 64 KiB
             handshake_timeout: Duration::from_secs(10),
-            idle_timeout: Duration::from_secs(600), // 10 minutes
+            idle_timeout: Duration::from_mins(10),
             heartbeat_interval: Duration::from_secs(30),
             heartbeat_timeout: Duration::from_secs(90), // 3 missed heartbeats
             slow_consumer_threshold: 256,

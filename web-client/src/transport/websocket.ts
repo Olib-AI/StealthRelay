@@ -34,8 +34,11 @@ import { getPublicKeyBase64 } from '../crypto/identity.ts';
 import { parseInvitationUrl, computeJoinProof, isInvitationExpired } from '../crypto/invitation.ts';
 import type { ParsedInvitation } from '../crypto/invitation.ts';
 import { solvePowAsync } from '../crypto/pow.ts';
-import { generateX25519KeyPair, getX25519PublicKeyBase64, deriveSharedKey, encryptMessage, decryptMessage, resetEncryptionSession } from '../crypto/encryption.ts';
+import { generateX25519KeyPair, getX25519PublicKeyBase64, deriveSharedKey, encryptMessage, decryptMessage, encryptBytes, decryptBytes, resetEncryptionSession } from '../crypto/encryption.ts';
 import { base64Encode, base64Decode } from '../utils/base64.ts';
+import { CallManager, type ActiveCall, type CallManagerDelegate } from '../calling/call-manager.ts';
+import type { CallSignal } from '../calling/types.ts';
+import { useCallStore } from '../stores/call.ts';
 import type {
   GameInvitation,
   GameInvitationResponse,
@@ -67,6 +70,7 @@ class WebSocketTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private powSolution: { challenge: string; solution: string } | null = null;
+  private callManager: CallManager | null = null;
 
   async connect(invitationUrl: string): Promise<void> {
     this.cleanup();
@@ -612,6 +616,10 @@ class WebSocketTransport {
             // Can't decrypt reaction
           }
         }
+      } else if (payload.messageType === 'call_signal' && payload.encryptedData) {
+        await this.handleIncomingCallSignal(payload.encryptedData, fromPeerId);
+      } else if (payload.messageType === 'media_frame' && payload.encryptedData) {
+        await this.handleIncomingMediaFrame(payload.encryptedData, fromPeerId);
       } else if (payload.messageType === 'poll_vote' && payload.encryptedData) {
         const symmetricKey = useChatStore.getState().peerSymmetricKeys[fromPeerId];
         if (symmetricKey) {
@@ -1587,6 +1595,143 @@ class WebSocketTransport {
       }
       this.ws = null;
     }
+  }
+
+  // MARK: - Calling
+
+  private ensureCallManager(): CallManager | null {
+    if (this.callManager) return this.callManager;
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    if (!localPeerId) return null;
+    const displayName = usePoolStore.getState().userProfile.displayName;
+    const delegate: CallManagerDelegate = {
+      sendSignal: (signal, peerIDs) => void this.sendCallSignal(signal, peerIDs),
+      sendMediaFrame: (frame, peerIDs, reliable) => void this.sendMediaFrame(frame, peerIDs, reliable),
+      onStateChange: (call: ActiveCall | null) => useCallStore.getState().setCall(call),
+      onError: (msg) => useCallStore.getState().setError(msg),
+    };
+    this.callManager = new CallManager({ localPeerID: localPeerId, localDisplayName: displayName, delegate });
+    return this.callManager;
+  }
+
+  /** Public: start an outgoing call from the UI. */
+  startCall(args: { peerIDs: string[]; remoteDisplayName: string; isVideoCall: boolean }): void {
+    const cm = this.ensureCallManager();
+    if (!cm) return;
+    cm.startCall(args);
+  }
+
+  /** Public: accept the current incoming call. */
+  acceptCall(): void {
+    this.callManager?.acceptIncoming();
+  }
+
+  /** Public: reject the current incoming call. */
+  rejectCall(): void {
+    this.callManager?.rejectIncoming();
+  }
+
+  /** Public: end the active or outgoing call. */
+  hangup(): void {
+    this.callManager?.endCall('normal');
+  }
+
+  /** Public: toggle the local microphone. */
+  toggleMute(muted: boolean): void {
+    this.callManager?.setAudioMuted(muted);
+  }
+
+  /** Public: toggle the local camera. Only meaningful in a video call. */
+  toggleCamera(enabled: boolean): void {
+    this.callManager?.setVideoEnabled(enabled);
+  }
+
+  /** Public: attach a canvas where the peer's decoded video should render. */
+  attachRemoteVideoCanvas(peerID: string, canvas: HTMLCanvasElement | null): void {
+    this.callManager?.attachRemoteCanvas(peerID, canvas);
+  }
+
+  /** Public: stream of the local camera, or null if no video call. */
+  getLocalVideoStream(): MediaStream | null {
+    return this.callManager?.getLocalVideoStream() ?? null;
+  }
+
+  private async sendCallSignal(signal: CallSignal, peerIDs: string[]): Promise<void> {
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    if (!localPeerId) return;
+    const peerKeys = useChatStore.getState().peerSymmetricKeys;
+    const plaintext = JSON.stringify(signal);
+    const isPrivateChat = peerIDs.length === 1;
+    // Mirror iOS `sendEncryptedPayload` (PoolChatViewModel.swift:1852): drop
+    // the local peer from the target list — we never hold a key for ourselves.
+    const filtered = peerIDs.filter((id) => id !== localPeerId);
+    for (const peerID of filtered) {
+      const key = peerKeys[peerID];
+      if (!key) {
+        // Refuse to send call signals unencrypted. iOS rejects unencrypted
+        // private payloads; sending plaintext here can silently never reach
+        // the peer.
+        useCallStore.getState().setError('No encryption key with peer yet — try again in a moment.');
+        continue;
+      }
+      const encryptedDataStr = await encryptMessage(plaintext, key);
+      const envelope = {
+        messageType: 'call_signal',
+        senderPeerID: localPeerId,
+        isPrivateChat,
+        encryptedData: encryptedDataStr,
+        // Match iOS behaviour: only set targetPeerID for private chat.
+        targetPeerID: isPrivateChat ? peerID : null,
+      };
+      this.sendPoolMessage('custom', envelope, [peerID], true);
+    }
+  }
+
+  private async sendMediaFrame(frame: Uint8Array, peerIDs: string[], reliable: boolean): Promise<void> {
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    if (!localPeerId) return;
+    const peerKeys = useChatStore.getState().peerSymmetricKeys;
+    for (const peerID of peerIDs) {
+      const key = peerKeys[peerID];
+      if (!key) continue; // Refuse to send media to peers without an E2E key.
+      // Encrypt RAW bytes — iOS expects the decrypted payload to be the
+      // `MediaFrameCodec.pack` byte blob directly, not a base64 of it.
+      const encryptedDataStr = await encryptBytes(frame, key);
+      const envelope = {
+        messageType: 'media_frame',
+        senderPeerID: localPeerId,
+        isPrivateChat: false,
+        encryptedData: encryptedDataStr,
+        targetPeerID: peerID,
+      };
+      this.sendPoolMessage('custom', envelope, [peerID], reliable);
+    }
+  }
+
+  private async handleIncomingCallSignal(encryptedB64: string, fromPeerId: string): Promise<void> {
+    const cm = this.ensureCallManager();
+    if (!cm) return;
+    const key = useChatStore.getState().peerSymmetricKeys[fromPeerId];
+    let plaintext: string | null = null;
+    if (key) {
+      try { plaintext = await decryptMessage(encryptedB64, key); } catch { /* fall through */ }
+    }
+    if (plaintext === null) {
+      try { plaintext = textDecoder.decode(base64Decode(encryptedB64)); } catch { return; }
+    }
+    let signal: CallSignal;
+    try { signal = JSON.parse(plaintext) as CallSignal; } catch { return; }
+    cm.handleSignal(signal, fromPeerId);
+  }
+
+  private async handleIncomingMediaFrame(encryptedB64: string, fromPeerId: string): Promise<void> {
+    const cm = this.ensureCallManager();
+    if (!cm) return;
+    const key = useChatStore.getState().peerSymmetricKeys[fromPeerId];
+    if (!key) return;
+    let bytes: Uint8Array;
+    try { bytes = await decryptBytes(encryptedB64, key); } catch { return; }
+    cm.handleMediaFrameBytes(bytes, fromPeerId);
   }
 }
 

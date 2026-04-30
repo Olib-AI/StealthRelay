@@ -91,6 +91,30 @@ export async function decryptMessage(encryptedBase64: string, keyBytes: Uint8Arr
   return new TextDecoder().decode(plaintext);
 }
 
+/**
+ * Encrypt raw bytes (binary payload) with AES-GCM. Output is a base64 string of
+ * `iv (12B) || ciphertext || tag (16B)` — same envelope shape iOS produces via
+ * `encryptionService.encrypt(_:for:)`. Used for media frames where the
+ * plaintext is a `MediaFrameCodec.pack` byte blob, NOT a UTF-8 string.
+ */
+export async function encryptBytes(bytes: Uint8Array, keyBytes: Uint8Array): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', toRawBuffer(keyBytes), 'AES-GCM', false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, toRawBuffer(bytes));
+  const combined = concat(iv, new Uint8Array(ciphertext));
+  return base64Encode(combined);
+}
+
+/** Inverse of `encryptBytes` — returns the raw binary plaintext. */
+export async function decryptBytes(encryptedBase64: string, keyBytes: Uint8Array): Promise<Uint8Array> {
+  const combined = base64Decode(encryptedBase64);
+  const iv = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const key = await crypto.subtle.importKey('raw', toRawBuffer(keyBytes), 'AES-GCM', false, ['decrypt']);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new Uint8Array(plaintext);
+}
+
 export function resetEncryptionSession(): void {
   sessionX25519PrivateKey = null;
   sessionX25519PublicKey = null;

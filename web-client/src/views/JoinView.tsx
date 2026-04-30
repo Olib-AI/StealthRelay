@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react';
-import { Link2, QrCode, Loader2, AlertCircle, ArrowRight } from 'lucide-react';
+import { useState, useCallback, useRef } from 'react';
+import { Link2, QrCode, Loader2, AlertCircle, ArrowRight, FileLock } from 'lucide-react';
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts';
+import { decodeCard } from '../crypto/sealed-card.ts';
 import { transport } from '../transport/websocket.ts';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import QRScanner from '../components/QRScanner.tsx';
@@ -13,6 +14,8 @@ function JoinView() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [isValid, setIsValid] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [cardError, setCardError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const status = useConnectionStore((s) => s.status);
   const error = useConnectionStore((s) => s.error);
   const powProgress = useConnectionStore((s) => s.powProgress);
@@ -46,6 +49,17 @@ function JoinView() {
     setShowScanner(false);
     validateUrl(result);
   }
+
+  const handleCardFile = useCallback(async (file: File) => {
+    setCardError(null);
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const url = decodeCard(buf);
+      validateUrl(url);
+    } catch (err) {
+      setCardError(err instanceof Error ? err.message : 'Couldn\'t open invite card.');
+    }
+  }, [validateUrl]);
 
   async function handlePaste() {
     try {
@@ -125,13 +139,43 @@ function JoinView() {
           <button
             type="button"
             onClick={() => setShowScanner(true)}
-            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-[15px] transition-colors"
-            style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-secondary)' }}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-[15px] font-medium transition-colors hover:bg-[rgba(0,122,255,0.16)] disabled:opacity-50"
+            style={{ backgroundColor: 'rgba(0,122,255,0.10)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'rgba(0,122,255,0.35)', color: '#007AFF' }}
             disabled={isConnecting}
           >
             <QrCode className="h-4 w-4" />
             Scan QR Code
           </button>
+
+          {/* Open invite card */}
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-[15px] font-medium transition-colors hover:bg-[rgba(0,122,255,0.16)] disabled:opacity-50"
+            style={{ backgroundColor: 'rgba(0,122,255,0.10)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'rgba(0,122,255,0.35)', color: '#007AFF' }}
+            disabled={isConnecting}
+          >
+            <FileLock className="h-4 w-4" />
+            Open invite card (.stcard)
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".stcard,application/vnd.stealthos.card"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleCardFile(file);
+              e.target.value = '';
+            }}
+          />
+
+          {cardError && (
+            <div className="flex items-start gap-2 text-xs text-[#FF453A]">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span>{cardError}</span>
+            </div>
+          )}
 
           {/* Join button */}
           <button

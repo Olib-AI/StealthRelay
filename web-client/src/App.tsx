@@ -12,6 +12,7 @@ import Ludo from './views/games/Ludo.tsx';
 import GameChatOverlay from './components/GameChatOverlay.tsx';
 import ChatNotification from './components/ChatNotification.tsx';
 import GameInvitationBanner from './components/GameInvitationBanner.tsx';
+import CallView from './views/CallView.tsx';
 import { useChatStore } from './stores/chat.ts';
 
 type AppView = 'join' | 'lobby' | 'chat' | 'game_lobby' | 'connect_four' | 'chain_reaction' | 'chess' | 'ludo';
@@ -110,6 +111,7 @@ function App() {
         {isConnected && effectiveView !== 'join' && (
           <ChatNotification currentView={effectiveView} onNavigateToChat={handleNotificationNav} />
         )}
+        <CallView />
       </div>
     </div>
   );

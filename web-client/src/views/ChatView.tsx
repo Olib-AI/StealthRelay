@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback } from 'react';
-import { ArrowLeft, Lock, Users, User, MessageSquare } from 'lucide-react';
+import { ArrowLeft, Lock, Users, User, MessageSquare, Phone, Video } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useChatStore } from '../stores/chat.ts';
 import type { ChatMessage } from '../stores/chat.ts';
@@ -254,36 +254,73 @@ function ChatView({ onBack }: ChatViewProps) {
           <ArrowLeft className="h-5 w-5" />
         </button>
 
-        <div className="flex-1 flex items-center gap-2">
+        <div className="flex-1 min-w-0 flex items-center gap-2">
           {currentView === 'group' ? (
             <>
-              <Users className="h-4 w-4 text-[#007AFF]" />
-              <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Group Chat</span>
+              <Users className="h-4 w-4 text-[#007AFF] shrink-0" />
+              <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>Group Chat</span>
             </>
           ) : selectedPrivatePeerId ? (
-            <>
-              {(() => {
-                const peer = peers.find((p) => p.peerId === selectedPrivatePeerId);
-                return peer ? (
-                  <>
-                    <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
-                    <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
-                    {peerSymmetricKeys[selectedPrivatePeerId] && (
-                      <Lock className="h-3 w-3 text-[#30D158]" />
-                    )}
-                  </>
-                ) : (
-                  <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Private Chat</span>
-                );
-              })()}
-            </>
+            (() => {
+              const peer = peers.find((p) => p.peerId === selectedPrivatePeerId);
+              return peer ? (
+                <>
+                  <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
+                  <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
+                  {peerSymmetricKeys[selectedPrivatePeerId] && (
+                    <Lock className="h-3 w-3 text-[#30D158] shrink-0" />
+                  )}
+                </>
+              ) : (
+                <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>Private Chat</span>
+              );
+            })()
           ) : (
             <>
-              <User className="h-4 w-4 text-[#BF5AF2]" />
-              <span className="text-[17px] font-semibold" style={{ color: 'var(--text-primary)' }}>Private Messages</span>
+              <User className="h-4 w-4 text-[#BF5AF2] shrink-0" />
+              <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>Private Messages</span>
             </>
           )}
         </div>
+
+        {(() => {
+          // Only show call icons when we have a concrete target. Hidden on the
+          // private peer-list view (no peer selected) and the group tab when
+          // there are no other peers.
+          const callTargets =
+            currentView === 'private' && selectedPrivatePeerId
+              ? [selectedPrivatePeerId]
+              : currentView === 'group'
+                ? peers.filter((p) => p.peerId !== localPeerId).map((p) => p.peerId)
+                : [];
+          if (callTargets.length === 0) return null;
+          const remoteName =
+            currentView === 'private' && selectedPrivatePeerId
+              ? (peers.find((p) => p.peerId === selectedPrivatePeerId)?.displayName ?? 'Peer')
+              : 'Group';
+          return (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                title="Voice call"
+                aria-label="Start voice call"
+                onClick={() => transport.startCall({ peerIDs: callTargets, remoteDisplayName: remoteName, isVideoCall: false })}
+                className="p-2 rounded-full hover:bg-[rgba(0,122,255,0.12)] text-[#007AFF]"
+              >
+                <Phone className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                title="Video call"
+                aria-label="Start video call"
+                onClick={() => transport.startCall({ peerIDs: callTargets, remoteDisplayName: remoteName, isVideoCall: true })}
+                className="p-2 rounded-full hover:bg-[rgba(0,122,255,0.12)] text-[#007AFF]"
+              >
+                <Video className="h-5 w-5" />
+              </button>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Tabs */}

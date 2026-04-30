@@ -222,7 +222,7 @@ export class CallManager {
   }
 
   private onMediaControl(signal: CallSignal, fromPeerID: string): void {
-    if (!this.call || this.call.callID !== signal.callID) return;
+    if (!this.call || this.call.callID?.toLowerCase() !== signal.callID?.toLowerCase()) return;
     const c = signal.mediaControl;
     if (!c) return;
     this.call.remoteAudioMuted[fromPeerID] = c.audioMuted;
@@ -249,17 +249,47 @@ export class CallManager {
   }
 
   attachRemoteCanvas(peerID: string, canvas: HTMLCanvasElement | null): void {
-    const playback = this.videoPlaybackByPeer.get(peerID);
-    if (!playback) return;
     if (canvas) {
-      playback.attachCanvas(canvas);
+      // Lazy-create the playback so a canvas mounted before the first
+      // frame arrives still gets wired up. Without this, the React
+      // useEffect that attaches the canvas runs before the first iOS
+      // media frame triggers `ensurePeerPlayback`, and the attach is
+      // silently dropped — so subsequent decoded frames render with no
+      // canvas to draw on.
+      this.ensurePeerPlayback(peerID);
+      const playback = this.videoPlaybackByPeer.get(peerID);
+      playback?.attachCanvas(canvas);
     } else {
-      playback.detachCanvas();
+      const playback = this.videoPlaybackByPeer.get(peerID);
+      playback?.detachCanvas();
     }
   }
 
   getLocalVideoStream(): MediaStream | null {
     return this.videoCapture?.stream ?? null;
+  }
+
+  /** Cycle the local capture rotation by +90° clockwise. Returns the new value. */
+  cycleLocalVideoRotation(): 0 | 90 | 180 | 270 {
+    if (!this.videoCapture) return 0;
+    const cur = this.videoCapture.getRotation();
+    const next = ((cur + 90) % 360) as 0 | 90 | 180 | 270;
+    this.videoCapture.setRotation(next);
+    try { localStorage.setItem('stealthos.call.localVideoRotation', String(next)); } catch { /* private mode */ }
+    return next;
+  }
+
+  /** Apply a previously-saved rotation when capture starts. */
+  private applyPersistedRotation(): void {
+    if (!this.videoCapture) return;
+    try {
+      const stored = localStorage.getItem('stealthos.call.localVideoRotation');
+      if (!stored) return;
+      const v = Number(stored);
+      if (v === 0 || v === 90 || v === 180 || v === 270) {
+        this.videoCapture.setRotation(v as 0 | 90 | 180 | 270);
+      }
+    } catch { /* private mode */ }
   }
 
   endCall(reason: CallEndReason = 'normal'): void {
@@ -296,27 +326,33 @@ export class CallManager {
   private async startMedia(): Promise<void> {
     if (!this.call) return;
     try {
+      // Pre-create audio playback for known peers FIRST. Safari iOS
+      // requires AudioContext.resume() to happen inside the user-gesture
+      // chain that triggered the call accept; awaiting here keeps us in
+      // that chain. Lazy-create still kicks in for unknown peers.
+      for (const peerID of this.call.remotePeerIDs) {
+        if (!this.playbackByPeer.has(peerID)) {
+          const pb = new AudioPlayback();
+          await pb.start();
+          this.playbackByPeer.set(peerID, pb);
+        }
+        if (!this.videoPlaybackByPeer.has(peerID)) {
+          const vp = new VideoPlayback();
+          vp.start((err) => this.delegate.onError(err.message));
+          this.videoPlaybackByPeer.set(peerID, vp);
+        }
+      }
       this.audioCapture = await startAudioCapture({
         onFrame: (samples) => this.handleLocalAudioFrame(samples),
         onError: (err) => this.delegate.onError(err.message),
       });
-      // Pre-create playback contexts on user gesture so AudioContext can resume.
-      for (const peerID of this.call.remotePeerIDs) {
-        const pb = new AudioPlayback();
-        await pb.start();
-        this.playbackByPeer.set(peerID, pb);
-        this.audioReassemblers.set(peerID, new FragmentReassembler());
-        const vp = new VideoPlayback();
-        vp.start((err) => this.delegate.onError(err.message));
-        this.videoPlaybackByPeer.set(peerID, vp);
-        this.videoReassemblers.set(peerID, new FragmentReassembler());
-      }
       if (this.call.isVideoCall) {
         try {
           this.videoCapture = await startVideoCapture({
             onFrame: (frame) => this.handleLocalVideoFrame(frame),
             onError: (err) => this.delegate.onError(err.message),
           });
+          this.applyPersistedRotation();
         } catch (err) {
           // Video capture failure isn't fatal to a video call — drop to audio
           // and surface the error.
@@ -379,18 +415,18 @@ export class CallManager {
 
   /** Dispatched by the WebSocket bridge after decrypting an incoming `media_frame` payload. */
   handleMediaFrameBytes(bytes: Uint8Array, fromPeerID: string): void {
-    if (!this.call || this.call.state !== 'active') return;
+    if (!this.call) return;
     const unpacked = unpackFrame(bytes);
     if (!unpacked) return;
-    const reassemblers =
-      unpacked.header.mediaType === 'video'
-        ? this.videoReassemblers
-        : this.audioReassemblers;
-    const reassembler = reassemblers.get(fromPeerID);
-    if (!reassembler) return;
+    // iOS sends UUIDs UPPERCASE (Swift JSONEncoder default), web emits
+    // lowercase (uuidv4().toLowerCase()) — compare case-insensitively.
+    if (unpacked.header.callID?.toLowerCase() !== this.call.callID?.toLowerCase()) return;
+    // Lazy-create reassembler + playback so frames arriving before
+    // startMedia finishes still flow.
+    const reassembler = this.getOrCreateReassembler(fromPeerID, unpacked.header.mediaType);
     const completed = reassembler.ingest(unpacked);
     if (!completed) return;
-    if (completed.header.callID !== this.call.callID) return;
+    if (completed.header.callID?.toLowerCase() !== this.call.callID?.toLowerCase()) return;
     if (completed.header.mediaType === 'audio') {
       this.handleAudioPlayback(completed.header, completed.payload, fromPeerID);
     } else if (completed.header.mediaType === 'video') {
@@ -403,18 +439,49 @@ export class CallManager {
     payload: Uint8Array,
     fromPeerID: string,
   ): void {
+    this.ensurePeerPlayback(fromPeerID);
     const playback = this.videoPlaybackByPeer.get(fromPeerID);
     if (!playback) return;
     playback.feed({ bytes: payload, isKeyFrame: header.isKeyFrame });
   }
 
+  /** Lazily create reassembler + playback for an unknown peer ID. */
+  private getOrCreateReassembler(fromPeerID: string, mediaType: 'audio' | 'video'): FragmentReassembler {
+    const map = mediaType === 'video' ? this.videoReassemblers : this.audioReassemblers;
+    let r = map.get(fromPeerID);
+    if (!r) {
+      r = new FragmentReassembler();
+      map.set(fromPeerID, r);
+    }
+    this.ensurePeerPlayback(fromPeerID);
+    return r;
+  }
+
+  private ensurePeerPlayback(peerID: string): void {
+    if (!this.playbackByPeer.has(peerID)) {
+      const pb = new AudioPlayback();
+      void pb.start();
+      this.playbackByPeer.set(peerID, pb);
+    }
+    if (!this.videoPlaybackByPeer.has(peerID)) {
+      const vp = new VideoPlayback();
+      vp.start((err) => this.delegate.onError(err.message));
+      this.videoPlaybackByPeer.set(peerID, vp);
+    }
+    if (this.call && !this.call.remotePeerIDs.includes(peerID)) {
+      this.call.remotePeerIDs.push(peerID);
+    }
+  }
+
   private handleAudioPlayback(header: MediaFrameHeader, payload: Uint8Array, fromPeerID: string): void {
     const playback = this.playbackByPeer.get(fromPeerID);
     if (!playback) return;
-    if (payload.byteLength !== AUDIO.samplesPerFrame * 4) {
-      // Unexpected size; drop.
-      return;
-    }
+    // iOS doesn't strictly honor `setPreferredIOBufferDuration`; the tap can
+    // deliver any frame count CoreAudio decides on (we've observed 1360
+    // samples ≈ 85 ms instead of the requested 320). Accept any Float32-
+    // aligned payload — the playback scheduler doesn't care about frame
+    // length, only that samples are contiguous Float32 mono at 16 kHz.
+    if (payload.byteLength === 0 || payload.byteLength % 4 !== 0) return;
     // Float32 little-endian on iOS (ARM) and on web — bytes copy across.
     const aligned = new Uint8Array(payload.byteLength);
     aligned.set(payload);

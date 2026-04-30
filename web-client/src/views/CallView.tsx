@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, RotateCw } from 'lucide-react';
 import { useCallStore } from '../stores/call.ts';
 import { transport } from '../transport/websocket.ts';
 
@@ -17,8 +17,17 @@ function RemoteVideo({ peerID }: { peerID: string }) {
     return () => transport.attachRemoteVideoCanvas(peerID, null);
   }, [peerID]);
   return (
-    <div className="relative rounded-xl overflow-hidden" style={{ backgroundColor: '#1c1c1e' }}>
-      <canvas ref={canvasRef} className="w-full h-full block" />
+    <div className="relative rounded-xl overflow-hidden flex items-center justify-center" style={{ backgroundColor: '#1c1c1e' }}>
+      {/* The canvas keeps its native pixel dimensions (set in playback's
+         renderFrame from frame.displayWidth/Height) and CSS letterboxes it
+         into the cell. `max-w/h-full` + auto width/height preserves aspect
+         ratio without stretching when video is portrait inside a landscape
+         container or vice versa. */}
+      <canvas
+        ref={canvasRef}
+        className="block"
+        style={{ maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto' }}
+      />
       <div className="absolute bottom-2 left-2 px-2 py-1 rounded-md text-xs" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
         {peerID.slice(0, 8)}
       </div>
@@ -171,6 +180,18 @@ export default function CallView() {
                 disabled={call.state !== 'active'}
               >
                 {call.videoEnabled ? <Video className="h-5 w-5" /> : <VideoOff className="h-5 w-5" />}
+              </button>
+            )}
+            {call.isVideoCall && call.state === 'active' && call.videoEnabled && (
+              <button
+                type="button"
+                onClick={() => transport.cycleLocalVideoRotation()}
+                className="rounded-full p-4"
+                style={{ backgroundColor: 'rgba(255,255,255,0.15)' }}
+                aria-label="Rotate camera frame"
+                title="Tap to rotate the outgoing video by 90° if peers see it sideways"
+              >
+                <RotateCw className="h-5 w-5" />
               </button>
             )}
             <button

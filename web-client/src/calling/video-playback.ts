@@ -65,7 +65,6 @@ export class VideoPlayback {
       if (sps) this.sps = sps;
       if (pps) this.pps = pps;
       payload = body;
-      console.log('[VIDEO/RECV] keyframe', { totalSize: args.bytes.length, sps: sps?.length, pps: pps?.length, body: body.length });
       if (!this.configured && this.sps && this.pps) {
         try {
           const description = buildAvcCDescription(this.sps, this.pps);

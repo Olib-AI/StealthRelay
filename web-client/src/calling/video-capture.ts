@@ -26,13 +26,11 @@ export type VideoCapture = {
   setEnabled(enabled: boolean): void;
   isEnabled(): boolean;
   forceKeyframe(): void;
+  /** Rotate the outgoing canvas by 0°, 90°, 180°, or 270° clockwise. */
+  setRotation(degrees: 0 | 90 | 180 | 270): void;
+  getRotation(): 0 | 90 | 180 | 270;
   stream: MediaStream;
 };
-
-declare class MediaStreamTrackProcessor<T> {
-  constructor(opts: { track: MediaStreamTrack });
-  readonly readable: ReadableStream<T>;
-}
 
 export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise<VideoCapture> {
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -54,10 +52,11 @@ export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise
   const videoTrack = stream.getVideoTracks()[0];
   if (!videoTrack) throw new Error('No video track from getUserMedia');
 
-  if (typeof window.VideoEncoder === 'undefined' || typeof (window as unknown as { MediaStreamTrackProcessor?: unknown }).MediaStreamTrackProcessor === 'undefined') {
+  if (typeof window.VideoEncoder === 'undefined') {
     for (const t of stream.getTracks()) t.stop();
-    throw new Error('Browser does not support WebCodecs VideoEncoder + MediaStreamTrackProcessor (use Chrome/Edge or Safari 17+)');
+    throw new Error('Browser does not support WebCodecs VideoEncoder (use Chrome/Edge or Safari 17+)');
   }
+  const hasTrackProcessor = typeof (window as unknown as { MediaStreamTrackProcessor?: unknown }).MediaStreamTrackProcessor !== 'undefined';
 
   let sequence = 0;
   let sps: Uint8Array | undefined;
@@ -66,12 +65,6 @@ export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise
   let stopped = false;
   let pendingKeyframe = false;
   let framesSinceKeyframe = 0;
-  let keyCount = 0;
-  let deltaCount = 0;
-  const hexDump = (b: Uint8Array, n = 32): string =>
-    Array.from(b.slice(0, n))
-      .map((x) => x.toString(16).padStart(2, '0'))
-      .join(' ');
 
   const encoder = new VideoEncoder({
     output: (chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
@@ -88,41 +81,18 @@ export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise
           sps = ps.sps;
           pps = ps.pps;
           // WebCodecs emits Baseline SPS with all constraint flags zero.
-          // Apple VideoToolbox is documented to reject Baseline streams that
-          // do not declare themselves as Constrained Baseline. Set
-          // constraint_set0_flag + constraint_set1_flag + constraint_set2_flag
-          // (byte 2 = 0xE0) — purely advisory, does not change the bitstream.
-          if (sps.length >= 3) {
-            sps[2] = (sps[2] ?? 0) | 0xe0;
-          }
-          // Force `nal_ref_idc = 11` (highest priority) on SPS and PPS NAL
-          // header bytes. WebCodecs emits them with ref_idc=01; Apple
-          // VideoToolbox is lenient on slice NALs but pickier on parameter
-          // sets, occasionally treating ref_idc<11 as discardable. iOS's own
-          // encoder always uses 11.
+          // Apple VideoToolbox rejects/ignores Baseline streams that don't
+          // declare themselves as Constrained Baseline. Set
+          // constraint_set0+1+2 (byte 2 = 0xE0). Purely advisory, does not
+          // change the bitstream.
+          if (sps.length >= 3) sps[2] = (sps[2] ?? 0) | 0xe0;
+          // Force `nal_ref_idc = 11` on SPS and PPS NAL header bytes.
+          // WebCodecs emits with ref_idc=01; Apple VideoToolbox treats
+          // parameter sets with low ref_idc as discardable on some paths.
           if (sps.length >= 1) sps[0] = (sps[0]! & 0x9f) | 0x60;
           if (pps.length >= 1) pps[0] = (pps[0]! & 0x9f) | 0x60;
-          // SPS bytes: [0]=NAL hdr, [1]=profile_idc, [2]=constraint flags, [3]=level_idc.
-          const profile = sps[1];
-          const constraints = sps[2];
-          const level = sps[3];
-          const profileName =
-            profile === 0x42 ? 'Baseline' :
-            profile === 0x4d ? 'Main' :
-            profile === 0x64 ? 'High' :
-            `0x${profile?.toString(16) ?? '??'}`;
-          console.log('[VIDEO/SEND] cached SPS/PPS', {
-            sps: sps.length,
-            pps: pps.length,
-            profile: profileName,
-            profile_idc: profile,
-            constraints: `0x${constraints?.toString(16) ?? '??'}`,
-            level_idc: level,
-            spsHex: hexDump(sps),
-            ppsHex: hexDump(pps),
-          });
-        } catch (e) {
-          console.warn('[VIDEO/SEND] avcC parse failed', e);
+        } catch {
+          // Wait for a valid avcC.
         }
       }
       const buf = new ArrayBuffer(chunk.byteLength);
@@ -140,103 +110,180 @@ export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise
         setRefIdcHigh(bytes, HIGH_REF_IDC_TYPES);
       }
       sequence++;
-      if (isKey) {
-        keyCount++;
-        // Pull out just the NAL header bytes that matter — console.log
-        // truncates the middle of long hex dumps.
-        const nalHeaders: { type: number; ref_idc: number; byte: string }[] = [];
-        let off = 0;
-        while (off + 4 <= bytes.length && nalHeaders.length < 6) {
-          const len =
-            (bytes[off]! << 24) | (bytes[off + 1]! << 16) | (bytes[off + 2]! << 8) | bytes[off + 3]!;
-          if (len <= 0 || off + 4 + len > bytes.length) break;
-          const h = bytes[off + 4]!;
-          nalHeaders.push({
-            type: h & 0x1f,
-            ref_idc: (h >> 5) & 0x03,
-            byte: `0x${h.toString(16).padStart(2, '0')}`,
-          });
-          off += 4 + len;
-        }
-        const nalSummary = nalHeaders
-          .map((n) => `t${n.type}/r${n.ref_idc}=${n.byte}`)
-          .join(' | ');
-        console.log(`[VIDEO/SEND] keyframe seq=${sequence} size=${bytes.length} nals: ${nalSummary}`);
-      } else {
-        deltaCount++;
-        if (deltaCount % 30 === 1) {
-          console.log('[VIDEO/SEND] delta progress', { seq: sequence, keys: keyCount, deltas: deltaCount, finalSize: bytes.length });
-        }
-      }
       opts.onFrame({ bytes, isKeyFrame: isKey, sequence });
     },
     error: (err) => {
-      console.warn('[VIDEO/SEND] encoder error', err);
       opts.onError?.(err instanceof Error ? err : new Error(String(err)));
     },
   });
-  console.log('[VIDEO/SEND] encoder configured', { width: VIDEO.width, height: VIDEO.height, fps: VIDEO.fps });
 
-  const trackSettings = videoTrack.getSettings();
-  const cfgWidth = trackSettings.width ?? VIDEO.width;
-  const cfgHeight = trackSettings.height ?? VIDEO.height;
-  encoder.configure({
-    codec: 'avc1.42E01E', // H.264 Baseline, level mostly cosmetic — encoder may upgrade
-    width: cfgWidth,
-    height: cfgHeight,
-    bitrate: VIDEO.bitrate,
-    framerate: VIDEO.fps,
-    hardwareAcceleration: 'prefer-hardware',
-    avc: { format: 'avc' },
-    latencyMode: 'realtime',
-  });
+  // Encoder dimensions are reconfigured dynamically when rotation changes so
+  // the SPS in the H.264 stream matches the actual pixel dimensions of the
+  // canvas we're feeding it. Without this, rotation-induced
+  // landscape↔portrait swaps cause the receiver to stretch the picture.
+  let configuredW = -1;
+  let configuredH = -1;
+  function configureEncoder(w: number, h: number): void {
+    if (configuredW === w && configuredH === h) return;
+    encoder.configure({
+      codec: 'avc1.42E01E',
+      width: w,
+      height: h,
+      bitrate: VIDEO.bitrate,
+      framerate: VIDEO.fps,
+      hardwareAcceleration: 'prefer-hardware',
+      avc: { format: 'avc' },
+      latencyMode: 'realtime',
+    });
+    configuredW = w;
+    configuredH = h;
+    pendingKeyframe = true;
+    sps = undefined;
+    pps = undefined;
+  }
 
-  const processor = new MediaStreamTrackProcessor<VideoFrame>({ track: videoTrack });
-  const reader = processor.readable.getReader();
-
-  let lastEncodeUs = -1;
   const minIntervalUs = Math.floor(1_000_000 / VIDEO.fps);
+  let lastEncodeUs = -1;
 
-  const pump = async (): Promise<void> => {
-    while (!stopped) {
-      const { done, value: frame } = await reader.read();
-      if (done) break;
-      if (!frame) continue;
+  // Default rotation guess: portrait source → -90° (=270° CW) brings the
+  // typical front-camera feed upright. User can override.
+  const initialRotation: 0 | 90 | 180 | 270 = 270;
+  let rotation: 0 | 90 | 180 | 270 = initialRotation;
 
-      // Drop frames if disabled or pacing exceeded — saves CPU and matches
-      // iOS's effective 15 fps rate.
-      const ts = frame.timestamp;
-      const tooSoon = lastEncodeUs >= 0 && ts - lastEncodeUs < minIntervalUs;
-      if (!enabled || tooSoon) {
-        frame.close();
-        continue;
+  const consumeFrame = (frame: VideoFrame): void => {
+    const ts = frame.timestamp;
+    const tooSoon = lastEncodeUs >= 0 && ts - lastEncodeUs < minIntervalUs;
+    if (!enabled || tooSoon) {
+      frame.close();
+      return;
+    }
+    lastEncodeUs = ts;
+
+    framesSinceKeyframe++;
+    const requestKey =
+      pendingKeyframe ||
+      framesSinceKeyframe >= VIDEO.keyframeInterval ||
+      sequence === 0;
+    if (requestKey) {
+      framesSinceKeyframe = 0;
+      pendingKeyframe = false;
+    }
+
+    try {
+      configureEncoder(frame.codedWidth, frame.codedHeight);
+      encoder.encode(frame, { keyFrame: requestKey });
+    } catch (e) {
+      opts.onError?.(e instanceof Error ? e : new Error(String(e)));
+    }
+    frame.close();
+  };
+
+  // Source of VideoFrame objects: prefer MediaStreamTrackProcessor (Chrome /
+  // Edge), fall back to a hidden <video> + requestVideoFrameCallback (Safari).
+  type FrameSource = { stop(): void };
+  const startTrackProcessorPump = (): FrameSource => {
+    type MSPCtor = new (opts: { track: MediaStreamTrack }) => { readable: ReadableStream<VideoFrame> };
+    const Ctor = (window as unknown as { MediaStreamTrackProcessor: MSPCtor }).MediaStreamTrackProcessor;
+    const processor = new Ctor({ track: videoTrack });
+    const reader = processor.readable.getReader();
+    void (async () => {
+      while (!stopped) {
+        const { done, value: frame } = await reader.read();
+        if (done) break;
+        if (!frame) continue;
+        consumeFrame(frame);
       }
-      lastEncodeUs = ts;
+    })().catch((e) => opts.onError?.(e instanceof Error ? e : new Error(String(e))));
+    return {
+      stop() {
+        try { reader.cancel().catch(() => undefined); } catch { /* already cancelled */ }
+      },
+    };
+  };
 
-      framesSinceKeyframe++;
-      const requestKey =
-        pendingKeyframe ||
-        framesSinceKeyframe >= VIDEO.keyframeInterval ||
-        sequence === 0;
-      if (requestKey) {
-        framesSinceKeyframe = 0;
-        pendingKeyframe = false;
+  const startVideoElementPump = (): FrameSource => {
+    // The hidden <video> must be attached to the DOM on Safari iOS — a
+    // detached element silently stalls when its srcObject is a MediaStream.
+    const el = document.createElement('video');
+    el.muted = true;
+    el.playsInline = true;
+    el.autoplay = true;
+    el.setAttribute('webkit-playsinline', 'true');
+    el.style.position = 'fixed';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0';
+    el.style.pointerEvents = 'none';
+    el.style.left = '-9999px';
+    document.body.appendChild(el);
+    el.srcObject = stream;
+
+    // Snapshot each tick into a canvas so VideoFrame holds independent
+    // pixel data. Constructing VideoFrame directly from the <video> on
+    // Safari iOS reuses the same GPU surface and the encoder sees frame 1
+    // repeatedly.
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let intervalHandle: number | null = null;
+    let firstTs: number | null = null;
+
+    const tick = () => {
+      if (stopped) return;
+      if (!ctx) return;
+      if (el.readyState < 2 || el.videoWidth === 0) return;
+      // Rotation is user-controllable (CallView exposes a button). 0° and
+      // 180° keep source dimensions; 90° and 270° transpose them.
+      const sw = el.videoWidth;
+      const sh = el.videoHeight;
+      const swap = rotation === 90 || rotation === 270;
+      const targetW = swap ? sh : sw;
+      const targetH = swap ? sw : sh;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
       }
-
+      ctx.save();
+      if (rotation !== 0) {
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((rotation * Math.PI) / 180);
+        ctx.drawImage(el, -sw / 2, -sh / 2);
+      } else {
+        ctx.drawImage(el, 0, 0);
+      }
+      ctx.restore();
       try {
-        encoder.encode(frame, { keyFrame: requestKey });
+        if (firstTs === null) firstTs = performance.now();
+        const ts = Math.round((performance.now() - firstTs) * 1000);
+        const frame = new VideoFrame(canvas, { timestamp: ts });
+        consumeFrame(frame);
       } catch (e) {
         opts.onError?.(e instanceof Error ? e : new Error(String(e)));
       }
-      frame.close();
-    }
+    };
+
+    void el.play().then(() => {
+      intervalHandle = window.setInterval(tick, Math.max(16, Math.floor(1000 / VIDEO.fps)));
+    }).catch((e) => opts.onError?.(e instanceof Error ? e : new Error(String(e))));
+
+    return {
+      stop() {
+        if (intervalHandle !== null) window.clearInterval(intervalHandle);
+        try { el.pause(); } catch { /* already paused */ }
+        el.srcObject = null;
+        try { el.remove(); } catch { /* already detached */ }
+      },
+    };
   };
-  void pump().catch((e) => opts.onError?.(e instanceof Error ? e : new Error(String(e))));
+
+  const frameSource: FrameSource = hasTrackProcessor
+    ? startTrackProcessorPump()
+    : startVideoElementPump();
 
   return {
     async stop() {
       stopped = true;
-      try { reader.cancel().catch(() => undefined); } catch { /* already cancelled */ }
+      frameSource.stop();
       try {
         if (encoder.state !== 'closed') {
           await encoder.flush().catch(() => undefined);
@@ -252,6 +299,11 @@ export async function startVideoCapture(opts: StartVideoCaptureOptions): Promise
     },
     isEnabled() { return enabled; },
     forceKeyframe() { pendingKeyframe = true; },
+    setRotation(deg) {
+      rotation = deg;
+      pendingKeyframe = true; // Force a keyframe so receivers re-anchor.
+    },
+    getRotation() { return rotation; },
     stream,
   };
 }

@@ -8,6 +8,24 @@ export const STCARD_FILE_EXTENSION = 'stcard';
 export const STCARD_UTI = 'com.olibai.stealthos.card';
 export const STCARD_MIME = 'application/vnd.stealthos.card';
 
+/** Marker prefix for QR-encoded cards carried as base64 text. */
+export const STCARD_QR_TEXT_PREFIX = 'stcard1:';
+
+/** Decode a `stcard1:base64...` QR text payload to raw card bytes. */
+export function decodeCardQRText(text: string): Uint8Array | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(STCARD_QR_TEXT_PREFIX)) return null;
+  const b64 = trimmed.slice(STCARD_QR_TEXT_PREFIX.length).trim();
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 const MAX_URL_LEN = 8 * 1024;
 
 export type CardErrorCode =

@@ -1656,6 +1656,11 @@ class WebSocketTransport {
     return this.callManager?.getLocalVideoStream() ?? null;
   }
 
+  /** Public: cycle the local capture rotation by +90° CW. Returns new value. */
+  cycleLocalVideoRotation(): number {
+    return this.callManager?.cycleLocalVideoRotation() ?? 0;
+  }
+
   private async sendCallSignal(signal: CallSignal, peerIDs: string[]): Promise<void> {
     const localPeerId = useConnectionStore.getState().localPeerId;
     if (!localPeerId) return;

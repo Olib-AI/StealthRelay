@@ -3,7 +3,7 @@ import { Link2, QrCode, Loader2, AlertCircle, ArrowRight, FileLock } from 'lucid
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts';
-import { decodeCard } from '../crypto/sealed-card.ts';
+import { decodeCard, decodeCardQRText } from '../crypto/sealed-card.ts';
 import { transport } from '../transport/websocket.ts';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import QRScanner from '../components/QRScanner.tsx';
@@ -47,6 +47,19 @@ function JoinView() {
 
   function handleQRScan(result: string) {
     setShowScanner(false);
+    // New invite-card QRs encode `stcard1:<base64>` text. Detect that
+    // first, unwrap to .stcard bytes, then to the inner stealth://invite/
+    // URL. Plain stealth://invite/ QRs continue to work via validateUrl.
+    const cardBytes = decodeCardQRText(result);
+    if (cardBytes) {
+      try {
+        const url = decodeCard(cardBytes);
+        validateUrl(url);
+      } catch (err) {
+        setCardError(err instanceof Error ? err.message : 'Couldn\'t open invite QR.');
+      }
+      return;
+    }
     validateUrl(result);
   }
 

@@ -20,7 +20,8 @@ use stealthos_core::pool::PoolPeer;
 use stealthos_core::ratelimit::{ConnectionThrottler, IpRateLimiter};
 use stealthos_core::router::Router;
 use stealthos_core::server_frame::{
-    PeerInfo, PoolInfo, PowChallengeFrame, PowSolutionFrame, ServerFrame,
+    PeerInfo, PoolConfigUpdatedData, PoolInfo, PowChallengeFrame, PowSolutionFrame, ServerFrame,
+    UpdatePoolConfigData,
 };
 use stealthos_core::types::{ConnectionId, PeerId, PoolId};
 use stealthos_core::{Pool, PoolRegistry};
@@ -307,6 +308,7 @@ impl MessageHandler {
                 server_url,
                 display_name,
                 nonce,
+                tunnel_exit_enabled,
             } => {
                 self.handle_host_auth(
                     connection_id,
@@ -318,6 +320,7 @@ impl MessageHandler {
                     server_url,
                     display_name,
                     nonce,
+                    tunnel_exit_enabled,
                 )
                 .await
             }
@@ -412,6 +415,10 @@ impl MessageHandler {
                 self.handle_close_pool(connection_id, session_token).await
             }
 
+            ServerFrame::UpdatePoolConfig(data) => {
+                self.handle_update_pool_config(connection_id, data).await
+            }
+
             ServerFrame::Ack { sequence } => self.handle_ack(connection_id, sequence).await,
 
             ServerFrame::HandshakeInit {
@@ -480,6 +487,7 @@ impl MessageHandler {
             | ServerFrame::HeartbeatPong { .. }
             | ServerFrame::ClaimSuccess { .. }
             | ServerFrame::ClaimRejected { .. }
+            | ServerFrame::PoolConfigUpdated(_)
             | ServerFrame::Error { .. } => {
                 warn!(
                     connection = %connection_id,
@@ -506,6 +514,7 @@ impl MessageHandler {
         server_url: Option<String>,
         display_name: Option<String>,
         client_nonce: String,
+        tunnel_exit_enabled: Option<bool>,
     ) -> Result<(), anyhow::Error> {
         const HOST_AUTH_PREFIX: &[u8] = b"STEALTH_HOST_AUTH_V1:";
 
@@ -742,7 +751,7 @@ impl MessageHandler {
         let host_name =
             display_name.map_or_else(|| "Host".to_owned(), |n| sanitize_display_name(&n));
 
-        if let Err(e) = self.pool_registry.create_pool(
+        let pool = match self.pool_registry.create_pool(
             core_pool_id,
             format!("pool-{pool_id}"),
             connection_id,
@@ -751,23 +760,33 @@ impl MessageHandler {
             host_name,
             self.max_pool_size,
         ) {
-            // SECURITY: S6 - Do not leak internal error details (e.g. pool
-            // count limits, registry state) to the client. Log the full error
-            // server-side but send only a generic message to the client.
-            warn!(
-                connection = %connection_id,
-                pool = %pool_id,
-                "failed to create pool: {e}"
-            );
-            self.metrics.pools_created.fetch_sub(1, Ordering::Relaxed);
-            self.metrics.pools_active.fetch_sub(1, Ordering::Relaxed);
-            let error_frame = ServerFrame::Error {
-                code: 503,
-                message: "pool creation failed".to_owned(),
-            };
-            self.send_to_connection(connection_id, &error_frame)?;
-            return Ok(());
-        }
+            Ok(pool) => pool,
+            Err(e) => {
+                // SECURITY: S6 - Do not leak internal error details (e.g. pool
+                // count limits, registry state) to the client. Log the full error
+                // server-side but send only a generic message to the client.
+                warn!(
+                    connection = %connection_id,
+                    pool = %pool_id,
+                    "failed to create pool: {e}"
+                );
+                self.metrics.pools_created.fetch_sub(1, Ordering::Relaxed);
+                self.metrics.pools_active.fetch_sub(1, Ordering::Relaxed);
+                let error_frame = ServerFrame::Error {
+                    code: 503,
+                    message: "pool creation failed".to_owned(),
+                };
+                self.send_to_connection(connection_id, &error_frame)?;
+                return Ok(());
+            }
+        };
+
+        // Seed the pool's tunnel-exit opt-in flag from the host's HostAuth.
+        // `None` is treated as `Some(false)` per the wire contract. The
+        // initial state is conveyed to the host via `host_auth_success` and
+        // to subsequent guests via `pool_info` -- we do NOT broadcast a
+        // separate `PoolConfigUpdated` here.
+        pool.set_tunnel_exit_enabled(tunnel_exit_enabled.unwrap_or(false));
 
         // SECURITY: Store the host-provided server URL AFTER all
         // authentication checks pass. Before this point, the client is
@@ -1417,6 +1436,7 @@ impl MessageHandler {
                 host_peer_id: pool.host_peer_id.0.clone(),
                 max_peers: pool.max_peers,
                 current_peers: pool.peer_count() + 1, // +1 for host
+                tunnel_exit_enabled: pool.tunnel_exit_enabled(),
             };
 
             let peers = pool.peers();
@@ -1861,6 +1881,94 @@ impl MessageHandler {
         );
 
         self.close_pool_impl(&pool);
+
+        Ok(())
+    }
+
+    /// Handle an `update_pool_config` frame -- host-only mutation of pool flags.
+    ///
+    /// Currently the only honoured flag is `tunnel_exit_enabled`. The
+    /// authorization path mirrors `KickPeer` / `ClosePool`:
+    /// 1. Connection must belong to a pool.
+    /// 2. Connection must be the pool host (otherwise 403).
+    /// 3. The host's session token must validate via `validate_session_token`
+    ///    (constant-time comparison, otherwise 401).
+    ///
+    /// If `tunnel_exit_enabled` is `None` the operation is a successful
+    /// no-op. If it is `Some(_)` and changes the stored value, the new
+    /// state is broadcast to every member of the pool (host + guests) as
+    /// a `PoolConfigUpdated` frame; no broadcast is emitted when the
+    /// value is unchanged.
+    async fn handle_update_pool_config(
+        &self,
+        connection_id: ConnectionId,
+        data: UpdatePoolConfigData,
+    ) -> Result<(), anyhow::Error> {
+        let pool = self.pool_registry.get_pool_for_connection(connection_id);
+        let Some(pool) = pool else {
+            warn!(
+                connection = %connection_id,
+                "update_pool_config from connection not in pool"
+            );
+            // No pool means no auth context -- treat as 401 to mirror
+            // session-token failures.
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "not authenticated to any pool".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        };
+
+        // Host-only authorization.
+        if !pool.is_host(connection_id) {
+            warn!(
+                connection = %connection_id,
+                pool = %pool.id,
+                "update_pool_config attempt from non-host"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "only the pool host can update pool config".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // Constant-time session-token check via the shared validator.
+        if self
+            .validate_session_token(connection_id, pool.id, data.session_token.as_deref())
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        // No-op when the field is omitted -- still a successful operation.
+        let Some(requested) = data.tunnel_exit_enabled else {
+            return Ok(());
+        };
+
+        let previous = pool.set_tunnel_exit_enabled(requested);
+        if previous == requested {
+            // Value unchanged -- do NOT emit a broadcast.
+            return Ok(());
+        }
+
+        info!(
+            connection = %connection_id,
+            pool = %pool.id,
+            tunnel_exit_enabled = requested,
+            previous_tunnel_exit_enabled = previous,
+            "pool tunnel-exit flag updated by host"
+        );
+
+        // Broadcast the new state to every member of the pool, INCLUDING
+        // the host (so its own UI confirms the change took effect).
+        let frame = ServerFrame::PoolConfigUpdated(PoolConfigUpdatedData {
+            tunnel_exit_enabled: requested,
+            updated_by_host: true,
+        });
+        self.broadcast_to_pool(&pool, &frame, &[]);
 
         Ok(())
     }
@@ -2401,5 +2509,395 @@ impl MessageHandler {
             .iter()
             .filter(|entry| entry.value().pool_id == pool_id)
             .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Handler-focused unit tests for `update_pool_config`.
+    //!
+    //! These tests sit inside the binary crate (the only crate where
+    //! `handler.rs` is reachable) and exercise the dispatcher end-to-end
+    //! without standing up a full WebSocket server: connections are simulated
+    //! by registering `ConnectionHandle` entries in `ConnectionRegistry` and
+    //! draining the outbound `mpsc::Receiver` halves to inspect broadcasts.
+
+    use super::*;
+    use stealthos_core::ratelimit::RateLimitConfig;
+    use stealthos_core::server_frame::{PoolConfigUpdatedData, UpdatePoolConfigData};
+    use stealthos_crypto::HostIdentity;
+    use stealthos_transport::ConnectionHandle;
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    /// Bag of harness state — owns the receivers so the test can inspect
+    /// what the handler enqueued for each simulated connection.
+    struct Harness {
+        handler: Arc<MessageHandler>,
+        pool_registry: Arc<PoolRegistry>,
+        pool_id: PoolId,
+        host_conn: ConnectionId,
+        guest_conn: ConnectionId,
+        host_session_token: String,
+        guest_session_token: String,
+        host_rx: mpsc::Receiver<OutboundMessage>,
+        guest_rx: mpsc::Receiver<OutboundMessage>,
+    }
+
+    fn build_handler() -> Arc<MessageHandler> {
+        let metrics = Arc::new(stealthos_observability::ServerMetrics::new());
+        let pool_registry = Arc::new(PoolRegistry::new(8));
+        let connection_registry = Arc::new(stealthos_transport::ConnectionRegistry::new(16));
+        let rate_cfg = RateLimitConfig::default();
+        let rate_limiter = Arc::new(stealthos_core::ratelimit::IpRateLimiter::new(
+            rate_cfg.clone(),
+        ));
+        let throttler = Arc::new(stealthos_core::ratelimit::ConnectionThrottler::new(
+            rate_cfg,
+        ));
+        let host_identity = Arc::new(HostIdentity::generate());
+        // The claim state is not exercised by these tests, but the handler
+        // requires one — pre-populate a Claimed binding so the signature
+        // is satisfied. None of these fields are inspected by the
+        // update_pool_config path.
+        let claim_state = Arc::new(Mutex::new(crate::claim::ClaimState::Claimed {
+            binding: crate::claim::HostBinding {
+                host_public_key: String::new(),
+                claimed_at: String::new(),
+                server_fingerprint: String::new(),
+                recovery_key_hash: String::new(),
+            },
+        }));
+        Arc::new(MessageHandler::new(
+            pool_registry,
+            connection_registry,
+            metrics,
+            rate_limiter,
+            throttler,
+            host_identity,
+            "test:0".to_owned(),
+            8,
+            claim_state,
+            PathBuf::from("/tmp/stealthrelay-test-keydir"),
+            None,
+        ))
+    }
+
+    /// Register a fake connection in the handler's `ConnectionRegistry`,
+    /// returning the receiver half so the test can drain outbound frames.
+    fn register_connection(
+        handler: &MessageHandler,
+        conn: ConnectionId,
+    ) -> mpsc::Receiver<OutboundMessage> {
+        let (tx, rx) = mpsc::channel(32);
+        let handle = ConnectionHandle {
+            connection_id: conn,
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            outbound_tx: tx,
+            connected_at: tokio::time::Instant::now(),
+        };
+        handler
+            .connection_registry
+            .register(handle)
+            .expect("register fake connection");
+        rx
+    }
+
+    /// Wire up: handler + `ConnectionRegistry` + a pool with one host and
+    /// one guest, with valid session tokens for each. Returns receivers
+    /// for inspecting outbound frames.
+    fn setup_harness() -> Harness {
+        let handler = build_handler();
+        let pool_registry = Arc::clone(&handler.pool_registry);
+
+        let host_conn = ConnectionId(1);
+        let guest_conn = ConnectionId(2);
+        let host_rx = register_connection(&handler, host_conn);
+        let guest_rx = register_connection(&handler, guest_conn);
+
+        // Create the pool directly via the registry, then seed session tokens
+        // exactly as `handle_host_auth` and `handle_join_approval` would.
+        let pool_uuid = Uuid::now_v7();
+        let pool_id = PoolId(pool_uuid);
+        let pool = pool_registry
+            .create_pool(
+                pool_id,
+                format!("pool-{pool_uuid}"),
+                host_conn,
+                PeerId("host-pk".to_owned()),
+                [0xAA_u8; 32],
+                "TestHost".to_owned(),
+                8,
+            )
+            .expect("create_pool");
+
+        // Add a guest peer to the pool and register the guest connection
+        // as belonging to this pool, mirroring `handle_join_approval`.
+        pool.add_peer(PoolPeer {
+            peer_id: PeerId("guest-pk".to_owned()),
+            connection_id: guest_conn,
+            display_name: "Guest".to_owned(),
+            public_key: [0xBB_u8; 32],
+            connected_at: tokio::time::Instant::now(),
+            last_activity: tokio::time::Instant::now(),
+            last_acked_sequence: 0,
+        })
+        .expect("add_peer");
+        pool_registry.register_connection(guest_conn, pool_id, PeerId("guest-pk".to_owned()));
+
+        let host_session_token = "host-token-AAAA".to_owned();
+        handler
+            .host_session_tokens
+            .insert(pool_id, host_session_token.clone());
+        let guest_session_token = "guest-token-BBBB".to_owned();
+        handler
+            .guest_session_tokens
+            .insert(guest_conn, guest_session_token.clone());
+
+        Harness {
+            handler,
+            pool_registry,
+            pool_id,
+            host_conn,
+            guest_conn,
+            host_session_token,
+            guest_session_token,
+            host_rx,
+            guest_rx,
+        }
+    }
+
+    /// Drain a receiver into a vector of decoded `ServerFrame`s. Only
+    /// `Text` and `SharedText` variants are decoded; other variants are
+    /// surfaced as `None`.
+    fn drain_frames(rx: &mut mpsc::Receiver<OutboundMessage>) -> Vec<Option<ServerFrame>> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            let json: Option<String> = match msg {
+                OutboundMessage::Text(t) => Some(t),
+                OutboundMessage::SharedText(t) => Some((*t).to_owned()),
+                _ => None,
+            };
+            out.push(json.and_then(|j| serde_json::from_str::<ServerFrame>(&j).ok()));
+        }
+        out
+    }
+
+    fn make_update_frame(flag: Option<bool>, token: Option<&str>) -> ServerFrame {
+        ServerFrame::UpdatePoolConfig(UpdatePoolConfigData {
+            tunnel_exit_enabled: flag,
+            session_token: token.map(str::to_owned),
+        })
+    }
+
+    #[tokio::test]
+    async fn update_pool_config_requires_host() {
+        // A guest connection must NOT be able to flip the pool's
+        // tunnel-exit flag, even if it presents its own (otherwise valid)
+        // guest session token.
+        let mut h = setup_harness();
+        let frame = make_update_frame(Some(true), Some(&h.guest_session_token));
+        let raw = serde_json::to_string(&frame).unwrap();
+
+        h.handler
+            .handle_message(h.guest_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch should not error");
+
+        // Pool flag must be unchanged.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(
+            !pool.tunnel_exit_enabled(),
+            "guest must not be able to set tunnel_exit_enabled"
+        );
+
+        // Guest must have received an Error frame with code 401.
+        let frames = drain_frames(&mut h.guest_rx);
+        let saw_401 = frames
+            .iter()
+            .any(|f| matches!(f, Some(ServerFrame::Error { code: 401, .. })));
+        assert!(
+            saw_401,
+            "guest should have received a 401 error, got frames: {frames:?}"
+        );
+
+        // Host must NOT have received any PoolConfigUpdated.
+        let host_frames = drain_frames(&mut h.host_rx);
+        assert!(
+            !host_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "host must not see PoolConfigUpdated for a rejected guest update"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_pool_config_invalid_session_token_rejected() {
+        let mut h = setup_harness();
+        let frame = make_update_frame(Some(true), Some("totally-wrong-token"));
+        let raw = serde_json::to_string(&frame).unwrap();
+
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch should not error");
+
+        // Flag unchanged.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(!pool.tunnel_exit_enabled());
+
+        // Host received a 401 error.
+        let host_frames = drain_frames(&mut h.host_rx);
+        let saw_401 = host_frames
+            .iter()
+            .any(|f| matches!(f, Some(ServerFrame::Error { code: 401, .. })));
+        assert!(
+            saw_401,
+            "host should receive 401 for invalid token, got: {host_frames:?}"
+        );
+
+        // No broadcast leaked to the guest.
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        assert!(
+            !guest_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "guest must not see PoolConfigUpdated when token is invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_pool_config_broadcasts_to_all_members() {
+        let mut h = setup_harness();
+        let frame = make_update_frame(Some(true), Some(&h.host_session_token));
+        let raw = serde_json::to_string(&frame).unwrap();
+
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch should not error");
+
+        // Pool flag toggled.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(pool.tunnel_exit_enabled());
+
+        // Both host and guest received PoolConfigUpdated{tunnel_exit_enabled: true}.
+        let host_frames = drain_frames(&mut h.host_rx);
+        let guest_frames = drain_frames(&mut h.guest_rx);
+
+        let host_match = host_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::PoolConfigUpdated(PoolConfigUpdatedData {
+                    tunnel_exit_enabled: true,
+                    updated_by_host: true,
+                }))
+            )
+        });
+        assert!(
+            host_match,
+            "host should have received PoolConfigUpdated, got: {host_frames:?}"
+        );
+
+        let guest_match = guest_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::PoolConfigUpdated(PoolConfigUpdatedData {
+                    tunnel_exit_enabled: true,
+                    updated_by_host: true,
+                }))
+            )
+        });
+        assert!(
+            guest_match,
+            "guest should have received PoolConfigUpdated, got: {guest_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_pool_config_noop_does_not_broadcast() {
+        let mut h = setup_harness();
+
+        // Pool starts at tunnel_exit_enabled = false. Setting it to false
+        // again is a no-op and must NOT broadcast.
+        let frame = make_update_frame(Some(false), Some(&h.host_session_token));
+        let raw = serde_json::to_string(&frame).unwrap();
+
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch should not error");
+
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(!pool.tunnel_exit_enabled());
+
+        let host_frames = drain_frames(&mut h.host_rx);
+        let guest_frames = drain_frames(&mut h.guest_rx);
+
+        assert!(
+            !host_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "no-op update must not broadcast to host"
+        );
+        assert!(
+            !guest_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "no-op update must not broadcast to guest"
+        );
+
+        // Now flip to true (should broadcast), then attempt true again
+        // (should NOT broadcast).
+        let on_frame = make_update_frame(Some(true), Some(&h.host_session_token));
+        let on_raw = serde_json::to_string(&on_frame).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &on_raw)
+            .await
+            .unwrap();
+        // Drain the broadcast caused by the flip.
+        let _ = drain_frames(&mut h.host_rx);
+        let _ = drain_frames(&mut h.guest_rx);
+
+        // Now repeat: set to true again — must be a no-op.
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &on_raw)
+            .await
+            .unwrap();
+        let host_frames = drain_frames(&mut h.host_rx);
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        assert!(
+            !host_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "second identical update must not broadcast (host saw: {host_frames:?})"
+        );
+        assert!(
+            !guest_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PoolConfigUpdated(_)))),
+            "second identical update must not broadcast (guest saw: {guest_frames:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_pool_config_field_omitted_is_noop_success() {
+        // tunnel_exit_enabled = None is valid and must be a successful no-op:
+        // no flag change, no broadcast, no error.
+        let mut h = setup_harness();
+        let frame = make_update_frame(None, Some(&h.host_session_token));
+        let raw = serde_json::to_string(&frame).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .unwrap();
+
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(!pool.tunnel_exit_enabled());
+
+        let host_frames = drain_frames(&mut h.host_rx);
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        assert!(host_frames.is_empty(), "no host output expected");
+        assert!(guest_frames.is_empty(), "no guest output expected");
     }
 }

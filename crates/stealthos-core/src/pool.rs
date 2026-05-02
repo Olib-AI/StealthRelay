@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use base64ct::Encoding as _;
 use dashmap::DashMap;
@@ -25,6 +25,15 @@ pub struct Pool {
     peers: DashMap<PeerId, PoolPeer>,
     invitation_commitments: DashMap<[u8; 16], TokenCommitmentRecord>,
     message_buffer: DashMap<PeerId, VecDeque<BufferedMessage>>,
+    /// Whether the host has opted in to providing tunnel exit ("VPN-like"
+    /// routing of pool members' traffic through the host's connection).
+    ///
+    /// The relay never sees the tunnel data itself; this flag is purely a
+    /// trust signal that gets broadcast to pool members. Stored as
+    /// `AtomicBool` so it can be flipped from any thread without acquiring
+    /// a lock and without forcing the surrounding `Arc<Pool>` to expose
+    /// interior mutability for other fields.
+    tunnel_exit_enabled: AtomicBool,
 }
 
 /// A peer that has joined a pool.
@@ -78,7 +87,24 @@ impl Pool {
             peers: DashMap::new(),
             invitation_commitments: DashMap::new(),
             message_buffer: DashMap::new(),
+            tunnel_exit_enabled: AtomicBool::new(false),
         }
+    }
+
+    /// Read the current tunnel-exit opt-in flag.
+    ///
+    /// This is a relaxed atomic load; the value is a hint about host
+    /// capability, not a synchronization point.
+    pub fn tunnel_exit_enabled(&self) -> bool {
+        self.tunnel_exit_enabled.load(Ordering::Acquire)
+    }
+
+    /// Set the tunnel-exit opt-in flag, returning the previous value.
+    ///
+    /// Returns the value that was stored before the swap so callers can
+    /// detect "no-op" updates and skip broadcasting `PoolConfigUpdated`.
+    pub fn set_tunnel_exit_enabled(&self, value: bool) -> bool {
+        self.tunnel_exit_enabled.swap(value, Ordering::AcqRel)
     }
 
     /// Add a peer to the pool. Fails if the pool is at capacity or the peer

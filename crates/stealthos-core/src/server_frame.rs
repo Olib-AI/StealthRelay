@@ -25,6 +25,13 @@ pub enum ServerFrame {
         /// Included in the signature transcript to bind the auth to a
         /// specific connection and prevent replay attacks.
         nonce: String,
+        /// Whether the host opts in to providing tunnel exit ("VPN-like")
+        /// for pool members. The relay treats `None` as `Some(false)` and
+        /// stores the value as the pool's initial `tunnel_exit_enabled`
+        /// flag. Backward compatible: existing clients that omit the field
+        /// continue to authenticate unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tunnel_exit_enabled: Option<bool>,
     },
 
     /// Request to join a pool with an invitation token.
@@ -95,6 +102,15 @@ pub enum ServerFrame {
         #[serde(default)]
         session_token: Option<String>,
     },
+
+    /// Update mutable per-pool configuration flags (host only).
+    ///
+    /// Currently the only supported flag is `tunnel_exit_enabled`, which
+    /// signals whether the host has opted in to providing tunnel exit
+    /// (a "VPN-like" feature where pool members route their traffic
+    /// through the host's internet connection). The relay never sees
+    /// tunnel data — it merely tracks and broadcasts the capability flag.
+    UpdatePoolConfig(UpdatePoolConfigData),
 
     /// Client handshake init (Noise NK step 1).
     HandshakeInit {
@@ -230,6 +246,10 @@ pub enum ServerFrame {
 
     /// Heartbeat pong.
     HeartbeatPong { timestamp: i64, server_time: i64 },
+
+    /// Pool configuration changed -- broadcast to every member of the pool
+    /// (host + all guests) whenever a tracked flag transitions.
+    PoolConfigUpdated(PoolConfigUpdatedData),
 }
 
 /// Information about a connected peer, sent in pool membership updates.
@@ -249,6 +269,38 @@ pub struct PoolInfo {
     pub host_peer_id: String,
     pub max_peers: usize,
     pub current_peers: usize,
+    /// Whether the host has opted in to providing tunnel exit. Reflects
+    /// `Pool.tunnel_exit_enabled` at the moment this `PoolInfo` was built.
+    pub tunnel_exit_enabled: bool,
+}
+
+/// Data payload for the `update_pool_config` client→server frame.
+///
+/// Each field is optional: `None` means "leave unchanged", `Some(_)`
+/// means "set to this value". The current implementation only honours
+/// `tunnel_exit_enabled`; additional flags can be added without breaking
+/// the wire contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct UpdatePoolConfigData {
+    /// If `Some`, change the flag to the given value. If `None`, leave unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_exit_enabled: Option<bool>,
+    /// Session token issued at pool creation. Required for authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
+}
+
+/// Data payload for the `pool_config_updated` server→client broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PoolConfigUpdatedData {
+    /// The current (post-change) value of the host's tunnel-exit opt-in.
+    pub tunnel_exit_enabled: bool,
+    /// `true` when the change was triggered by an `UpdatePoolConfig` frame
+    /// from the pool host. Reserved for future server-side changes (e.g.
+    /// administrative overrides) which would set this field to `false`.
+    pub updated_by_host: bool,
 }
 
 /// A non-recursive representation of a relayed message, used exclusively in
@@ -363,6 +415,7 @@ mod tests {
             server_url: Some("wss://relay.example.com".into()),
             display_name: Some("MyHost".into()),
             nonce: "challenge-nonce-base64".into(),
+            tunnel_exit_enabled: Some(true),
         };
         let json = serde_json::to_string(&frame).expect("serialize");
         let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
@@ -373,6 +426,7 @@ mod tests {
                 pool_id,
                 display_name,
                 nonce,
+                tunnel_exit_enabled,
                 ..
             } => {
                 assert_eq!(host_public_key, "base64key==");
@@ -380,6 +434,7 @@ mod tests {
                 assert_eq!(pool_id, Uuid::nil());
                 assert_eq!(display_name, Some("MyHost".into()));
                 assert_eq!(nonce, "challenge-nonce-base64");
+                assert_eq!(tunnel_exit_enabled, Some(true));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -504,6 +559,131 @@ mod tests {
         let parsed: BufferedRelayedMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.data, "payload");
         assert_eq!(parsed.sequence, 7);
+    }
+
+    #[test]
+    fn update_pool_config_serde_roundtrip() {
+        // Some(true)
+        let frame = ServerFrame::UpdatePoolConfig(UpdatePoolConfigData {
+            tunnel_exit_enabled: Some(true),
+            session_token: Some("tok".into()),
+        });
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(json.contains("\"tunnel_exit_enabled\":true"));
+        assert!(json.contains("\"session_token\":\"tok\""));
+        let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ServerFrame::UpdatePoolConfig(data) => {
+                assert_eq!(data.tunnel_exit_enabled, Some(true));
+                assert_eq!(data.session_token.as_deref(), Some("tok"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // Some(false)
+        let frame = ServerFrame::UpdatePoolConfig(UpdatePoolConfigData {
+            tunnel_exit_enabled: Some(false),
+            session_token: Some("tok".into()),
+        });
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(json.contains("\"tunnel_exit_enabled\":false"));
+        let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ServerFrame::UpdatePoolConfig(data) => {
+                assert_eq!(data.tunnel_exit_enabled, Some(false));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // None on both fields — should serialize without including them.
+        let frame = ServerFrame::UpdatePoolConfig(UpdatePoolConfigData {
+            tunnel_exit_enabled: None,
+            session_token: None,
+        });
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(
+            !json.contains("tunnel_exit_enabled"),
+            "None field must be skipped: {json}"
+        );
+        assert!(
+            !json.contains("session_token"),
+            "None field must be skipped: {json}"
+        );
+        let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ServerFrame::UpdatePoolConfig(data) => {
+                assert_eq!(data.tunnel_exit_enabled, None);
+                assert_eq!(data.session_token, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_config_updated_serde_roundtrip() {
+        for value in [true, false] {
+            let frame = ServerFrame::PoolConfigUpdated(PoolConfigUpdatedData {
+                tunnel_exit_enabled: value,
+                updated_by_host: true,
+            });
+            let json = serde_json::to_string(&frame).expect("serialize");
+            let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+            match parsed {
+                ServerFrame::PoolConfigUpdated(data) => {
+                    assert_eq!(data.tunnel_exit_enabled, value);
+                    assert!(data.updated_by_host);
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn host_auth_omits_tunnel_exit_enabled_when_none() {
+        // When tunnel_exit_enabled is None it must be skipped during
+        // serialization so legacy clients see no new field on the wire.
+        let frame = ServerFrame::HostAuth {
+            host_public_key: "k".into(),
+            timestamp: 1,
+            signature: "s".into(),
+            pool_id: Uuid::nil(),
+            server_url: None,
+            display_name: None,
+            nonce: "n".into(),
+            tunnel_exit_enabled: None,
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(
+            !json.contains("tunnel_exit_enabled"),
+            "tunnel_exit_enabled must be skipped when None: {json}"
+        );
+    }
+
+    #[test]
+    fn host_auth_accepts_legacy_payload_without_tunnel_exit_enabled() {
+        // A legacy client that does not know about tunnel_exit_enabled
+        // sends host_auth WITHOUT the field; the relay must accept it
+        // and treat the missing field as None.
+        let json = r#"{
+            "frame_type": "host_auth",
+            "data": {
+                "host_public_key": "key==",
+                "timestamp": 1700000000,
+                "signature": "sig==",
+                "pool_id": "00000000-0000-0000-0000-000000000000",
+                "nonce": "nonce-b64"
+            }
+        }"#;
+        let parsed: ServerFrame = serde_json::from_str(json).expect("legacy host_auth must parse");
+        match parsed {
+            ServerFrame::HostAuth {
+                tunnel_exit_enabled,
+                ..
+            } => {
+                assert_eq!(tunnel_exit_enabled, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     /// Verify that `SessionResumed` cannot contain nested `ServerFrame` values.

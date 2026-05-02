@@ -16,6 +16,7 @@ pub use pool_registry::PoolRegistry;
 pub use ratelimit::{ConnectionThrottler, IpRateLimiter, RateLimitConfig, TokenBucket};
 pub use router::{RouteResult, Router};
 pub use server_frame::{
-    BufferedRelayedMessage, PeerInfo, PoolInfo, PowChallengeFrame, PowSolutionFrame, ServerFrame,
+    BufferedRelayedMessage, PeerInfo, PoolConfigUpdatedData, PoolInfo, PowChallengeFrame,
+    PowSolutionFrame, ServerFrame, UpdatePoolConfigData,
 };
 pub use types::{ConnectionId, PeerId, PoolId};

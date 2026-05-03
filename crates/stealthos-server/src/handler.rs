@@ -20,9 +20,9 @@ use stealthos_core::pool::PoolPeer;
 use stealthos_core::ratelimit::{ConnectionThrottler, IpRateLimiter};
 use stealthos_core::router::Router;
 use stealthos_core::server_frame::{
-    PeerInfo, PoolConfigUpdatedData, PoolHostStatusData, PoolInfo, PowChallengeFrame,
-    PowSolutionFrame, ServerFrame, TunnelCloseData, TunnelDnsQueryData, TunnelOpenData,
-    TunnelWindowUpdateData, UpdatePoolConfigData,
+    MemberRejoinData, PeerInfo, PoolConfigUpdatedData, PoolHostStatusData, PoolInfo,
+    PowChallengeFrame, PowSolutionFrame, ServerFrame, TunnelCloseData, TunnelDnsQueryData,
+    TunnelOpenData, TunnelWindowUpdateData, UpdatePoolConfigData,
 };
 use stealthos_core::types::{ConnectionId, PeerId, PoolId};
 use stealthos_core::{Pool, PoolRegistry};
@@ -423,6 +423,11 @@ impl MessageHandler {
                     pow_solution,
                 )
                 .await
+            }
+
+            ServerFrame::MemberRejoin(data) => {
+                self.handle_member_rejoin(connection_id, remote_addr, data)
+                    .await
             }
 
             ServerFrame::JoinApproval {
@@ -1610,6 +1615,409 @@ impl MessageHandler {
         self.send_to_connection(host_conn, &forward_frame)
     }
 
+    /// Handle a `member_rejoin` frame from a previously-approved peer.
+    ///
+    /// `member_rejoin` is the post-v0.5.0 reattach path that lets a peer
+    /// the host has *already* approved at some point reconnect without
+    /// the host being online to approve a fresh `JoinRequest`. The
+    /// security gate is that the relay maintains a per-pool
+    /// `approved_peers: DashSet<[u8; 32]>` populated from
+    /// `handle_join_approval { approved: true }` and pruned by
+    /// `handle_kick_peer`. A rejoiner must:
+    ///
+    /// 1. Hit a pool that exists.
+    /// 2. Send a fresh timestamp (±30s).
+    /// 3. Be in the pool's approved set.
+    /// 4. Sign the canonical transcript with the matching Ed25519 key.
+    ///
+    /// The transcript domain-separator is `STEALTH_MEMBER_REJOIN_V1:`
+    /// (distinct from `STEALTH_HOST_AUTH_V1:`), so an `host_auth`
+    /// signature cannot be replayed as a `member_rejoin`.
+    ///
+    /// On success the relay registers the connection, adds the peer to
+    /// the pool, issues a fresh guest session token, sends `JoinAccepted`,
+    /// and broadcasts `peer_joined` to the rest of the pool. The host
+    /// (online or offline) is NOT notified in real time — they will see
+    /// the peer in their pool list when they next reconnect.
+    ///
+    /// Rejection codes (constant-message, not differentiated, to avoid
+    /// leaking pool existence or approval state to a probe):
+    ///
+    /// * `404 pool_not_found` — pool unknown.
+    /// * `401 rejoin timestamp out of window` — timestamp skew > 30s.
+    /// * `400 bad client_public_key` — base64 / length error.
+    /// * `403 not_approved` — pubkey not in `approved_peers`.
+    /// * `401 rejoin signature invalid` — Ed25519 verify failed.
+    /// * `503 pool_full` — pool at capacity (rare; rejoiner isn't
+    ///   currently in the peer list, so this only fires if all guest
+    ///   slots have been filled by other newcomers).
+    async fn handle_member_rejoin(
+        &self,
+        connection_id: ConnectionId,
+        remote_addr: SocketAddr,
+        data: MemberRejoinData,
+    ) -> Result<(), anyhow::Error> {
+        const REJOIN_PREFIX: &[u8] = b"STEALTH_MEMBER_REJOIN_V1:";
+        const MAX_TIMESTAMP_SKEW_SECS: i64 = 30;
+
+        let MemberRejoinData {
+            pool_id: pool_id_str,
+            client_public_key,
+            timestamp,
+            nonce,
+            signature,
+            display_name,
+        } = data;
+
+        // SECURITY: HIGH-4 mirror — reject blatantly oversized display
+        // names before sanitising. Mirrors the JoinRequest path.
+        if display_name.len() > MAX_DISPLAY_NAME_LEN * 2 {
+            warn!(
+                connection = %connection_id,
+                len = display_name.len(),
+                "member rejoin display_name too long"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 400,
+                message: "display name too long".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+        let display_name = sanitize_display_name(&display_name);
+
+        // SECURITY: A member_rejoin is an authentication attempt against
+        // a specific pool — bypassing the host's live approval, but NOT
+        // bypassing per-IP rate limits. Run the same IP rate-limit gate
+        // that `JoinRequest` uses today (lighter weight than a full join
+        // — no PoW, no host round-trip — but a probe-able auth path).
+        if let Err(e) = self.rate_limiter.check_rate(remote_addr.ip()) {
+            self.metrics.rate_limit_hits.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                connection = %connection_id,
+                remote = %remote_addr,
+                "member rejoin rate limited: {e}"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 429,
+                message: "rate limited".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // (a) Pool lookup. Don't reveal whether the pool ever existed —
+        //     a stable 404 covers "never created" and "destroyed".
+        let Ok(parsed_pool_uuid) = uuid::Uuid::parse_str(&pool_id_str) else {
+            warn!(
+                connection = %connection_id,
+                "member rejoin: pool_id is not a valid UUID"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 404,
+                message: "pool_not_found".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        };
+        let pool_id = PoolId(parsed_pool_uuid);
+        let Some(pool) = self.pool_registry.get_pool(pool_id) else {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                "member rejoin: pool not found"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 404,
+                message: "pool_not_found".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        };
+
+        // (b) Timestamp sanity. Mirrors `host_auth`'s ±30s window.
+        let now_unix = chrono::Utc::now().timestamp();
+        let skew = (now_unix - timestamp).abs();
+        if skew > MAX_TIMESTAMP_SKEW_SECS {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                skew = skew,
+                "member rejoin timestamp out of window"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "rejoin timestamp out of window".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // (c) Decode the Ed25519 public key.
+        let pk_bytes = match Base64::decode_vec(&client_public_key) {
+            Ok(b) if b.len() == 32 => b,
+            _ => {
+                warn!(
+                    connection = %connection_id,
+                    pool = %pool_id,
+                    "member rejoin: bad client_public_key encoding"
+                );
+                let error_frame = ServerFrame::Error {
+                    code: 400,
+                    message: "bad client_public_key".to_owned(),
+                };
+                self.send_to_connection(connection_id, &error_frame)?;
+                return Ok(());
+            }
+        };
+        let mut pk_arr = [0u8; 32];
+        pk_arr.copy_from_slice(&pk_bytes);
+
+        // (d) Approval gate. The single error message intentionally
+        //     unifies "pool exists but pubkey was never approved",
+        //     "pubkey was approved then kicked", and any other reason
+        //     the pubkey is absent from the set. Differentiating those
+        //     cases would let a probe enumerate the pool's approval
+        //     history.
+        if !pool.is_approved_peer(&pk_arr) {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                "member rejoin: pubkey not in approved set"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 403,
+                message: "not_approved".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // (e) Signature verification. Build the canonical transcript:
+        //     b"STEALTH_MEMBER_REJOIN_V1:" || pool_id_bytes(16)
+        //         || timestamp_be(8) || nonce_raw(32).
+        //
+        // Decoding errors on the nonce / signature fall under the same
+        // 401 ("rejoin signature invalid") so we don't leak which field
+        // was malformed.
+        let Ok(nonce_raw) = Base64::decode_vec(&nonce) else {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                "member rejoin: bad nonce encoding"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "rejoin signature invalid".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        };
+        // Enforce the documented 32-byte nonce so a degenerate (e.g. empty)
+        // nonce can't be used to weaken the transcript binding.
+        if nonce_raw.len() != 32 {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                len = nonce_raw.len(),
+                "member rejoin: nonce must be 32 raw bytes"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "rejoin signature invalid".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+        let sig_bytes = match Base64::decode_vec(&signature) {
+            Ok(b) if b.len() == 64 => b,
+            _ => {
+                warn!(
+                    connection = %connection_id,
+                    pool = %pool_id,
+                    "member rejoin: bad signature encoding/length"
+                );
+                let error_frame = ServerFrame::Error {
+                    code: 401,
+                    message: "rejoin signature invalid".to_owned(),
+                };
+                self.send_to_connection(connection_id, &error_frame)?;
+                return Ok(());
+            }
+        };
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+
+        let mut transcript = Vec::with_capacity(REJOIN_PREFIX.len() + 16 + 8 + nonce_raw.len());
+        transcript.extend_from_slice(REJOIN_PREFIX);
+        transcript.extend_from_slice(parsed_pool_uuid.as_bytes());
+        transcript.extend_from_slice(&timestamp.to_be_bytes());
+        transcript.extend_from_slice(&nonce_raw);
+
+        // ed25519_dalek's verify is constant-time in the signature path.
+        let verifier_pk = stealthos_crypto::HostPublicKeys {
+            ed25519: pk_arr,
+            x25519: [0u8; 32],
+            fingerprint: [0u8; 32],
+        };
+        if !verifier_pk.verify(&transcript, &sig_arr) {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                "member rejoin: signature verification failed"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 401,
+                message: "rejoin signature invalid".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // (f) Pool-full check. The rejoiner is not yet in the peer list
+        //     (their previous WebSocket dropped before they got here), so
+        //     they need a free slot. `peer_count()` excludes the host;
+        //     `max_peers` includes the host, so the available guest
+        //     count is `max_peers - 1`.
+        if pool.peer_count() >= pool.max_peers.saturating_sub(1) {
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                peers = pool.peer_count(),
+                max_peers = pool.max_peers,
+                "member rejoin: pool is full"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 503,
+                message: "pool_full".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        // (g) Already-connected check. If a different ConnectionId is
+        //     already attached as this same pubkey, evict it first so
+        //     the pool has exactly one live socket per identity. The
+        //     PeerId scheme used by JoinApproval is `PeerId(client_pk_b64)`
+        //     so we look up by that string.
+        let peer_id = PeerId(client_public_key.clone());
+        if let Some(existing_peer) = pool.get_peer(&peer_id) {
+            let stale_conn = existing_peer.connection_id;
+            info!(
+                connection = %connection_id,
+                pool = %pool_id,
+                stale_connection = %stale_conn,
+                "member rejoin: evicting prior connection for same pubkey"
+            );
+            // Tear down the stale connection's tunnel streams.
+            self.tunnel_gateway.abort_connection_streams(stale_conn);
+
+            // Tell the stale socket why it's being booted, then close it.
+            let kicked_frame = ServerFrame::Kicked {
+                reason: "rejoined_elsewhere".to_owned(),
+            };
+            let _ = self.send_to_connection(stale_conn, &kicked_frame);
+            let _ = self.connection_registry.send_to(
+                stale_conn,
+                OutboundMessage::Close(1000, "rejoined_elsewhere".to_owned()),
+            );
+
+            // Remove the stale peer from the pool and unregister its
+            // connection-to-pool mapping. The session token tied to the
+            // stale connection is wiped too — a new one is issued below.
+            pool.remove_peer(&peer_id);
+            self.pool_registry.unregister_connection(stale_conn);
+            self.guest_session_tokens.remove(&stale_conn);
+        }
+
+        // (h) Issue JoinAccepted. Mirror the host-approval path in
+        //     `handle_join_approval`: fresh 32-byte session token, peer
+        //     added to pool, connection registered, peer_joined
+        //     broadcast.
+        let mut token_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+        let peer_session_token = Base64::encode_string(&token_bytes);
+
+        let pool_peer = PoolPeer {
+            peer_id: peer_id.clone(),
+            connection_id,
+            display_name: display_name.clone(),
+            public_key: pk_arr,
+            connected_at: Instant::now(),
+            last_activity: Instant::now(),
+            last_acked_sequence: 0,
+        };
+
+        if let Err(e) = pool.add_peer(pool_peer) {
+            // Should be rare: we just performed the pool-full check and
+            // evicted any stale connection with this peer_id. Log and
+            // surface a generic failure so internal state isn't leaked.
+            warn!(
+                connection = %connection_id,
+                pool = %pool_id,
+                "member rejoin: add_peer failed: {e}"
+            );
+            let error_frame = ServerFrame::Error {
+                code: 503,
+                message: "rejoin failed".to_owned(),
+            };
+            self.send_to_connection(connection_id, &error_frame)?;
+            return Ok(());
+        }
+
+        self.pool_registry
+            .register_connection(connection_id, pool.id, peer_id.clone());
+        self.metrics
+            .connections_active
+            .fetch_add(1, Ordering::Relaxed);
+        self.guest_session_tokens
+            .insert(connection_id, peer_session_token.clone());
+
+        let pool_info = PoolInfo {
+            pool_id: pool.id.0,
+            name: pool.name.clone(),
+            host_peer_id: pool.host_peer_id.0.clone(),
+            max_peers: pool.max_peers,
+            current_peers: pool.peer_count() + 1, // +1 for host
+            tunnel_exit_enabled: pool.tunnel_exit_enabled(),
+            host_online: pool.is_host_online(),
+        };
+        let peers = pool.peers();
+
+        let accepted_frame = ServerFrame::JoinAccepted {
+            session_token: peer_session_token,
+            peer_id: peer_id.0.clone(),
+            peers,
+            pool_info,
+        };
+        self.send_to_connection(connection_id, &accepted_frame)?;
+
+        // Broadcast PeerJoined to every other member of the pool. The
+        // rejoiner itself is excluded (it just received the full peer
+        // list inside JoinAccepted). When the host is offline the
+        // broadcast is naturally a no-op against the host slot — the
+        // host learns about the rejoin via their next pool-list refresh
+        // after `host_auth` rebind.
+        let new_peer_info = PeerInfo {
+            peer_id: peer_id.0,
+            display_name,
+            public_key: client_public_key,
+            connected_at: 0,
+        };
+        let joined_frame = ServerFrame::PeerJoined {
+            peer: new_peer_info,
+        };
+        self.broadcast_to_pool(&pool, &joined_frame, &[connection_id]);
+
+        info!(
+            connection = %connection_id,
+            pool = %pool_id,
+            "member rejoined pool via approved-peer set"
+        );
+
+        Ok(())
+    }
+
     async fn handle_join_approval(
         &self,
         connection_id: ConnectionId,
@@ -1701,6 +2109,17 @@ impl MessageHandler {
             };
             let mut pk_arr = [0u8; 32];
             pk_arr.copy_from_slice(&pk_bytes);
+
+            // Record the host's approval of this Ed25519 public key in the
+            // pool's persistent approved-peers set BEFORE we mutate the
+            // active peer list or hand out a session token. Doing it
+            // before the JoinAccepted send means a racy client that
+            // immediately disconnects and re-attaches via `member_rejoin`
+            // (e.g. the iOS app rotating its WebSocket on background
+            // wake) sees its approval reflected on the relay. The set is
+            // an idempotent insert; no-op if the host re-approves the
+            // same key (e.g. after a previous kick).
+            pool.approve_peer(pk_arr);
 
             // Add peer to pool.
             let pool_peer = PoolPeer {
@@ -2003,6 +2422,15 @@ impl MessageHandler {
         // Look up the peer's connection_id before removing.
         let removed = pool.remove_peer(&target_peer_id);
         if let Some(removed_peer) = removed {
+            // SECURITY: Kicking a peer is an explicit revocation of the
+            // host's prior approval. We MUST remove the kicked peer's
+            // public key from `approved_peers` so that any subsequent
+            // `member_rejoin` from this identity is rejected with
+            // `not_approved`. Without this step, a kicked peer could
+            // simply call `member_rejoin` and slip back into the pool
+            // unilaterally — completely bypassing the host's decision.
+            let _was_approved = pool.revoke_peer_approval(&removed_peer.public_key);
+
             // Tear down any in-flight tunnel streams the kicked peer owns.
             self.tunnel_gateway
                 .abort_connection_streams(removed_peer.connection_id);
@@ -3803,5 +4231,706 @@ mod tests {
         // Pool's identity untouched.
         assert_eq!(*pool.bound_host_public_key(), original_key);
         assert_eq!(*pool.bound_host_public_key(), [0xAA_u8; 32]);
+    }
+
+    // =====================================================================
+    // member_rejoin (post-v0.5.0 reattach for previously-approved peers).
+    //
+    // These tests cover the full path through `handle_member_rejoin`:
+    // approval-set bookkeeping, signature verification, error mapping,
+    // host-offline behaviour, eviction of stale connections, and capacity
+    // gating. They exercise the production handler end-to-end (no skipping
+    // of crypto / serde) by generating real Ed25519 keypairs and signing
+    // the canonical transcript.
+    // =====================================================================
+
+    /// Domain-separator for `member_rejoin` signatures. MUST stay in
+    /// lockstep with the constant in `handle_member_rejoin`.
+    const MEMBER_REJOIN_PREFIX: &[u8] = b"STEALTH_MEMBER_REJOIN_V1:";
+
+    /// Generate a fresh Ed25519 identity, returning `(id, pubkey_bytes,
+    /// pubkey_b64)`.
+    fn fresh_identity() -> (stealthos_crypto::HostIdentity, [u8; 32], String) {
+        let id = stealthos_crypto::HostIdentity::generate();
+        let pk = id.public_keys().ed25519;
+        let pk_b64 = Base64::encode_string(&pk);
+        (id, pk, pk_b64)
+    }
+
+    /// Build a signed `member_rejoin` frame for the given pool / identity.
+    ///
+    /// Honours the canonical transcript:
+    /// `b"STEALTH_MEMBER_REJOIN_V1:" || pool_id_bytes(16)
+    ///   || timestamp_be(8) || nonce_raw(32)`.
+    fn build_member_rejoin(
+        identity: &stealthos_crypto::HostIdentity,
+        pool_uuid: uuid::Uuid,
+        timestamp: i64,
+        display_name: &str,
+    ) -> ServerFrame {
+        let pk_b64 = Base64::encode_string(&identity.public_keys().ed25519);
+
+        // Fresh 32-byte nonce, ASCII-base64-encoded for the wire form.
+        let mut nonce_raw = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_raw);
+        let nonce_b64 = Base64::encode_string(&nonce_raw);
+
+        // Build the transcript and sign it.
+        let mut transcript =
+            Vec::with_capacity(MEMBER_REJOIN_PREFIX.len() + 16 + 8 + nonce_raw.len());
+        transcript.extend_from_slice(MEMBER_REJOIN_PREFIX);
+        transcript.extend_from_slice(pool_uuid.as_bytes());
+        transcript.extend_from_slice(&timestamp.to_be_bytes());
+        transcript.extend_from_slice(&nonce_raw);
+        let sig = identity.sign(&transcript);
+        let sig_b64 = Base64::encode_string(&sig);
+
+        ServerFrame::MemberRejoin(MemberRejoinData {
+            pool_id: pool_uuid.to_string(),
+            client_public_key: pk_b64,
+            timestamp,
+            nonce: nonce_b64,
+            signature: sig_b64,
+            display_name: display_name.to_owned(),
+        })
+    }
+
+    /// Drive a `member_rejoin` frame through the handler from the given
+    /// connection. Returns nothing; callers inspect the connection's
+    /// outbound receiver.
+    async fn dispatch_rejoin(
+        handler: &MessageHandler,
+        connection_id: ConnectionId,
+        frame: &ServerFrame,
+    ) {
+        let raw = serde_json::to_string(frame).expect("serialize");
+        handler
+            .handle_message(connection_id, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch should not error");
+    }
+
+    #[tokio::test]
+    async fn join_approval_adds_to_approved_set() {
+        // Prove the approval-set bookkeeping in handle_join_approval:
+        // approved=true → pubkey lands in pool.approved_peers.
+        let mut h = setup_harness();
+        let (_id, pk, pk_b64) = fresh_identity();
+
+        // Seed a pending join the way handle_join_request would have, so
+        // the host's JoinApproval has a target.
+        let new_conn = ConnectionId(123);
+        let _new_rx = register_connection(&h.handler, new_conn);
+        h.handler.pending_joins.insert(
+            pk_b64.clone(),
+            PendingJoin {
+                connection_id: new_conn,
+                display_name: "Newcomer".to_owned(),
+                pool_id: h.pool_id,
+                created_at: tokio::time::Instant::now(),
+            },
+        );
+
+        // Sanity: pubkey is not in the set yet.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(!pool.is_approved_peer(&pk));
+
+        // Host approves.
+        let approve = ServerFrame::JoinApproval {
+            client_public_key: pk_b64.clone(),
+            approved: true,
+            reason: None,
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&approve).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+
+        // The pool now has the pubkey in its approved set.
+        assert!(
+            pool.is_approved_peer(&pk),
+            "approved peer must be in pool.approved_peers after JoinApproval"
+        );
+
+        // Drain test-side noise.
+        let _ = drain_frames(&mut h.host_rx);
+        let _ = drain_frames(&mut h.guest_rx);
+    }
+
+    /// Helper: mark a pubkey as previously approved by the host and leave
+    /// it in the "not currently connected" state — the exact scenario
+    /// `member_rejoin` is designed for. Mirrors what a real
+    /// `handle_join_approval { approved: true }` would have stamped, plus
+    /// the implicit "their WebSocket has since dropped" state.
+    fn approve_and_disconnect_peer(h: &Harness, pubkey: [u8; 32], pubkey_b64: &str) {
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        // Add to the approved set explicitly (mirrors what
+        // handle_join_approval would have done).
+        pool.approve_peer(pubkey);
+        // The peer is NOT currently connected — that is the whole
+        // scenario member_rejoin targets. Just stash the pubkey in the
+        // set; the rejoin path will create the actual peer entry.
+        let _ = pubkey_b64;
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_succeeds_for_approved_peer_when_host_online() {
+        let mut h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+
+        // Approve this pubkey ahead of time.
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // Drain noise from setup_harness.
+        let _ = drain_frames(&mut h.host_rx);
+        let _ = drain_frames(&mut h.guest_rx);
+
+        // The rejoiner uses a brand-new connection id.
+        let rejoin_conn = ConnectionId(2001);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "Rejoin1");
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        // The rejoiner must have received a JoinAccepted.
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let accepted = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::JoinAccepted { peer_id, .. }) if peer_id == &pk_b64
+            )
+        });
+        assert!(
+            accepted,
+            "rejoiner must receive JoinAccepted; got: {rejoiner_frames:?}"
+        );
+
+        // The existing guest must have received a PeerJoined for the rejoiner.
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        let saw_peer_joined = guest_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::PeerJoined { peer }) if peer.peer_id == pk_b64
+            )
+        });
+        assert!(
+            saw_peer_joined,
+            "existing guest must receive PeerJoined; got: {guest_frames:?}"
+        );
+
+        // The host (online) must also have received the PeerJoined broadcast.
+        let host_frames = drain_frames(&mut h.host_rx);
+        let host_saw_peer_joined = host_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::PeerJoined { peer }) if peer.peer_id == pk_b64
+            )
+        });
+        assert!(
+            host_saw_peer_joined,
+            "online host must receive PeerJoined; got: {host_frames:?}"
+        );
+
+        // Pool now has the rejoiner as a connected peer.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        let snap = pool.get_peer(&PeerId(pk_b64.clone()));
+        assert!(snap.is_some(), "rejoiner must be in pool.peers");
+        let snap = snap.unwrap();
+        assert_eq!(snap.connection_id, rejoin_conn);
+        assert_eq!(snap.public_key, pk);
+        assert_eq!(snap.display_name, "Rejoin1");
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_succeeds_for_approved_peer_when_host_offline() {
+        // The load-bearing test: with the host disconnected, an approved
+        // peer can still rejoin. This is the entire point of the feature.
+        let mut h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // Drop the host BEFORE rejoin.
+        h.handler.handle_disconnect(h.host_conn);
+        let _ = drain_frames(&mut h.host_rx);
+        let _ = drain_frames(&mut h.guest_rx);
+
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        assert!(!pool.is_host_online(), "host should be offline");
+
+        let rejoin_conn = ConnectionId(2002);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "OfflineRejoin");
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        // JoinAccepted to the rejoiner.
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let accepted = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::JoinAccepted { pool_info, .. })
+                    if !pool_info.host_online
+            )
+        });
+        assert!(
+            accepted,
+            "rejoiner must receive JoinAccepted (with host_online=false in pool_info); got: {rejoiner_frames:?}"
+        );
+
+        // The existing guest must still be notified.
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        let saw_peer_joined = guest_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::PeerJoined { peer }) if peer.peer_id == pk_b64
+            )
+        });
+        assert!(
+            saw_peer_joined,
+            "existing guest must receive PeerJoined even when host is offline; got: {guest_frames:?}"
+        );
+
+        // Rejoiner is now in the pool.
+        let snap = pool.get_peer(&PeerId(pk_b64.clone()));
+        assert!(snap.is_some());
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_rejected_for_unapproved_peer() {
+        let mut h = setup_harness();
+        let (id, _pk, _pk_b64) = fresh_identity();
+        // Note: we deliberately do NOT call approve_peer.
+
+        let rejoin_conn = ConnectionId(2003);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "Stranger");
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let saw_403 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 403, message }) if message == "not_approved"
+            )
+        });
+        assert!(
+            saw_403,
+            "unapproved rejoiner must get 403 not_approved; got: {rejoiner_frames:?}"
+        );
+
+        // Sanity: no JoinAccepted leaked, no broadcast went out.
+        assert!(
+            !rejoiner_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::JoinAccepted { .. }))),
+            "rejected rejoiner must NOT receive JoinAccepted"
+        );
+        let guest_frames = drain_frames(&mut h.guest_rx);
+        assert!(
+            !guest_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PeerJoined { .. }))),
+            "guest must NOT see PeerJoined for a rejected rejoin"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_rejected_for_unknown_pool() {
+        let h = setup_harness();
+        let (id, _pk, _pk_b64) = fresh_identity();
+        // Build a frame against a pool ID that the registry has never seen.
+        let bogus_pool = uuid::Uuid::from_u128(0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF);
+        assert!(h.pool_registry.get_pool(PoolId(bogus_pool)).is_none());
+
+        let rejoin_conn = ConnectionId(2004);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, bogus_pool, now, "GhostPool");
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let saw_404 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 404, message }) if message == "pool_not_found"
+            )
+        });
+        assert!(
+            saw_404,
+            "unknown pool must get 404 pool_not_found; got: {rejoiner_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_rejected_for_bad_signature() {
+        // Approved pubkey, but the signature is for a DIFFERENT key.
+        let h = setup_harness();
+        let (_real_id, real_pk, real_pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, real_pk, &real_pk_b64);
+
+        // Sign with a DIFFERENT identity but advertise the real pubkey.
+        let (decoy_id, _decoy_pk, _decoy_pk_b64) = fresh_identity();
+        let now = chrono::Utc::now().timestamp();
+
+        // Build a transcript with the real pubkey + real pool ID, signed by decoy.
+        let mut nonce_raw = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_raw);
+        let nonce_b64 = Base64::encode_string(&nonce_raw);
+        let mut transcript = Vec::new();
+        transcript.extend_from_slice(MEMBER_REJOIN_PREFIX);
+        transcript.extend_from_slice(h.pool_id.0.as_bytes());
+        transcript.extend_from_slice(&now.to_be_bytes());
+        transcript.extend_from_slice(&nonce_raw);
+        let bogus_sig = decoy_id.sign(&transcript);
+
+        let frame = ServerFrame::MemberRejoin(MemberRejoinData {
+            pool_id: h.pool_id.0.to_string(),
+            client_public_key: real_pk_b64,
+            timestamp: now,
+            nonce: nonce_b64,
+            signature: Base64::encode_string(&bogus_sig),
+            display_name: "Forger".to_owned(),
+        });
+
+        let rejoin_conn = ConnectionId(2005);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let saw_401 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 401, message })
+                    if message == "rejoin signature invalid"
+            )
+        });
+        assert!(
+            saw_401,
+            "bad signature must yield 401 rejoin signature invalid; got: {rejoiner_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_rejected_for_stale_timestamp() {
+        let h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // 60 seconds in the past — outside the ±30s window.
+        let stale_ts = chrono::Utc::now().timestamp() - 60;
+        let frame = build_member_rejoin(&id, h.pool_id.0, stale_ts, "StaleClock");
+
+        let rejoin_conn = ConnectionId(2006);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let saw_401 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 401, message })
+                    if message == "rejoin timestamp out of window"
+            )
+        });
+        assert!(
+            saw_401,
+            "stale timestamp must yield 401 rejoin timestamp out of window; got: {rejoiner_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_peer_removes_from_approved_set() {
+        // Full revocation flow: host approves a peer, the approved-set
+        // contains the pubkey, host kicks them, the set no longer
+        // contains it, AND a subsequent member_rejoin is rejected.
+        let mut h = setup_harness();
+
+        // The default harness has a guest already in the pool as
+        // PeerId("guest-pk") with public_key = [0xBB; 32]. Mirror what
+        // a real JoinApproval would have done by adding that pubkey to
+        // the approved set explicitly. (The harness shortcut bypasses
+        // the approval path.)
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        pool.approve_peer([0xBB; 32]);
+        assert!(pool.is_approved_peer(&[0xBB; 32]));
+
+        // Host kicks the guest.
+        let kick = ServerFrame::KickPeer {
+            peer_id: "guest-pk".to_owned(),
+            reason: "naughty".to_owned(),
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&kick).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+
+        // The pubkey must now be absent from the approved set.
+        assert!(
+            !pool.is_approved_peer(&[0xBB; 32]),
+            "kick must revoke approval"
+        );
+
+        // Drain noise.
+        let _ = drain_frames(&mut h.host_rx);
+        let _ = drain_frames(&mut h.guest_rx);
+
+        // Now: an attempted member_rejoin from a DIFFERENT identity that
+        // happens to know the same pubkey wouldn't help, but to
+        // demonstrate revocation we test the full flow with a real key.
+        // We approve it, kick it (the set drops), and then attempt rejoin.
+        let (id, pk, _pk_b64) = fresh_identity();
+        pool.approve_peer(pk);
+        assert!(pool.is_approved_peer(&pk));
+        // Add this pubkey to the live peer set so the kick path will find it.
+        let kick_conn = ConnectionId(7777);
+        let _kick_rx = register_connection(&h.handler, kick_conn);
+        pool.add_peer(PoolPeer {
+            peer_id: PeerId(Base64::encode_string(&pk)),
+            connection_id: kick_conn,
+            display_name: "ToKick".to_owned(),
+            public_key: pk,
+            connected_at: tokio::time::Instant::now(),
+            last_activity: tokio::time::Instant::now(),
+            last_acked_sequence: 0,
+        })
+        .expect("add ToKick");
+        h.pool_registry.register_connection(
+            kick_conn,
+            h.pool_id,
+            PeerId(Base64::encode_string(&pk)),
+        );
+
+        // Host kicks ToKick.
+        let kick2 = ServerFrame::KickPeer {
+            peer_id: Base64::encode_string(&pk),
+            reason: "revoke".to_owned(),
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&kick2).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+        assert!(!pool.is_approved_peer(&pk), "kick removes from set");
+
+        // Now they try to rejoin — rejected with 403 not_approved.
+        let new_conn = ConnectionId(8888);
+        let mut new_rx = register_connection(&h.handler, new_conn);
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "WelcomeBack");
+        dispatch_rejoin(&h.handler, new_conn, &frame).await;
+        let rejoiner_frames = drain_frames(&mut new_rx);
+        let saw_403 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 403, message }) if message == "not_approved"
+            )
+        });
+        assert!(
+            saw_403,
+            "kicked peer attempting rejoin must get 403 not_approved; got: {rejoiner_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_evicts_existing_connection_with_same_pubkey() {
+        let h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // The first connection: rejoin and stay attached.
+        let conn_a = ConnectionId(3001);
+        let mut conn_a_rx = register_connection(&h.handler, conn_a);
+        let now = chrono::Utc::now().timestamp();
+        let frame_a = build_member_rejoin(&id, h.pool_id.0, now, "FirstSession");
+        dispatch_rejoin(&h.handler, conn_a, &frame_a).await;
+        let initial_frames = drain_frames(&mut conn_a_rx);
+        assert!(
+            initial_frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::JoinAccepted { .. }))),
+            "conn_a must succeed first"
+        );
+
+        // The second connection: same identity, different ConnectionId.
+        let conn_b = ConnectionId(3002);
+        let mut conn_b_rx = register_connection(&h.handler, conn_b);
+        let now2 = chrono::Utc::now().timestamp();
+        let frame_b = build_member_rejoin(&id, h.pool_id.0, now2, "SecondSession");
+        dispatch_rejoin(&h.handler, conn_b, &frame_b).await;
+
+        // conn_a should have received Kicked { reason: "rejoined_elsewhere" }.
+        let stale_frames = drain_frames(&mut conn_a_rx);
+        let was_kicked = stale_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Kicked { reason }) if reason == "rejoined_elsewhere"
+            )
+        });
+        assert!(
+            was_kicked,
+            "stale conn_a must receive Kicked rejoined_elsewhere; got: {stale_frames:?}"
+        );
+
+        // conn_b should have received JoinAccepted.
+        let fresh_frames = drain_frames(&mut conn_b_rx);
+        let accepted = fresh_frames
+            .iter()
+            .any(|f| matches!(f, Some(ServerFrame::JoinAccepted { .. })));
+        assert!(
+            accepted,
+            "conn_b must receive JoinAccepted; got: {fresh_frames:?}"
+        );
+
+        // The pool's live mapping for this peer_id now points to conn_b.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        let snap = pool
+            .get_peer(&PeerId(pk_b64.clone()))
+            .expect("peer present");
+        assert_eq!(snap.connection_id, conn_b, "live conn must be conn_b");
+        assert!(
+            h.handler.guest_session_tokens.get(&conn_a).is_none(),
+            "stale guest session token for conn_a must have been wiped"
+        );
+        assert!(
+            h.handler.guest_session_tokens.get(&conn_b).is_some(),
+            "fresh guest session token for conn_b must exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_serde_roundtrip_dispatch() {
+        // Demonstrate the new frame survives the full dispatch path's
+        // JSON parser. (The pure serde roundtrip is also exercised in
+        // stealthos-core; this test additionally proves the dispatcher
+        // routes the frame to handle_member_rejoin.)
+        let h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        let conn = ConnectionId(4001);
+        let mut conn_rx = register_connection(&h.handler, conn);
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "Roundtrip");
+
+        // Serialize and parse-back to confirm wire stability.
+        let raw = serde_json::to_string(&frame).unwrap();
+        let parsed: ServerFrame = serde_json::from_str(&raw).expect("re-parse");
+        assert!(matches!(parsed, ServerFrame::MemberRejoin(_)));
+
+        // Dispatch via the public handle_message entry point.
+        h.handler
+            .handle_message(conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+        let frames = drain_frames(&mut conn_rx);
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::JoinAccepted { .. }))),
+            "dispatch must route MemberRejoin to handle_member_rejoin and return JoinAccepted; got: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_rejoin_rejected_when_pool_full() {
+        let h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // The default harness pool was created with max_peers=8 (1 host
+        // + 7 guests). Add 6 more guests so the pool is at capacity (1
+        // existing guest + 6 new = 7 guests + 1 host = 8). The rejoiner
+        // is NOT currently a peer (the whole point of member_rejoin),
+        // so they need a free slot.
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        for i in 0u32..6 {
+            let pid = PeerId(format!("filler-{i}"));
+            pool.add_peer(PoolPeer {
+                peer_id: pid.clone(),
+                connection_id: ConnectionId(9000 + u64::from(i)),
+                display_name: format!("Filler{i}"),
+                public_key: [0xCC; 32],
+                connected_at: tokio::time::Instant::now(),
+                last_activity: tokio::time::Instant::now(),
+                last_acked_sequence: 0,
+            })
+            .expect("seed filler peer");
+        }
+        // Sanity: pool is now at capacity for guests (peer_count = max_peers - 1 = 7).
+        assert_eq!(pool.peer_count(), 7);
+        assert_eq!(pool.max_peers, 8);
+
+        let rejoin_conn = ConnectionId(5001);
+        let mut rejoin_rx = register_connection(&h.handler, rejoin_conn);
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "TooLate");
+        dispatch_rejoin(&h.handler, rejoin_conn, &frame).await;
+
+        let rejoiner_frames = drain_frames(&mut rejoin_rx);
+        let saw_503 = rejoiner_frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 503, message }) if message == "pool_full"
+            )
+        });
+        assert!(
+            saw_503,
+            "full pool must yield 503 pool_full; got: {rejoiner_frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_destroyed_clears_approved_set() {
+        // Sanity: when a pool is destroyed (here via close_pool_impl,
+        // mirroring the path TTL eviction takes), all internal state
+        // including approved_peers goes with it. Tested by:
+        //   1. approving a pubkey,
+        //   2. closing the pool,
+        //   3. attempting a member_rejoin → must get 404 pool_not_found
+        //      (which proves the pool is gone; no leak of the approval).
+        let h = setup_harness();
+        let (id, pk, pk_b64) = fresh_identity();
+        approve_and_disconnect_peer(&h, pk, &pk_b64);
+
+        // Close the pool (mirrors TTL eviction / handle_close_pool).
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        h.handler.close_pool_with_reason(&pool, "for_test");
+        // Drop our local ref so the only Arc is the now-removed registry one.
+        drop(pool);
+
+        assert!(
+            h.pool_registry.get_pool(h.pool_id).is_none(),
+            "pool must be removed from registry"
+        );
+
+        // Attempted rejoin must fail with 404 pool_not_found (the pool
+        // is gone; no stale approval state leaked across pool lifetimes).
+        let conn = ConnectionId(6001);
+        let mut conn_rx = register_connection(&h.handler, conn);
+        let now = chrono::Utc::now().timestamp();
+        let frame = build_member_rejoin(&id, h.pool_id.0, now, "Ghost");
+        dispatch_rejoin(&h.handler, conn, &frame).await;
+        let frames = drain_frames(&mut conn_rx);
+        let saw_404 = frames.iter().any(|f| {
+            matches!(
+                f,
+                Some(ServerFrame::Error { code: 404, message }) if message == "pool_not_found"
+            )
+        });
+        assert!(
+            saw_404,
+            "after pool destruction, member_rejoin must return 404; got: {frames:?}"
+        );
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use base64ct::Encoding as _;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::time::Instant;
 
 use crate::error::PoolError;
@@ -61,6 +61,25 @@ pub struct Pool {
     peers: DashMap<PeerId, PoolPeer>,
     invitation_commitments: DashMap<[u8; 16], TokenCommitmentRecord>,
     message_buffer: DashMap<PeerId, VecDeque<BufferedMessage>>,
+    /// Set of Ed25519 public keys that the host has previously approved
+    /// to join this pool.
+    ///
+    /// Membership is granted by [`Pool::approve_peer`] (called from the
+    /// host-approval path) and revoked by [`Pool::revoke_peer_approval`]
+    /// (called from the kick path). The bound host key is added at pool
+    /// creation for symmetry — the host's own reconnect path is
+    /// `host_auth` rebind, not `member_rejoin`, but keeping the host in
+    /// the set lets callers treat "approved" uniformly.
+    ///
+    /// Used by the `member_rejoin` server frame: a previously-approved
+    /// peer whose WebSocket dropped can rejoin without the host being
+    /// online by proving control of an Ed25519 key in this set.
+    ///
+    /// `DashSet` is lock-free for the read path (`contains`) and shards
+    /// writes the same way `DashMap` does. The set is destroyed alongside
+    /// the `Pool` when the pool is removed from the registry — pool
+    /// destruction is a true revocation of every approval.
+    approved_peers: DashSet<[u8; 32]>,
     /// Whether the host has opted in to providing tunnel exit ("VPN-like"
     /// routing of pool members' traffic through the host's connection).
     ///
@@ -113,6 +132,15 @@ impl Pool {
         host_display_name: String,
         max_peers: usize,
     ) -> Self {
+        // Seed the approved set with the bound host pubkey so
+        // `is_approved_peer` returns `true` for the host as well. The
+        // host itself uses the `host_auth` rebind path (not
+        // `member_rejoin`); seeding here only keeps the abstraction
+        // symmetric and prevents a future caller that reasons over the
+        // set from treating the host as "unapproved".
+        let approved_peers: DashSet<[u8; 32]> = DashSet::new();
+        approved_peers.insert(host_public_key);
+
         Self {
             id,
             name,
@@ -127,6 +155,7 @@ impl Pool {
             invitation_commitments: DashMap::new(),
             message_buffer: DashMap::new(),
             tunnel_exit_enabled: AtomicBool::new(false),
+            approved_peers,
         }
     }
 
@@ -233,6 +262,47 @@ impl Pool {
     /// detect "no-op" updates and skip broadcasting `PoolConfigUpdated`.
     pub fn set_tunnel_exit_enabled(&self, value: bool) -> bool {
         self.tunnel_exit_enabled.swap(value, Ordering::AcqRel)
+    }
+
+    /// Mark the given Ed25519 public key as an approved peer of this pool.
+    ///
+    /// Idempotent: re-approving an already-approved peer is a no-op. Used
+    /// by the host-approval path (`handle_join_approval` with
+    /// `approved: true`) to remember the approval beyond the joiner's
+    /// initial WebSocket lifetime, so the peer can later use the
+    /// `member_rejoin` frame to re-attach without the host being online.
+    pub fn approve_peer(&self, public_key: [u8; 32]) {
+        self.approved_peers.insert(public_key);
+    }
+
+    /// Revoke the host's prior approval for the given Ed25519 public key.
+    ///
+    /// Returns `true` if the key was previously approved. Called from the
+    /// kick path: kicking a peer is an explicit revocation of their
+    /// right to rejoin, so the next `member_rejoin` from this pubkey
+    /// MUST be rejected with `not_approved`.
+    pub fn revoke_peer_approval(&self, public_key: &[u8; 32]) -> bool {
+        self.approved_peers.remove(public_key).is_some()
+    }
+
+    /// `true` when the given Ed25519 public key is in the approved-peer set.
+    ///
+    /// O(1) hash lookup. Set membership is not security-sensitive in a
+    /// timing-attack sense — the high-value gate against forged identity
+    /// is the Ed25519 signature verification that the caller MUST run
+    /// after this check passes.
+    pub fn is_approved_peer(&self, public_key: &[u8; 32]) -> bool {
+        self.approved_peers.contains(public_key)
+    }
+
+    /// Number of pubkeys currently in the approved-peer set.
+    ///
+    /// Includes the bound host key (seeded at pool creation). Primarily
+    /// for tests and observability — the production code path only uses
+    /// `is_approved_peer`.
+    #[must_use]
+    pub fn approved_peer_count(&self) -> usize {
+        self.approved_peers.len()
     }
 
     /// Add a peer to the pool. Fails if the pool is at capacity or the peer
@@ -897,5 +967,53 @@ mod tests {
             original,
             "bound_host_public_key must never change"
         );
+    }
+
+    // ── Approved-peer set (member_rejoin support) ───────────────────
+
+    #[test]
+    fn approved_set_includes_bound_host_at_creation() {
+        let pool = make_pool();
+        // The host's own pubkey is seeded for symmetry with member_rejoin.
+        assert!(
+            pool.is_approved_peer(&[0u8; 32]),
+            "host's bound key must be present in approved set after pool creation"
+        );
+        assert_eq!(pool.approved_peer_count(), 1);
+    }
+
+    #[test]
+    fn approve_peer_is_idempotent() {
+        let pool = make_pool();
+        let pk = [7u8; 32];
+        pool.approve_peer(pk);
+        pool.approve_peer(pk);
+        assert!(pool.is_approved_peer(&pk));
+        // Host (1) + the just-approved key (1).
+        assert_eq!(pool.approved_peer_count(), 2);
+    }
+
+    #[test]
+    fn revoke_peer_approval_round_trip() {
+        let pool = make_pool();
+        let pk = [9u8; 32];
+        assert!(!pool.is_approved_peer(&pk));
+        pool.approve_peer(pk);
+        assert!(pool.is_approved_peer(&pk));
+        let removed = pool.revoke_peer_approval(&pk);
+        assert!(
+            removed,
+            "revoke must return true for previously-approved key"
+        );
+        assert!(!pool.is_approved_peer(&pk));
+        // Re-revoking returns false (idempotent at the API level).
+        assert!(!pool.revoke_peer_approval(&pk));
+    }
+
+    #[test]
+    fn unapproved_key_is_not_in_set() {
+        let pool = make_pool();
+        let stranger = [0xEEu8; 32];
+        assert!(!pool.is_approved_peer(&stranger));
     }
 }

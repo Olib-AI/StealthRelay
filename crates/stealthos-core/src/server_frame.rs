@@ -45,6 +45,28 @@ pub enum ServerFrame {
         pow_solution: Option<PowSolutionFrame>,
     },
 
+    /// Request to rejoin a pool as a previously-approved peer.
+    ///
+    /// This frame lets a peer the host has *already* approved at some
+    /// point reattach to the pool without the host being online to
+    /// approve a fresh `JoinRequest`. It is purely additive on the wire:
+    /// fresh peers (never approved) MUST keep using `JoinRequest`, and
+    /// approval is still a one-time act of the host.
+    ///
+    /// The relay validates:
+    /// 1. the pool exists,
+    /// 2. the request timestamp is fresh,
+    /// 3. the public key is in `pool.approved_peers`,
+    /// 4. the Ed25519 signature over the canonical transcript verifies.
+    ///
+    /// The transcript is domain-separated from `host_auth` and any other
+    /// Ed25519 signing the client may do:
+    ///
+    /// ```text
+    /// b"STEALTH_MEMBER_REJOIN_V1:" || pool_id_bytes(16) || timestamp_be(8) || nonce_raw(32)
+    /// ```
+    MemberRejoin(MemberRejoinData),
+
     /// Forward application data (opaque E2E encrypted `PoolMessage`) to peer(s).
     Forward {
         data: String,
@@ -329,6 +351,51 @@ pub struct PoolInfo {
     /// hand out `PoolInfo` to guests in any other state).
     #[serde(default)]
     pub host_online: bool,
+}
+
+/// Data payload for the `member_rejoin` client→server frame.
+///
+/// Sent by a peer the pool host has previously approved to reattach to
+/// the pool, including when the host is offline. Wire compatibility
+/// notes:
+///
+/// * `pool_id` is a UUID-as-string, identical in shape to
+///   [`ServerFrame::HostAuth::pool_id`].
+/// * `client_public_key` and `signature` are base64 encodings of the raw
+///   32-byte Ed25519 public key and 64-byte Ed25519 signature, matching
+///   the conventions used by `JoinRequest`.
+/// * `nonce` is base64 of a fresh 32-byte client-generated random value.
+/// * `timestamp` is Unix epoch seconds; the relay enforces a ±30s window.
+/// * `display_name` is sanitised on the server side identically to
+///   `JoinRequest.display_name` (control characters stripped, capped to
+///   64 bytes).
+///
+/// The transcript that MUST be signed is the byte concatenation:
+///
+/// ```text
+/// b"STEALTH_MEMBER_REJOIN_V1:" || pool_id_bytes(16) || timestamp_be(8) || nonce_raw(32)
+/// ```
+///
+/// The `STEALTH_MEMBER_REJOIN_V1:` prefix is domain-separated from every
+/// other Ed25519 signing the client performs (notably
+/// `STEALTH_HOST_AUTH_V1:` for `host_auth`), so a captured signature for
+/// one context cannot be replayed in another.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MemberRejoinData {
+    /// UUID-as-string. Same shape as [`ServerFrame::HostAuth`]'s `pool_id`.
+    pub pool_id: String,
+    /// Base64-encoded Ed25519 public key (32 raw bytes → base64).
+    pub client_public_key: String,
+    /// Unix epoch seconds; same field as `host_auth.timestamp`.
+    pub timestamp: i64,
+    /// Base64-encoded 32-byte client-generated random nonce.
+    pub nonce: String,
+    /// Base64-encoded Ed25519 signature over the transcript.
+    pub signature: String,
+    /// Peer's display name. Sanitised server-side identically to
+    /// `JoinRequest`.
+    pub display_name: String,
 }
 
 /// Data payload for the `update_pool_config` client→server frame.
@@ -749,6 +816,70 @@ mod tests {
         }"#;
         let result: Result<ServerFrame, _> = serde_json::from_str(json);
         assert!(result.is_err(), "HostAuth without nonce must be rejected");
+    }
+
+    #[test]
+    fn member_rejoin_serde_roundtrip() {
+        // Build a frame, serialize to JSON, parse back, and verify every
+        // field plus the wire field naming.
+        let frame = ServerFrame::MemberRejoin(MemberRejoinData {
+            pool_id: Uuid::nil().to_string(),
+            client_public_key: "Y2xpZW50LXBrLWJhc2U2NA==".into(),
+            timestamp: 1_700_001_234,
+            nonce: "bm9uY2UtYjY0".into(),
+            signature: "c2lnbmF0dXJlLWI2NA==".into(),
+            display_name: "RejoiningGuest".into(),
+        });
+        let json = serde_json::to_string(&frame).expect("serialize");
+
+        // Wire frame_type discriminator.
+        assert!(
+            json.contains(r#""frame_type":"member_rejoin""#),
+            "got: {json}"
+        );
+        // Field names use snake_case on the wire.
+        assert!(json.contains(r#""pool_id":"#), "got: {json}");
+        assert!(json.contains(r#""client_public_key":"#), "got: {json}");
+        assert!(json.contains(r#""timestamp":1700001234"#), "got: {json}");
+        assert!(json.contains(r#""nonce":"#), "got: {json}");
+        assert!(json.contains(r#""signature":"#), "got: {json}");
+        assert!(
+            json.contains(r#""display_name":"RejoiningGuest""#),
+            "got: {json}"
+        );
+
+        let parsed: ServerFrame = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            ServerFrame::MemberRejoin(data) => {
+                assert_eq!(data.pool_id, Uuid::nil().to_string());
+                assert_eq!(data.client_public_key, "Y2xpZW50LXBrLWJhc2U2NA==");
+                assert_eq!(data.timestamp, 1_700_001_234);
+                assert_eq!(data.nonce, "bm9uY2UtYjY0");
+                assert_eq!(data.signature, "c2lnbmF0dXJlLWI2NA==");
+                assert_eq!(data.display_name, "RejoiningGuest");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn member_rejoin_rejects_payload_with_missing_field() {
+        // `display_name` is mandatory; omitting it must fail to deserialize.
+        let json = r#"{
+            "frame_type": "member_rejoin",
+            "data": {
+                "pool_id": "00000000-0000-0000-0000-000000000000",
+                "client_public_key": "k",
+                "timestamp": 1700000000,
+                "nonce": "n",
+                "signature": "s"
+            }
+        }"#;
+        let result: Result<ServerFrame, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "member_rejoin without display_name must be rejected"
+        );
     }
 
     #[test]

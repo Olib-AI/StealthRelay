@@ -66,6 +66,11 @@ impl Router {
     }
 
     /// Collect broadcast recipients (all connected peers except the sender).
+    ///
+    /// When the host is offline, the host is simply skipped — the
+    /// `host_connection_id_snapshot` returns `None` and we never push a
+    /// stale or sentinel id into the recipient list. Guest-to-guest
+    /// forwards continue to work unchanged.
     fn broadcast_recipients(
         pool: &Pool,
         sender_peer_id: &PeerId,
@@ -73,9 +78,12 @@ impl Router {
     ) -> Vec<ConnectionId> {
         let mut recipients = Vec::new();
 
-        // Deliver to the host if the sender is not the host.
-        if pool.host_connection_id != sender_connection_id {
-            recipients.push(pool.host_connection_id);
+        // Deliver to the host if the host is currently attached AND the
+        // sender is not the host.
+        if let Some(host_conn) = pool.host_connection_id_snapshot()
+            && host_conn != sender_connection_id
+        {
+            recipients.push(host_conn);
         }
 
         // Deliver to all guest peers except the sender.
@@ -89,6 +97,12 @@ impl Router {
     }
 
     /// Collect targeted recipients, buffering messages for offline peers.
+    ///
+    /// When a target is the pool host but the host is currently offline,
+    /// the message is buffered against the host's `peer_id` exactly like
+    /// any other offline target. Buffered host messages will be replayed
+    /// the next time the host completes a `host_auth` rebind, since the
+    /// `host_peer_id` is stable across the disconnect.
     fn targeted_recipients(
         pool: &Pool,
         sender_peer_id: &PeerId,
@@ -103,7 +117,20 @@ impl Router {
 
             // Check if target is the host.
             if pool.host_peer_id == target_peer_id {
-                recipients.push(pool.host_connection_id);
+                if let Some(host_conn) = pool.host_connection_id_snapshot() {
+                    recipients.push(host_conn);
+                } else {
+                    // Host offline -- buffer for replay on rebind.
+                    pool.buffer_message(
+                        &target_peer_id,
+                        BufferedMessage {
+                            data: data.as_bytes().to_vec(),
+                            from_peer_id: sender_peer_id.clone(),
+                            sequence,
+                            timestamp: Instant::now(),
+                        },
+                    );
+                }
                 continue;
             }
 

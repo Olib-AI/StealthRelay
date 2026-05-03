@@ -43,8 +43,22 @@ max_pools = 100
 # Maximum peers allowed in a single pool.
 max_pool_size = 16
 
-# Seconds of pool inactivity before automatic cleanup (5 minutes).
+# Seconds of pool inactivity before automatic cleanup (applies only when the
+# host is currently online; default 5 minutes).
 pool_idle_timeout = 300
+
+# Seconds the host may remain offline before the pool is unconditionally
+# destroyed. The pool's bound Ed25519 identity is preserved for the entire
+# window, so the host can reconnect via a fresh `host_auth` and rebind to the
+# same pool_id within this TTL. After expiry, guests are kicked with
+# `pool_closed_host_offline` and the pool is removed. Default 24 hours.
+host_offline_ttl_secs = 86400
+
+# Seconds the pool may remain alive once the host is offline AND no guests
+# are connected. Lets the relay reclaim state quickly for abandoned pools
+# while still allowing briefly-empty pools to survive a host blip. Default
+# 5 minutes.
+empty_grace_secs = 300
 
 # ----------------------------------------------------------------------------
 # Transport — TLS termination (optional)

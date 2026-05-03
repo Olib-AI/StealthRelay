@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use base64ct::Encoding as _;
 use dashmap::DashMap;
@@ -12,16 +13,51 @@ use crate::types::{ConnectionId, PeerId, PoolId};
 /// Maximum number of messages buffered per disconnected peer for session resumption.
 const MAX_BUFFERED_MESSAGES: usize = 100;
 
-/// A relay pool: one host plus zero or more guest peers.
+/// Sentinel `ConnectionId` value used to encode "host currently offline" in
+/// the pool's `host_connection_id` atomic.
+///
+/// `ConnectionId::next()` starts at 1 and increments with saturating CAS,
+/// so 0 is never a valid live connection ID and is therefore safe to
+/// reserve as the "no host attached" sentinel. See
+/// `crates/stealthos-core/src/types.rs::NEXT_CONNECTION_ID`.
+const HOST_OFFLINE_SENTINEL: u64 = 0;
+
+/// A relay pool: one host (durable, identified by Ed25519 pubkey) plus zero
+/// or more guest peers.
+///
+/// **Identity vs. session:** The pool's *identity* is the Ed25519
+/// `bound_host_public_key`, fixed at creation and never mutated. The host's
+/// active WebSocket — `host_connection_id` — is just a session handle that
+/// transitions between Some(conn) and None as the host disconnects and
+/// reconnects. The pool outlives any single host WebSocket session.
 pub struct Pool {
     pub id: PoolId,
     pub name: String,
-    pub host_connection_id: ConnectionId,
+    /// Sentinel-encoded current host connection. `0` means "host offline".
+    /// Read via [`Pool::host_connection_id_snapshot`] / [`Pool::is_host`];
+    /// flipped via [`Pool::mark_host_offline`] / [`Pool::mark_host_online`].
+    host_connection_id: AtomicU64,
     pub host_peer_id: PeerId,
+    /// Ed25519 public key bound to this pool at `host_auth` time. This is
+    /// the pool's durable identity: only this pubkey may rebind to the pool
+    /// after a host disconnect/reconnect cycle. Never mutated after pool
+    /// creation. Also exposed as [`Pool::bound_host_public_key`] for callers
+    /// that prefer the wire-contract name.
     pub host_public_key: [u8; 32],
     pub host_display_name: String,
     pub max_peers: usize,
     pub created_at: Instant,
+    /// Wall-clock instant at which the host's WebSocket dropped, if the
+    /// host is currently offline. `None` while the host is online.
+    /// Used by the TTL-eviction task to garbage-collect pools whose host
+    /// has been offline too long, and surfaced on the wire via
+    /// `pool_host_status.offline_since`.
+    ///
+    /// Wrapped in `std::sync::Mutex` (not an atomic) because `Instant` is
+    /// neither `Copy`-into-an-atomic-sized integer nor cheaply representable
+    /// without a lock. The lock is never held across `.await` and the
+    /// critical sections are sub-microsecond.
+    host_offline_at: Mutex<Option<Instant>>,
     peers: DashMap<PeerId, PoolPeer>,
     invitation_commitments: DashMap<[u8; 16], TokenCommitmentRecord>,
     message_buffer: DashMap<PeerId, VecDeque<BufferedMessage>>,
@@ -65,7 +101,9 @@ pub struct BufferedMessage {
 }
 
 impl Pool {
-    /// Create a new pool.
+    /// Create a new pool with the host already attached on
+    /// `host_connection_id`. The host is implicitly considered online; the
+    /// `host_offline_at` timestamp starts as `None`.
     pub fn new(
         id: PoolId,
         name: String,
@@ -78,17 +116,107 @@ impl Pool {
         Self {
             id,
             name,
-            host_connection_id,
+            host_connection_id: AtomicU64::new(host_connection_id.0),
             host_peer_id,
             host_public_key,
             host_display_name,
             max_peers,
             created_at: Instant::now(),
+            host_offline_at: Mutex::new(None),
             peers: DashMap::new(),
             invitation_commitments: DashMap::new(),
             message_buffer: DashMap::new(),
             tunnel_exit_enabled: AtomicBool::new(false),
         }
+    }
+
+    /// The Ed25519 public key bound to this pool at `host_auth` time.
+    ///
+    /// This is the pool's durable identity. Stable for the lifetime of the
+    /// pool — including across host disconnect / reconnect cycles. Only a
+    /// `host_auth` whose signature verifies under this key may rebind to
+    /// the pool. Wire alias for [`Pool::host_public_key`].
+    pub const fn bound_host_public_key(&self) -> &[u8; 32] {
+        &self.host_public_key
+    }
+
+    /// Snapshot the host's current `ConnectionId`, or `None` if the host is
+    /// offline. The result is a point-in-time read; a concurrent
+    /// disconnect or rebind can change the value immediately after.
+    pub fn host_connection_id_snapshot(&self) -> Option<ConnectionId> {
+        let raw = self.host_connection_id.load(Ordering::Acquire);
+        if raw == HOST_OFFLINE_SENTINEL {
+            None
+        } else {
+            Some(ConnectionId(raw))
+        }
+    }
+
+    /// `true` while the host is currently attached to a live WebSocket.
+    pub fn is_host_online(&self) -> bool {
+        self.host_connection_id.load(Ordering::Acquire) != HOST_OFFLINE_SENTINEL
+    }
+
+    /// Read the wall-clock instant the host went offline, if any. Returns
+    /// `None` while the host is online (or while no host has ever
+    /// authenticated, which never occurs in practice — pools are only
+    /// created in `host_auth`).
+    pub fn host_offline_at(&self) -> Option<Instant> {
+        *self
+            .host_offline_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Mark the host as offline: clear `host_connection_id` and stamp
+    /// `host_offline_at = Some(Instant::now())`.
+    ///
+    /// Returns the timestamp that was just stored so callers can broadcast
+    /// the canonical value. If the host was already offline, no update is
+    /// performed and the existing timestamp is returned (so repeated
+    /// disconnects don't reset the TTL clock).
+    pub fn mark_host_offline(&self) -> Instant {
+        // Atomically swap the connection id to the sentinel. If it was
+        // already 0 (already offline), the existing offline timestamp is
+        // preserved.
+        let prev_conn = self
+            .host_connection_id
+            .swap(HOST_OFFLINE_SENTINEL, Ordering::AcqRel);
+
+        let mut guard = self
+            .host_offline_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if prev_conn == HOST_OFFLINE_SENTINEL {
+            // Already offline; keep the original timestamp if present.
+            if let Some(existing) = *guard {
+                return existing;
+            }
+        }
+
+        let now = Instant::now();
+        *guard = Some(now);
+        now
+    }
+
+    /// Mark the host as online with the given connection: store the new
+    /// `ConnectionId` and clear `host_offline_at`. Idempotent — calling
+    /// this with the already-bound connection has no observable effect.
+    pub fn mark_host_online(&self, conn: ConnectionId) {
+        // SECURITY: We never accept the offline sentinel as a "live" host
+        // connection. A future change to `ConnectionId::next()` that could
+        // produce 0 would silently break the offline encoding; assert here
+        // so test runs catch it. Production keeps this as a debug_assert.
+        debug_assert_ne!(
+            conn.0, HOST_OFFLINE_SENTINEL,
+            "ConnectionId(0) collides with host-offline sentinel"
+        );
+        self.host_connection_id.store(conn.0, Ordering::Release);
+        *self
+            .host_offline_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Read the current tunnel-exit opt-in flag.
@@ -189,9 +317,17 @@ impl Pool {
         self.peers.len()
     }
 
-    /// Check whether the given connection is the pool host.
+    /// Check whether the given connection is the pool host's currently
+    /// attached WebSocket.
+    ///
+    /// Returns `false` for every connection — including the original host's
+    /// — while the host is offline. Privileged frames issued during that
+    /// window MUST be rejected; the host has to complete a fresh
+    /// `host_auth` (which rebinds and re-issues a session token) before
+    /// any host-only operation can succeed again.
     pub fn is_host(&self, connection_id: ConnectionId) -> bool {
-        self.host_connection_id == connection_id
+        let raw = self.host_connection_id.load(Ordering::Acquire);
+        raw != HOST_OFFLINE_SENTINEL && raw == connection_id.0
     }
 
     /// Register an invitation token commitment.
@@ -693,5 +829,73 @@ mod tests {
             pool.try_consume_invitation(&token_id),
             Err(PoolError::InvitationNotFound)
         ));
+    }
+
+    // ── Host lifecycle (online / offline / rebind) ───────────────────
+
+    #[test]
+    fn host_starts_online_after_creation() {
+        let pool = make_pool();
+        assert!(pool.is_host_online(), "fresh pool host must be online");
+        assert!(pool.host_offline_at().is_none());
+        assert_eq!(
+            pool.host_connection_id_snapshot(),
+            Some(ConnectionId(1)),
+            "snapshot should reflect ctor connection"
+        );
+        assert!(pool.is_host(ConnectionId(1)));
+    }
+
+    #[test]
+    fn mark_host_offline_clears_connection_and_stamps_time() {
+        let pool = make_pool();
+        let stamp = pool.mark_host_offline();
+
+        assert!(!pool.is_host_online());
+        assert_eq!(pool.host_connection_id_snapshot(), None);
+        assert_eq!(pool.host_offline_at(), Some(stamp));
+        // is_host now rejects every connection — even the original host's.
+        assert!(!pool.is_host(ConnectionId(1)));
+        assert!(!pool.is_host(ConnectionId(0)));
+        assert!(!pool.is_host(ConnectionId(99)));
+    }
+
+    #[test]
+    fn mark_host_offline_is_idempotent_does_not_reset_clock() {
+        let pool = make_pool();
+        let first = pool.mark_host_offline();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = pool.mark_host_offline();
+        assert_eq!(
+            first, second,
+            "second offline call must not reset the offline-at timestamp"
+        );
+    }
+
+    #[test]
+    fn mark_host_online_rebinds_and_clears_offline_at() {
+        let pool = make_pool();
+        pool.mark_host_offline();
+        assert!(!pool.is_host_online());
+
+        pool.mark_host_online(ConnectionId(42));
+        assert!(pool.is_host_online());
+        assert!(pool.host_offline_at().is_none());
+        assert!(pool.is_host(ConnectionId(42)));
+        // Stale connection id no longer counts as host.
+        assert!(!pool.is_host(ConnectionId(1)));
+    }
+
+    #[test]
+    fn bound_host_public_key_is_stable_across_rebind() {
+        let pool = make_pool();
+        let original = *pool.bound_host_public_key();
+        pool.mark_host_offline();
+        pool.mark_host_online(ConnectionId(7));
+        assert_eq!(
+            *pool.bound_host_public_key(),
+            original,
+            "bound_host_public_key must never change"
+        );
     }
 }

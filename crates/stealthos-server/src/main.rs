@@ -270,6 +270,8 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // 6. Housekeeping task is spawned after handler creation (step 7b).
     let pool_idle_timeout = Duration::from_secs(config.pool.pool_idle_timeout);
+    let host_offline_ttl = Duration::from_secs(config.pool.host_offline_ttl_secs);
+    let empty_grace = Duration::from_secs(config.pool.empty_grace_secs);
 
     // 7. Create and start transport server.
     let ws_bind: SocketAddr = config
@@ -377,6 +379,32 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 }
                 _ = shutdown.changed() => {
                     info!("housekeeping task shutting down");
+                    return;
+                }
+            }
+        }
+    });
+
+    // 7c. Spawn host-offline TTL eviction task.
+    //
+    // Runs on its own 60-second cadence (separate from the 30s
+    // housekeeping loop above) so eviction policy is independently
+    // tunable. Destroys pools whose host has been offline beyond
+    // `host_offline_ttl_secs`, or whose host is offline AND pool is
+    // empty beyond `empty_grace_secs`.
+    let eviction_handler = Arc::clone(&handler);
+    let eviction_shutdown = state.shutdown_rx.clone();
+    let eviction_handle = tokio::spawn(async move {
+        let mut shutdown = eviction_shutdown;
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    eviction_handler.evict_host_offline_pools(host_offline_ttl, empty_grace);
+                }
+                _ = shutdown.changed() => {
+                    info!("host-offline eviction task shutting down");
                     return;
                 }
             }
@@ -522,6 +550,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     health_handle.abort();
     housekeeping_handle.abort();
+    eviction_handle.abort();
 
     info!("stealth-relay stopped");
     Ok(())

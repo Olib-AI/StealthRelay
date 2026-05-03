@@ -162,6 +162,20 @@ impl PoolRegistry {
         self.pool_count.load(Ordering::Acquire)
     }
 
+    /// Snapshot the live `Arc<Pool>` set into a `Vec`.
+    ///
+    /// Used by background sweep tasks (e.g. host-offline TTL eviction)
+    /// that need to inspect every pool. We materialize a `Vec` so the
+    /// caller can mutate the registry (remove pools, etc.) without
+    /// risking a self-deadlock against `DashMap` shard locks held by an
+    /// in-progress iterator.
+    pub fn snapshot_pools(&self) -> Vec<Arc<Pool>> {
+        self.pools
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
+
     /// Remove pools that have had no guest peers for longer than `max_idle`.
     ///
     /// A pool is considered idle if it has zero guest peers and has existed

@@ -1448,6 +1448,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_tunnel_stream_survives_host_disconnect() {
+        // The host's WebSocket dropping must NOT tear down a guest's
+        // authenticated tunnel stream. We open a guest-owned TCP stream
+        // through the gateway, simulate the host's disconnect by
+        // calling `abort_connection_streams(host_conn)` and flipping the
+        // pool's host-online state to offline, then push more bytes from
+        // the guest and verify the stream still echoes them back.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        if sock.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut h = build_gw(|c| {
+            c.denied_destination_ports = vec![];
+            c.idle_stream_timeout = TokioDuration::from_secs(5);
+        });
+
+        // Open a guest-owned stream.
+        let stream_id: u32 = 77;
+        h.gateway
+            .handle_open(
+                h.guest_conn,
+                TunnelOpenData {
+                    stream_id,
+                    destination: TunnelDestination::Ipv4 {
+                        address: "127.0.0.1".into(),
+                        port,
+                    },
+                    network: TunnelNetwork::Tcp,
+                    initial_window: 1_000_000,
+                },
+            )
+            .await;
+        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+        assert_eq!(h.gateway.open_stream_count(), 1);
+
+        // Simulate host disconnect: the production handler invokes
+        // `abort_connection_streams(host_conn)` and then
+        // `pool.mark_host_offline()`. Reproduce both.
+        h.gateway.abort_connection_streams(h.host_conn);
+        let pool = h
+            .pool_registry
+            .get_pool(h.pool_id)
+            .expect("pool still exists");
+        pool.mark_host_offline();
+        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+
+        // Guest stream still alive.
+        assert_eq!(
+            h.gateway.open_stream_count(),
+            1,
+            "guest stream must survive host disconnect"
+        );
+
+        // Push bytes from the guest after the host is offline.
+        let chunk: Vec<u8> = (0..256u32).map(|i| (i & 0xFF) as u8).collect();
+        let mut frame = Vec::with_capacity(TUNNEL_DATA_HEADER_LEN + chunk.len());
+        frame.push(TUNNEL_DATA_CHANNEL);
+        frame.extend_from_slice(&stream_id.to_be_bytes());
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        frame.extend_from_slice(&chunk);
+        let dispatch = h.gateway.handle_binary(h.guest_conn, &frame);
+        assert_eq!(dispatch, BinaryDispatch::Handled);
+
+        // Echo must come back as binary frames.
+        let mut received: Vec<u8> = Vec::new();
+        let deadline = TokioInstant::now() + TokioDuration::from_secs(3);
+        while received.len() < chunk.len() && TokioInstant::now() < deadline {
+            tokio::select! {
+                () = tokio::time::sleep(TokioDuration::from_millis(50)) => {}
+                msg = h.guest_rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    if let OutboundMessage::Binary(b) = msg
+                        && !b.is_empty() && b[0] == TUNNEL_DATA_CHANNEL && b.len() >= TUNNEL_DATA_HEADER_LEN
+                    {
+                        received.extend_from_slice(&b[TUNNEL_DATA_HEADER_LEN..]);
+                    }
+                }
+            }
+        }
+        assert!(
+            received.len() >= chunk.len(),
+            "guest tunnel should still echo after host went offline; got {} bytes",
+            received.len()
+        );
+
+        // Crucially: NO `policy_denied` was emitted on the guest's pipe.
+        let frames = drain(&mut h.guest_rx);
+        let policy_denied = frames.iter().any(|f| {
+            matches!(
+                f,
+                ServerFrame::TunnelClose(d) if matches!(d.reason, CloseReason::PolicyDenied)
+            )
+        });
+        assert!(
+            !policy_denied,
+            "guest must not see a policy_denied close after host disconnect"
+        );
+
+        // Cleanup.
+        h.gateway.handle_close(
+            h.guest_conn,
+            &TunnelCloseData {
+                stream_id,
+                reason: CloseReason::PeerClosed,
+            },
+        );
+    }
+
+    #[tokio::test]
     async fn window_update_ratchet_throttles_destination_reads() {
         // Spawn an echo that will respond with 200 KiB. Initial member
         // credit is 8 KiB so the gateway must stop reading from the

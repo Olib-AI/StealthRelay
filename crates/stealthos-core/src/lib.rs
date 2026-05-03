@@ -17,9 +17,10 @@ pub use ratelimit::{ConnectionThrottler, IpRateLimiter, RateLimitConfig, TokenBu
 pub use router::{RouteResult, Router};
 pub use server_frame::{
     BufferedRelayedMessage, CloseReason, DnsAnswer, DnsError, DnsErrorCode, DnsRecordType,
-    PeerInfo, PoolConfigUpdatedData, PoolInfo, PowChallengeFrame, PowSolutionFrame, ServerFrame,
-    TUNNEL_DATA_CHANNEL, TUNNEL_DATA_HEADER_LEN, TUNNEL_UDP_CHANNEL, TUNNEL_UDP_HEADER_LEN,
-    TunnelCloseData, TunnelDestination, TunnelDnsQueryData, TunnelDnsResponseData, TunnelErrorCode,
-    TunnelErrorData, TunnelNetwork, TunnelOpenData, TunnelWindowUpdateData, UpdatePoolConfigData,
+    PeerInfo, PoolConfigUpdatedData, PoolHostStatusData, PoolInfo, PowChallengeFrame,
+    PowSolutionFrame, ServerFrame, TUNNEL_DATA_CHANNEL, TUNNEL_DATA_HEADER_LEN, TUNNEL_UDP_CHANNEL,
+    TUNNEL_UDP_HEADER_LEN, TunnelCloseData, TunnelDestination, TunnelDnsQueryData,
+    TunnelDnsResponseData, TunnelErrorCode, TunnelErrorData, TunnelNetwork, TunnelOpenData,
+    TunnelWindowUpdateData, UpdatePoolConfigData,
 };
 pub use types::{ConnectionId, PeerId, PoolId};

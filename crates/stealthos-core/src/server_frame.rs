@@ -267,6 +267,20 @@ pub enum ServerFrame {
     /// (host + all guests) whenever a tracked flag transitions.
     PoolConfigUpdated(PoolConfigUpdatedData),
 
+    /// Pool host transitioned between online and offline.
+    ///
+    /// Broadcast to every guest in the pool (and to the host itself on
+    /// rebind) whenever `Pool::host_connection_id` flips between
+    /// `Some(_)` and `None`. Guests use this to drive UI affordances such
+    /// as a "host disconnected" badge and to gate client-side host-only
+    /// actions while waiting for the host to reconnect.
+    ///
+    /// This event is **purely about pool lifecycle**; the data path is
+    /// unchanged. Existing peer-to-peer `Forward` traffic between guests
+    /// continues to flow regardless of host presence, and existing
+    /// authenticated tunnel-exit streams keep operating.
+    PoolHostStatus(PoolHostStatusData),
+
     // ── Tunnel control plane (Server -> Client) ───────────────────────
     /// Server's reply to a `TunnelDnsQuery`.
     TunnelDnsResponse(TunnelDnsResponseData),
@@ -287,6 +301,12 @@ pub struct PeerInfo {
 }
 
 /// Summary information about a pool.
+///
+/// `PoolInfo` does not use `#[serde(deny_unknown_fields)]`, so adding new
+/// optional / always-serialized fields here is backward compatible: legacy
+/// decoders silently drop unknown JSON fields. New fields with `#[serde(default)]`
+/// are also forward compatible (a new client decoding an old payload uses
+/// the default).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolInfo {
     pub pool_id: Uuid,
@@ -297,6 +317,18 @@ pub struct PoolInfo {
     /// Whether the host has opted in to providing tunnel exit. Reflects
     /// `Pool.tunnel_exit_enabled` at the moment this `PoolInfo` was built.
     pub tunnel_exit_enabled: bool,
+    /// Whether the pool host is currently attached to a live WebSocket.
+    ///
+    /// Almost always `true` at the moment this struct is constructed: a
+    /// guest's `JoinAccepted` only fires after the host's live approval,
+    /// which requires the host's WebSocket to be online. The field is
+    /// always serialized so that clients pattern-matching on
+    /// `pool_info.host_online` can rely on its presence; legacy server
+    /// builds that lack the field are tolerated by the `#[serde(default)]`
+    /// fallback (default is `false`, but in practice old servers never
+    /// hand out `PoolInfo` to guests in any other state).
+    #[serde(default)]
+    pub host_online: bool,
 }
 
 /// Data payload for the `update_pool_config` client→server frame.
@@ -326,6 +358,30 @@ pub struct PoolConfigUpdatedData {
     /// from the pool host. Reserved for future server-side changes (e.g.
     /// administrative overrides) which would set this field to `false`.
     pub updated_by_host: bool,
+}
+
+/// Data payload for the `pool_host_status` server→client broadcast.
+///
+/// Sent in two situations:
+/// 1. Host disconnected — `online: false`, `offline_since: Some(unix_ts)`.
+///    The pool stays alive; existing guests may continue to forward
+///    messages to one another and to operate authenticated tunnel-exit
+///    streams. Host-only operations (`CreateInvitation`, `KickPeer`,
+///    `ClosePool`, `UpdatePoolConfig`, `JoinApproval`) cannot succeed
+///    until the host reconnects, and `JoinRequest`s targeting this pool
+///    are rejected with `host_offline_unavailable`.
+/// 2. Host reconnected — `online: true`, `offline_since: None`. The same
+///    pool (same `pool_id`) is rebound to the host's new WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PoolHostStatusData {
+    /// `true` if the host is now attached to a live WebSocket; `false` if
+    /// the host has just disconnected.
+    pub online: bool,
+    /// Unix epoch seconds at which the host went offline. `None` whenever
+    /// `online == true` (skipped from the wire on serialization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_since: Option<i64>,
 }
 
 /// A non-recursive representation of a relayed message, used exclusively in
@@ -1147,5 +1203,116 @@ mod tests {
 
         let result: Result<ServerFrame, _> = serde_json::from_str(malicious);
         assert!(result.is_err(), "recursive nesting must be rejected");
+    }
+
+    // ── pool_host_status ────────────────────────────────────────────
+
+    #[test]
+    fn pool_host_status_serde_roundtrip() {
+        // online: false carries an offline_since timestamp.
+        let offline = ServerFrame::PoolHostStatus(PoolHostStatusData {
+            online: false,
+            offline_since: Some(1_700_000_123),
+        });
+        let json = serde_json::to_string(&offline).expect("serialize offline");
+        // Wire field naming.
+        assert!(
+            json.contains(r#""frame_type":"pool_host_status""#),
+            "got: {json}"
+        );
+        assert!(json.contains(r#""online":false"#), "got: {json}");
+        assert!(
+            json.contains(r#""offline_since":1700000123"#),
+            "got: {json}"
+        );
+
+        let parsed: ServerFrame =
+            serde_json::from_str(&json).expect("deserialize offline pool_host_status");
+        match parsed {
+            ServerFrame::PoolHostStatus(data) => {
+                assert!(!data.online);
+                assert_eq!(data.offline_since, Some(1_700_000_123));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // online: true must skip offline_since on the wire.
+        let online = ServerFrame::PoolHostStatus(PoolHostStatusData {
+            online: true,
+            offline_since: None,
+        });
+        let json = serde_json::to_string(&online).expect("serialize online");
+        assert!(json.contains(r#""online":true"#), "got: {json}");
+        assert!(
+            !json.contains("offline_since"),
+            "None offline_since must be skipped when serializing: {json}"
+        );
+
+        let parsed: ServerFrame =
+            serde_json::from_str(&json).expect("deserialize online pool_host_status");
+        match parsed {
+            ServerFrame::PoolHostStatus(data) => {
+                assert!(data.online);
+                assert_eq!(data.offline_since, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_host_status_accepts_legacy_payload_without_offline_since() {
+        // A legacy / minimal payload that omits offline_since must still
+        // decode successfully (defaults to None).
+        let json = r#"{"frame_type":"pool_host_status","data":{"online":true}}"#;
+        let parsed: ServerFrame = serde_json::from_str(json).expect("legacy payload must parse");
+        match parsed {
+            ServerFrame::PoolHostStatus(data) => {
+                assert!(data.online);
+                assert_eq!(data.offline_since, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    // ── pool_info.host_online ───────────────────────────────────────
+
+    #[test]
+    fn pool_info_with_host_online_serde_roundtrip() {
+        let info = PoolInfo {
+            pool_id: Uuid::nil(),
+            name: "pool-x".to_owned(),
+            host_peer_id: "host-pk".to_owned(),
+            max_peers: 16,
+            current_peers: 3,
+            tunnel_exit_enabled: true,
+            host_online: true,
+        };
+        let json = serde_json::to_string(&info).expect("serialize");
+        assert!(json.contains(r#""host_online":true"#), "got: {json}");
+        assert!(
+            json.contains(r#""tunnel_exit_enabled":true"#),
+            "tunnel_exit_enabled must still be present on the wire: {json}"
+        );
+        let parsed: PoolInfo = serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.host_online);
+        assert!(parsed.tunnel_exit_enabled);
+        assert_eq!(parsed.current_peers, 3);
+    }
+
+    #[test]
+    fn pool_info_legacy_payload_without_host_online_decodes() {
+        // A legacy server build that pre-dates the host_online field still
+        // produces parseable PoolInfo: the missing field defaults to false.
+        let json = r#"{
+            "pool_id": "00000000-0000-0000-0000-000000000000",
+            "name": "legacy",
+            "host_peer_id": "h",
+            "max_peers": 8,
+            "current_peers": 1,
+            "tunnel_exit_enabled": false
+        }"#;
+        let parsed: PoolInfo =
+            serde_json::from_str(json).expect("legacy PoolInfo without host_online must parse");
+        assert!(!parsed.host_online);
     }
 }

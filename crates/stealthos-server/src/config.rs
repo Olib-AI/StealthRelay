@@ -59,9 +59,25 @@ pub struct PoolSection {
     /// Maximum peers per pool.
     #[serde(default = "default_max_pool_size")]
     pub max_pool_size: usize,
-    /// Seconds of pool inactivity before automatic cleanup.
+    /// Seconds of pool inactivity before automatic cleanup. Applies only
+    /// to pools whose host is currently *online*; the host-offline path
+    /// is governed by [`Self::host_offline_ttl_secs`] and
+    /// [`Self::empty_grace_secs`] below.
     #[serde(default = "default_pool_idle_timeout")]
     pub pool_idle_timeout: u64,
+    /// Maximum number of seconds the host may stay offline before the
+    /// pool is destroyed regardless of guest count.
+    ///
+    /// Bounded above so a host that loses their device permanently
+    /// doesn't leave a pool occupying server state forever. Default 24h.
+    #[serde(default = "default_host_offline_ttl_secs")]
+    pub host_offline_ttl_secs: u64,
+    /// When the host is offline AND the pool is empty (no guests), tear
+    /// down after this many seconds. Lets the relay reclaim state
+    /// quickly for abandoned-and-empty pools while still allowing
+    /// briefly-empty pools to survive a host blip. Default 5min.
+    #[serde(default = "default_empty_grace_secs")]
+    pub empty_grace_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +209,12 @@ const fn default_max_pool_size() -> usize {
 const fn default_pool_idle_timeout() -> u64 {
     300
 }
+const fn default_host_offline_ttl_secs() -> u64 {
+    86_400 // 24 hours
+}
+const fn default_empty_grace_secs() -> u64 {
+    300 // 5 minutes
+}
 fn default_key_dir() -> String {
     "/var/stealth-relay/keys".to_owned()
 }
@@ -278,6 +300,8 @@ impl Default for PoolSection {
             max_pools: default_max_pools(),
             max_pool_size: default_max_pool_size(),
             pool_idle_timeout: default_pool_idle_timeout(),
+            host_offline_ttl_secs: default_host_offline_ttl_secs(),
+            empty_grace_secs: default_empty_grace_secs(),
         }
     }
 }
@@ -432,6 +456,16 @@ impl ServerConfig {
             && let Ok(n) = v.parse()
         {
             self.pool.pool_idle_timeout = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_POOL__HOST_OFFLINE_TTL_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.pool.host_offline_ttl_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_POOL__EMPTY_GRACE_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.pool.empty_grace_secs = n;
         }
         if let Ok(v) = std::env::var("STEALTH_TRANSPORT__TLS_CERT_PATH") {
             self.transport.tls_cert_path = Some(v);

@@ -46,15 +46,11 @@ impl CidrSet {
     pub fn contains(&self, addr: IpAddr) -> bool {
         for block in &self.blocks {
             match (addr, block) {
-                (IpAddr::V4(a), Block::V4(net, pl)) => {
-                    if matches_prefix(&a.octets(), net, *pl) {
-                        return true;
-                    }
+                (IpAddr::V4(a), Block::V4(net, pl)) if matches_prefix(&a.octets(), net, *pl) => {
+                    return true;
                 }
-                (IpAddr::V6(a), Block::V6(net, pl)) => {
-                    if matches_prefix(&a.octets(), net, *pl) {
-                        return true;
-                    }
+                (IpAddr::V6(a), Block::V6(net, pl)) if matches_prefix(&a.octets(), net, *pl) => {
+                    return true;
                 }
                 _ => {}
             }

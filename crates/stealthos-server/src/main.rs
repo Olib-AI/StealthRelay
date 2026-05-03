@@ -396,7 +396,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let eviction_shutdown = state.shutdown_rx.clone();
     let eviction_handle = tokio::spawn(async move {
         let mut shutdown = eviction_shutdown;
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_mins(1));
 
         loop {
             tokio::select! {

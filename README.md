@@ -17,7 +17,9 @@ StealthRelay is a self-hosted Rust relay server that routes WebSocket messages b
 
 The relay operates on a zero-knowledge model: deploy it on your own infrastructure, claim ownership via a one-time QR code, and invite friends through cryptographically signed invitation URLs. The server authenticates hosts with Ed25519 signatures and protects against abuse with adaptive proof-of-work, per-IP rate limiting, and progressive blocking.
 
-Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 166 unit tests, and 30 E2E tests.
+Optionally, the relay can also act as a **VPN-like network exit**: pool hosts (and the members they approve) tunnel TCP/UDP traffic through the relay, which opens the upstream sockets and bridges bytes back. The relay's IP becomes the visible exit address. TLS to the destination stays end-to-end (member ↔ destination). Hot-path bytes ride binary WebSocket frames on the same port — no second listener, no special proxy config. Off by default; opt in with `[tunnel] enabled = true`.
+
+Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 227 unit tests, and 30 E2E tests.
 
 ## Quick Start
 
@@ -357,6 +359,7 @@ All configuration values can be overridden with environment variables using the 
 | `STEALTH_LOGGING__LEVEL` | `STEALTH_LOG_LEVEL` | Log filter directive |
 | `STEALTH_LOGGING__FORMAT` | `STEALTH_LOG_FORMAT` | Output format (`json` or `pretty`) |
 | `STEALTH_CRYPTO__KEY_DIR` | — | Host identity key directory |
+| `STEALTH_TUNNEL__ENABLED` | — | Enable/disable the VPN-like tunnel-exit gateway (default `false`) |
 | — | `STEALTH_WS_PORT` | Host-side WebSocket port mapping |
 | — | `STEALTH_METRICS_PORT` | Host-side metrics port mapping |
 | — | `CLOUDFLARED_TOKEN` | Cloudflare Tunnel token |
@@ -409,6 +412,46 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 | `rate_limit.max_failed_auth` | `5` | Maximum failed authentication attempts per IP before temporary block |
 | `rate_limit.block_duration_secs` | `600` | Duration in seconds an IP stays blocked after exceeding limits (10 min) |
 
+### Tunnel Exit (VPN-like)
+
+Off by default. When enabled, the relay opens TCP/UDP sockets to internet destinations on behalf of authenticated pool members and bridges bytes back over their existing WebSocket. Permission is two-level: server admin enables the gateway here, then each pool host opts in for *their* members via the in-app `Allow Members to Use Relay Exit` toggle (the pool host themselves can always use the relay once `enabled = true` — they don't need to grant themselves permission).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `tunnel.enabled` | `false` | Master switch. When `false`, every `tunnel_*` frame is rejected with `policy_denied`. Toggle via TOML or `STEALTH_TUNNEL__ENABLED=true` |
+| `tunnel.max_streams_per_connection` | `64` | Per-WebSocket cap on concurrent tunnel streams |
+| `tunnel.max_streams_global` | `4096` | Server-wide cap |
+| `tunnel.connect_timeout_secs` | `15` | Per-stream upstream connect timeout |
+| `tunnel.idle_stream_timeout_secs` | `120` | Idle-stream eviction |
+| `tunnel.max_payload_bytes` | `32768` | Max binary `tunnel_data` payload per frame (header is 9 bytes, fits under the 64 KiB WS cap) |
+| `tunnel.initial_receive_window` | `262144` | Bytes the relay buffers per stream before back-pressuring upstream reads |
+| `tunnel.window_update_threshold` | `65536` | Bytes consumed before emitting an upstream `tunnel_window_update` |
+| `tunnel.denied_destination_ports` | `[25, 465, 587, 6667]` | Hard-blocked ports (SMTP / IRC by default) |
+| `tunnel.allowed_destination_cidrs` | `[]` | If non-empty, only resolved IPs in this set are allowed |
+| `tunnel.denied_destination_cidrs` | `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10]` | Default-deny on RFC1918 / loopback / link-local / ULA so the relay can't be turned into an SSRF gadget |
+
+**Authorization gates (in order):**
+
+1. `tunnel.enabled = true` (server-wide).
+2. Connection has completed `host_auth_success` (host) **or** `join_accepted` (guest).
+3. For **guests** only: the pool host has set `pool.tunnel_exit_enabled = true` via `update_pool_config`. The pool **host** bypasses this gate — they can use the relay for their own traffic regardless.
+
+Failures at any gate respond with `tunnel_close { reason: policy_denied }` (or a `tunnel_dns_response` with `policy_denied` for DNS).
+
+**Wire format (data path is binary, control plane is JSON):**
+
+- Control plane (JSON text frames): `tunnel_open`, `tunnel_close`, `tunnel_window_update`, `tunnel_dns_query`, `tunnel_dns_response`, `tunnel_error`.
+- Hot path (binary WS frames, big-endian, parseable without allocation):
+  - `TUNNEL_DATA`: `[0x01][stream_id u32][sequence u32][payload]`
+  - `TUNNEL_UDP`: `[0x02][stream_id u32][datagram]`
+- Reserved: `0x00` (framing-error sentinel) and `0x80..=0xFF` are rejected.
+- Binary-frame-before-auth → WebSocket close `1008 policy violation`.
+
+**What the relay can and cannot see:**
+
+- Sees: destination hostname/port, byte counts, timing, source peer ID.
+- Does **not** see: the contents of TLS-encrypted streams (e.g. HTTPS payloads). For plain HTTP the relay sees the bytes — but this is *your* relay.
+
 ## API Reference
 
 ### Client → Server Frames
@@ -430,6 +473,11 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 | `reclaim_server` | `recovery_key`, `new_host_public_key`, `display_name` | Reclaim a server using the recovery key |
 | `ack` | `sequence` | Acknowledge receipt of a sequence number |
 | `heartbeat_ping` | `timestamp` | Client heartbeat |
+| `update_pool_config` | `tunnel_exit_enabled?`, `session_token` | Host toggles per-pool member-tunnel approval |
+| `tunnel_open` | `stream_id`, `destination`, `network`, `initial_window` | Open a tunnel stream to an internet destination |
+| `tunnel_close` | `stream_id`, `reason` | Close a tunnel stream |
+| `tunnel_window_update` | `stream_id`, `additional_credit` | Grant additional inbound bytes credit |
+| `tunnel_dns_query` | `query_id`, `name`, `type` | Resolve a hostname through the relay |
 
 ### Server → Client Frames
 
@@ -451,6 +499,11 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 | `error` | `code`, `message` | Error response |
 | `kicked` | `reason` | Server-initiated kick |
 | `heartbeat_pong` | `timestamp`, `server_time` | Server heartbeat response |
+| `pool_config_updated` | `tunnel_exit_enabled`, `updated_by_host` | Per-pool config change broadcast to all members |
+| `tunnel_close` | `stream_id`, `reason` | Stream closed by relay |
+| `tunnel_window_update` | `stream_id`, `additional_credit` | Outbound credit grant |
+| `tunnel_dns_response` | `query_id`, `answers?`, `error?` | Result of a `tunnel_dns_query` |
+| `tunnel_error` | `stream_id?`, `code`, `message` | Tunnel-scoped error |
 
 ### Error Codes
 

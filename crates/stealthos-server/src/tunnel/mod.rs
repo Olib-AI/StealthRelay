@@ -187,13 +187,18 @@ impl TunnelGateway {
             return;
         };
 
-        // Gate 2: the pool host must have approved tunnel exit for members.
-        if !pool.tunnel_exit_enabled() {
+        let owned_by_host = pool.is_host(connection_id);
+
+        // Gate 2: per-pool approval. Members are gated by the host's
+        // `tunnel_exit_enabled` toggle. The host themselves bypasses this gate —
+        // the toggle controls whether *members* can use the relay, not whether
+        // the host themselves can. (Server-wide `tunnel.enabled` already gated
+        // above; that's what controls the host.)
+        if !owned_by_host && !pool.tunnel_exit_enabled() {
             self.send_close(connection_id, data.stream_id, CloseReason::PolicyDenied);
             return;
         }
 
-        let owned_by_host = pool.is_host(connection_id);
         let pool_id = pool.id;
 
         // Reject zero-port immediately — saves DNS / connect latency.
@@ -387,8 +392,9 @@ impl TunnelGateway {
             return;
         }
 
-        // The connection must be authenticated to a pool whose host approved
-        // tunnel exit (mirrors `tunnel_open`).
+        // The connection must be authenticated to a pool. The pool host can
+        // resolve names without flipping their own per-pool approval flag —
+        // that flag is the *member* gate, not a self-gate (mirrors `tunnel_open`).
         let Some(pool) = self.pool_registry.get_pool_for_connection(connection_id) else {
             self.send_dns_error(
                 connection_id,
@@ -398,7 +404,7 @@ impl TunnelGateway {
             );
             return;
         };
-        if !pool.tunnel_exit_enabled() {
+        if !pool.is_host(connection_id) && !pool.tunnel_exit_enabled() {
             self.send_dns_error(
                 connection_id,
                 data.query_id,
@@ -1568,6 +1574,59 @@ mod tests {
             .iter()
             .any(|f| matches!(f, ServerFrame::TunnelDnsResponse(_)));
         assert!(saw_response, "expected DNS response, got {frames:?}");
+    }
+
+    #[tokio::test]
+    async fn tunnel_open_from_host_bypasses_pool_flag() {
+        let mut h = build_gw(|_| {});
+        // Member gate is off — but the host themselves must still reach the relay.
+        let pool = h.pool_registry.get_pool(h.pool_id).unwrap();
+        pool.set_tunnel_exit_enabled(false);
+
+        let data = TunnelOpenData {
+            stream_id: 7,
+            destination: TunnelDestination::Ipv4 {
+                address: "127.0.0.1".into(),
+                port: 1, // no listener — connect will fail, but NOT with policy_denied
+            },
+            network: TunnelNetwork::Tcp,
+            initial_window: 4096,
+        };
+        h.gateway.handle_open(h.host_conn, data).await;
+        // Give the spawned connect task a moment to fail.
+        tokio::time::sleep(TokioDuration::from_millis(100)).await;
+        let frames = drain(&mut h.host_rx);
+        let saw_policy_denied = frames.iter().any(|f| {
+            matches!(f, ServerFrame::TunnelClose(c)
+                if c.stream_id == 7 && c.reason == CloseReason::PolicyDenied)
+        });
+        assert!(
+            !saw_policy_denied,
+            "host should bypass per-pool gate but got policy_denied: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_query_from_host_bypasses_pool_flag() {
+        let mut h = build_gw(|_| {});
+        let pool = h.pool_registry.get_pool(h.pool_id).unwrap();
+        pool.set_tunnel_exit_enabled(false);
+
+        let q = TunnelDnsQueryData {
+            query_id: 11,
+            name: "localhost".into(),
+            record_type: stealthos_core::server_frame::DnsRecordType::A,
+        };
+        h.gateway.handle_dns_query(h.host_conn, q).await;
+        let frames = drain(&mut h.host_rx);
+        let saw_policy_denied = frames.iter().any(|f| {
+            matches!(f, ServerFrame::TunnelDnsResponse(d)
+                if d.error.as_ref().is_some_and(|e| matches!(e.code, DnsErrorCode::PolicyDenied)))
+        });
+        assert!(
+            !saw_policy_denied,
+            "host should bypass DNS pool gate but got policy_denied: {frames:?}"
+        );
     }
 
     #[tokio::test]

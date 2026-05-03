@@ -20,6 +20,7 @@ mod claim;
 mod config;
 mod handler;
 mod setup;
+mod tunnel;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -318,6 +319,29 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             rate_limit_config,
         ));
 
+        // Construct the tunnel-exit gateway against the *real* transport
+        // registry (the placeholder gateway built inside `AppState::build`
+        // points at the placeholder ConnectionRegistry).
+        let (tunnel_config, tunnel_warnings) =
+            crate::tunnel::TunnelConfig::from_section(&config.tunnel);
+        for w in &tunnel_warnings {
+            warn!("tunnel config: {w}");
+        }
+        if tunnel_config.enabled {
+            info!(
+                max_streams_per_connection = tunnel_config.max_streams_per_connection,
+                max_streams_global = tunnel_config.max_streams_global,
+                "tunnel-exit gateway enabled"
+            );
+        } else {
+            info!("tunnel-exit gateway is disabled (set [tunnel] enabled = true to opt in)");
+        }
+        let tunnel_gateway = Arc::new(crate::tunnel::TunnelGateway::new(
+            tunnel_config,
+            Arc::clone(&transport_registry),
+            state.pool_registry.clone(),
+        ));
+
         Arc::new(crate::handler::MessageHandler::new(
             state.pool_registry.clone(),
             transport_registry,
@@ -330,6 +354,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             shared_claim,
             key_dir.clone(),
             Some(setup_state_for_handler),
+            tunnel_gateway,
         ))
     };
 
@@ -416,6 +441,24 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                                 );
                             }
                         });
+                    }
+                    Some(ConnectionEvent::BinaryReceived {
+                        connection_id,
+                        payload,
+                        remote_addr: _,
+                    }) => {
+                        // SECURITY: binary frames before authentication are a
+                        // policy violation. The handler returns `false` in
+                        // that case; we close the WebSocket with code 1008.
+                        if !handler.handle_binary_frame(connection_id, &payload) {
+                            let _ = event_loop_registry.send_to(
+                                connection_id,
+                                stealthos_transport::connection::OutboundMessage::Close(
+                                    1008,
+                                    "binary frame before authentication".to_owned(),
+                                ),
+                            );
+                        }
                     }
                     Some(ConnectionEvent::Disconnected {
                         connection_id,

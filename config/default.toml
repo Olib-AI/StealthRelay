@@ -97,3 +97,64 @@ max_failed_auth = 5
 
 # Duration in seconds an IP stays blocked after exceeding limits (10 minutes).
 block_duration_secs = 600
+
+# ----------------------------------------------------------------------------
+# Tunnel — server-side tunnel-exit gateway ("VPN-like" relay-as-exit)
+# ----------------------------------------------------------------------------
+# When enabled, authenticated pool members may open TCP/UDP streams that the
+# relay terminates on their behalf and bridges back over the existing
+# WebSocket. Two-level authorization gate:
+#
+#   1. `enabled` (this section)                  — server-wide kill switch.
+#   2. `Pool.tunnel_exit_enabled`                — per-pool host approval.
+#   3. Connection authenticated to that pool      — host_auth or join_accepted.
+#
+# All three must hold before a `tunnel_open` is accepted. Default off.
+[tunnel]
+enabled = false
+
+# Maximum simultaneously-open tunnel streams per WebSocket connection.
+max_streams_per_connection = 64
+
+# Maximum simultaneously-open tunnel streams across the whole server.
+max_streams_global = 4096
+
+# Connect timeout for outbound TCP / DNS lookups (seconds).
+connect_timeout_secs = 15
+
+# Idle-stream timeout (seconds). Streams with no traffic in either direction
+# for this long are aborted and reported with `idle_timeout`.
+idle_stream_timeout_secs = 120
+
+# Maximum payload of a single binary tunnel data frame (bytes).
+# Stays well below the 64 KiB WebSocket frame cap to leave room for the
+# 9-byte header and any OS / TLS overhead.
+max_payload_bytes = 32768
+
+# Initial receive window the server grants the member (bytes). Bounds how
+# much un-acked data the member may push the relay in either direction.
+initial_receive_window = 262144
+
+# Bytes consumed by the destination since the last window update before the
+# server emits a fresh window update upstream.
+window_update_threshold = 65536
+
+# Destination ports the relay refuses to dial. Defaults block SMTP and IRC.
+denied_destination_ports = [25, 465, 587, 6667]
+
+# Optional allowlist of destination CIDRs. When non-empty, only addresses
+# in one of these CIDRs are reachable. Empty list means "no allowlist".
+allowed_destination_cidrs = []
+
+# Always-blocked CIDRs. The defaults block private and link-local space so
+# the relay cannot be turned into an SSRF gadget against the host's own LAN.
+denied_destination_cidrs = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+]

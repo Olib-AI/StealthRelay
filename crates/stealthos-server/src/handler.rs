@@ -21,6 +21,7 @@ use stealthos_core::ratelimit::{ConnectionThrottler, IpRateLimiter};
 use stealthos_core::router::Router;
 use stealthos_core::server_frame::{
     PeerInfo, PoolConfigUpdatedData, PoolInfo, PowChallengeFrame, PowSolutionFrame, ServerFrame,
+    TunnelCloseData, TunnelDnsQueryData, TunnelOpenData, TunnelWindowUpdateData,
     UpdatePoolConfigData,
 };
 use stealthos_core::types::{ConnectionId, PeerId, PoolId};
@@ -37,6 +38,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use crate::claim::{self, ClaimState};
+use crate::tunnel::{BinaryDispatch, TunnelGateway};
 
 /// Maximum allowed display name length after sanitization (bytes).
 const MAX_DISPLAY_NAME_LEN: usize = 64;
@@ -163,6 +165,10 @@ pub struct MessageHandler {
     /// auth to this specific connection, preventing replay of captured
     /// `HostAuth` frames on a different connection.
     connection_nonces: DashMap<ConnectionId, String>,
+    /// Server-side tunnel-exit gateway. Always present (constructed even when
+    /// `tunnel.enabled = false` so per-pool state is consistent); the
+    /// gateway's own `enabled` flag short-circuits every `tunnel_open`.
+    tunnel_gateway: Arc<TunnelGateway>,
 }
 
 impl MessageHandler {
@@ -180,6 +186,7 @@ impl MessageHandler {
         claim_state: Arc<Mutex<ClaimState>>,
         key_dir: PathBuf,
         setup_state: Option<Arc<crate::setup::SetupState>>,
+        tunnel_gateway: Arc<TunnelGateway>,
     ) -> Self {
         Self {
             pool_registry,
@@ -201,7 +208,15 @@ impl MessageHandler {
             guest_session_tokens: DashMap::new(),
             session_ciphers: DashMap::new(),
             connection_nonces: DashMap::new(),
+            tunnel_gateway,
         }
+    }
+
+    /// Borrow the tunnel gateway. Used by the main event loop for binary
+    /// frame dispatch and lifecycle hooks.
+    #[allow(dead_code)] // Reserved for diagnostic and integration-test access.
+    pub const fn tunnel_gateway(&self) -> &Arc<TunnelGateway> {
+        &self.tunnel_gateway
     }
 
     /// Periodic cleanup of stale state: pending joins, rate limiters,
@@ -471,6 +486,20 @@ impl MessageHandler {
                 self.handle_heartbeat_ping(connection_id, timestamp).await
             }
 
+            // ── Tunnel control plane (Client -> Server) ─────────────────
+            ServerFrame::TunnelOpen(data) => self.handle_tunnel_open(connection_id, data).await,
+            ServerFrame::TunnelClose(data) => {
+                self.handle_tunnel_close(connection_id, &data);
+                Ok(())
+            }
+            ServerFrame::TunnelWindowUpdate(data) => {
+                self.handle_tunnel_window_update(connection_id, &data);
+                Ok(())
+            }
+            ServerFrame::TunnelDnsQuery(data) => {
+                self.handle_tunnel_dns_query(connection_id, data).await
+            }
+
             // ── Server -> Client frames (should never arrive from a client) ──
             ServerFrame::AuthChallenge { .. }
             | ServerFrame::ServerHello { .. }
@@ -488,12 +517,87 @@ impl MessageHandler {
             | ServerFrame::ClaimSuccess { .. }
             | ServerFrame::ClaimRejected { .. }
             | ServerFrame::PoolConfigUpdated(_)
+            | ServerFrame::TunnelDnsResponse(_)
+            | ServerFrame::TunnelError(_)
             | ServerFrame::Error { .. } => {
                 warn!(
                     connection = %connection_id,
                     "received server-to-client frame from client, ignoring"
                 );
                 Ok(())
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tunnel-exit gateway dispatch
+    // -----------------------------------------------------------------------
+
+    async fn handle_tunnel_open(
+        &self,
+        connection_id: ConnectionId,
+        data: TunnelOpenData,
+    ) -> Result<(), anyhow::Error> {
+        self.tunnel_gateway.handle_open(connection_id, data).await;
+        Ok(())
+    }
+
+    fn handle_tunnel_close(&self, connection_id: ConnectionId, data: &TunnelCloseData) {
+        self.tunnel_gateway.handle_close(connection_id, data);
+    }
+
+    fn handle_tunnel_window_update(
+        &self,
+        connection_id: ConnectionId,
+        data: &TunnelWindowUpdateData,
+    ) {
+        self.tunnel_gateway
+            .handle_window_update(connection_id, data);
+    }
+
+    async fn handle_tunnel_dns_query(
+        &self,
+        connection_id: ConnectionId,
+        data: TunnelDnsQueryData,
+    ) -> Result<(), anyhow::Error> {
+        self.tunnel_gateway
+            .handle_dns_query(connection_id, data)
+            .await;
+        Ok(())
+    }
+
+    /// Dispatch a binary WebSocket frame from the connection event loop.
+    ///
+    /// Returns `true` if the frame was acceptable (handled or rejected
+    /// without protocol-level fault). Returns `false` to instruct the
+    /// caller to terminate the connection with WebSocket close code 1008
+    /// (policy violation) — used for binary frames before authentication.
+    pub fn handle_binary_frame(&self, connection_id: ConnectionId, payload: &[u8]) -> bool {
+        match self.tunnel_gateway.handle_binary(connection_id, payload) {
+            BinaryDispatch::Handled => true,
+            BinaryDispatch::Reject => {
+                warn!(
+                    connection = %connection_id,
+                    "rejected malformed binary frame"
+                );
+                // Send a control-plane TunnelError with no stream_id so the
+                // member can resync. The connection itself stays open.
+                let _ = self.send_to_connection(
+                    connection_id,
+                    &ServerFrame::TunnelError(stealthos_core::server_frame::TunnelErrorData {
+                        stream_id: None,
+                        code: stealthos_core::server_frame::TunnelErrorCode::ProtocolError,
+                        message: "malformed binary frame".to_owned(),
+                    }),
+                );
+                true
+            }
+            BinaryDispatch::Unauthenticated => {
+                warn!(
+                    connection = %connection_id,
+                    "binary frame received before authentication, closing"
+                );
+                false
             }
         }
     }
@@ -1685,6 +1789,10 @@ impl MessageHandler {
         // Look up the peer's connection_id before removing.
         let removed = pool.remove_peer(&target_peer_id);
         if let Some(removed_peer) = removed {
+            // Tear down any in-flight tunnel streams the kicked peer owns.
+            self.tunnel_gateway
+                .abort_connection_streams(removed_peer.connection_id);
+
             // Send Kicked frame to the target peer.
             let kicked_frame = ServerFrame::Kicked {
                 reason: reason.clone(),
@@ -1962,6 +2070,13 @@ impl MessageHandler {
             "pool tunnel-exit flag updated by host"
         );
 
+        // When the host revokes member approval, immediately tear down any
+        // in-flight guest tunnel streams in this pool. Host-owned streams
+        // are NOT affected (the per-pool flag only gates *member* approval).
+        if !requested {
+            self.tunnel_gateway.abort_pool_guest_streams(pool.id);
+        }
+
         // Broadcast the new state to every member of the pool, INCLUDING
         // the host (so its own UI confirms the change took effect).
         let frame = ServerFrame::PoolConfigUpdated(PoolConfigUpdatedData {
@@ -2171,6 +2286,10 @@ impl MessageHandler {
 
     /// Handle a peer disconnection: remove from pool and notify others.
     pub fn handle_disconnect(&self, connection_id: ConnectionId) {
+        // Tear down any tunnel streams owned by this connection BEFORE we
+        // unregister it, so the gateway's pool-membership check still sees
+        // the authenticated state for cleanup decisions.
+        self.tunnel_gateway.abort_connection_streams(connection_id);
         // Clean up any session cipher for this connection. The cipher holds
         // key material that is zeroized on drop.
         self.session_ciphers.remove(&connection_id);
@@ -2220,12 +2339,17 @@ impl MessageHandler {
     /// Also cleans up the `token_to_pool` index to prevent stale mappings
     /// from leaking memory or causing incorrect future lookups.
     fn close_pool_impl(&self, pool: &Pool) {
+        // Tear down any in-flight tunnel streams owned by the host or guests.
+        self.tunnel_gateway
+            .abort_connection_streams(pool.host_connection_id);
+
         // Send Kicked to all guest peers.
         let kicked_frame = ServerFrame::Kicked {
             reason: "pool closed".to_owned(),
         };
 
         for (peer_id, conn_id) in pool.guest_connection_ids() {
+            self.tunnel_gateway.abort_connection_streams(conn_id);
             let _ = self.send_to_connection(conn_id, &kicked_frame);
             let _ = self.connection_registry.send_to(
                 conn_id,
@@ -2545,6 +2669,10 @@ mod tests {
     }
 
     fn build_handler() -> Arc<MessageHandler> {
+        build_handler_with_tunnel(false)
+    }
+
+    fn build_handler_with_tunnel(tunnel_enabled: bool) -> Arc<MessageHandler> {
         let metrics = Arc::new(stealthos_observability::ServerMetrics::new());
         let pool_registry = Arc::new(PoolRegistry::new(8));
         let connection_registry = Arc::new(stealthos_transport::ConnectionRegistry::new(16));
@@ -2568,6 +2696,19 @@ mod tests {
                 recovery_key_hash: String::new(),
             },
         }));
+        let tunnel_section = crate::config::TunnelSection {
+            enabled: tunnel_enabled,
+            // Allow loopback for tests (override the default deny list).
+            denied_destination_cidrs: Vec::new(),
+            denied_destination_ports: Vec::new(),
+            ..crate::config::TunnelSection::default()
+        };
+        let (tunnel_cfg, _warns) = crate::tunnel::TunnelConfig::from_section(&tunnel_section);
+        let tunnel_gateway = Arc::new(crate::tunnel::TunnelGateway::new(
+            tunnel_cfg,
+            Arc::clone(&connection_registry),
+            Arc::clone(&pool_registry),
+        ));
         Arc::new(MessageHandler::new(
             pool_registry,
             connection_registry,
@@ -2580,6 +2721,7 @@ mod tests {
             claim_state,
             PathBuf::from("/tmp/stealthrelay-test-keydir"),
             None,
+            tunnel_gateway,
         ))
     }
 

@@ -105,12 +105,28 @@ pub enum ServerFrame {
 
     /// Update mutable per-pool configuration flags (host only).
     ///
-    /// Currently the only supported flag is `tunnel_exit_enabled`, which
-    /// signals whether the host has opted in to providing tunnel exit
-    /// (a "VPN-like" feature where pool members route their traffic
-    /// through the host's internet connection). The relay never sees
-    /// tunnel data — it merely tracks and broadcasts the capability flag.
+    /// The supported flag is `tunnel_exit_enabled`, which is one of two
+    /// AND-gates that authorize a member to use the relay's server-side
+    /// tunnel-exit gateway (the relay opens real TCP/UDP sockets to
+    /// destinations on behalf of authenticated peers; the pool host
+    /// merely *approves* their members' use of that gateway). The
+    /// other gate is the server-wide `[tunnel] enabled` config flag.
     UpdatePoolConfig(UpdatePoolConfigData),
+
+    // ── Tunnel control plane (Client -> Server) ───────────────────────
+    /// Open a new tunnel stream (TCP or UDP) to a destination.
+    TunnelOpen(TunnelOpenData),
+
+    /// Close an existing tunnel stream.
+    TunnelClose(TunnelCloseData),
+
+    /// Grant additional receive credit to the server for the given stream
+    /// (member-controlled flow control: server stops sending data on a
+    /// stream when its outbound credit drops to zero).
+    TunnelWindowUpdate(TunnelWindowUpdateData),
+
+    /// Resolve a hostname via the server's DNS resolver.
+    TunnelDnsQuery(TunnelDnsQueryData),
 
     /// Client handshake init (Noise NK step 1).
     HandshakeInit {
@@ -250,6 +266,15 @@ pub enum ServerFrame {
     /// Pool configuration changed -- broadcast to every member of the pool
     /// (host + all guests) whenever a tracked flag transitions.
     PoolConfigUpdated(PoolConfigUpdatedData),
+
+    // ── Tunnel control plane (Server -> Client) ───────────────────────
+    /// Server's reply to a `TunnelDnsQuery`.
+    TunnelDnsResponse(TunnelDnsResponseData),
+
+    /// Server-initiated tunnel error (used both before any stream exists
+    /// — e.g. binary frame referencing an unknown stream — and to report
+    /// asynchronous failures of an open stream).
+    TunnelError(TunnelErrorData),
 }
 
 /// Information about a connected peer, sent in pool membership updates.
@@ -335,6 +360,220 @@ pub struct PowSolutionFrame {
     pub challenge: String,
     pub solution: String,
 }
+
+// ============================================================================
+// Tunnel-exit gateway control plane
+// ============================================================================
+//
+// The relay terminates tunnel streams on the *server* (this crate) and
+// bridges bytes back over the WebSocket. The pool host plays no role in
+// carrying tunnel traffic. See `crates/stealthos-server/src/tunnel/`.
+//
+// Hot-path data uses **binary** WebSocket frames (see the binary layout
+// constants below). Control-plane frames (open/close/window/DNS/error)
+// are JSON text frames and are the variants enumerated above.
+
+/// Network protocol of a tunnel stream.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelNetwork {
+    /// Reliable, ordered byte stream over TCP.
+    Tcp,
+    /// Unreliable, unordered datagrams over UDP.
+    Udp,
+}
+
+/// Destination of a tunnel-open request.
+///
+/// Hostnames are resolved server-side; `Ipv4` / `Ipv6` skip resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TunnelDestination {
+    /// Resolve `host` to an IP, then connect to (`ip`, `port`).
+    Hostname { host: String, port: u16 },
+    /// Connect directly to a dotted-quad IPv4 address.
+    Ipv4 { address: String, port: u16 },
+    /// Connect directly to a canonical-hex IPv6 address.
+    Ipv6 { address: String, port: u16 },
+}
+
+/// Reason a tunnel stream is being closed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// The peer (member) closed the stream cleanly.
+    PeerClosed,
+    /// The peer aborted the stream (RST equivalent).
+    Aborted,
+    /// The stream was idle for too long.
+    IdleTimeout,
+    /// The relay refused the open due to policy (config/CIDR/port deny).
+    PolicyDenied,
+    /// The destination address could not be reached or resolved.
+    DestinationUnreachable,
+    /// The destination actively refused the connection.
+    ConnectionRefused,
+    /// Connect or DNS lookup timed out.
+    Timeout,
+    /// Per-connection or global stream limit reached.
+    StreamLimit,
+    /// The peer sent a malformed binary frame or otherwise violated the protocol.
+    ProtocolError,
+}
+
+/// DNS record type the client wants resolved.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsRecordType {
+    /// IPv4 address record.
+    A,
+    /// IPv6 address record.
+    Aaaa,
+    /// Canonical name (alias) record.
+    Cname,
+    /// Free-form text record.
+    Txt,
+}
+
+/// DNS resolver error code.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsErrorCode {
+    /// The name does not exist (NXDOMAIN).
+    NxDomain,
+    /// The upstream resolver returned SERVFAIL.
+    ServFail,
+    /// Resolution timed out.
+    Timeout,
+    /// The query was denied by server policy (e.g. tunnel disabled).
+    PolicyDenied,
+    /// The query was malformed.
+    ProtocolError,
+}
+
+/// Server-initiated tunnel error code.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelErrorCode {
+    /// The request was denied by policy.
+    PolicyDenied,
+    /// The destination could not be reached.
+    DestinationUnreachable,
+    /// The destination refused the connection.
+    ConnectionRefused,
+    /// Connect or operation timed out.
+    Timeout,
+    /// The peer violated the wire protocol.
+    ProtocolError,
+    /// A capacity limit was exhausted (per-connection / global / memory).
+    ResourceExhausted,
+}
+
+/// Payload of `tunnel_open`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelOpenData {
+    /// Stream identifier chosen by the member (unique within its connection).
+    pub stream_id: u32,
+    /// Where the relay should connect.
+    pub destination: TunnelDestination,
+    /// `tcp` or `udp`.
+    pub network: TunnelNetwork,
+    /// Initial credit (in bytes) the server has to send data to the member.
+    pub initial_window: u32,
+}
+
+/// Payload of `tunnel_close`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelCloseData {
+    pub stream_id: u32,
+    pub reason: CloseReason,
+}
+
+/// Payload of `tunnel_window_update`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelWindowUpdateData {
+    pub stream_id: u32,
+    /// Additional credit (in bytes) the server may send to the member.
+    pub additional_credit: u32,
+}
+
+/// Payload of `tunnel_dns_query`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelDnsQueryData {
+    pub query_id: u32,
+    pub name: String,
+    /// Wire field is `"type"` (a Rust keyword); Rust field is `record_type`.
+    #[serde(rename = "type")]
+    pub record_type: DnsRecordType,
+}
+
+/// One DNS answer record in `TunnelDnsResponseData::answers`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsAnswer {
+    pub name: String,
+    /// Wire field is `"type"`; Rust field is `record_type`.
+    #[serde(rename = "type")]
+    pub record_type: DnsRecordType,
+    pub ttl: u32,
+    /// String value (dotted quad / canonical IPv6 / TXT contents / CNAME).
+    pub value: String,
+}
+
+/// Payload describing a DNS resolver error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsError {
+    pub code: DnsErrorCode,
+    pub message: String,
+}
+
+/// Payload of `tunnel_dns_response`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelDnsResponseData {
+    pub query_id: u32,
+    /// Present on success. Mutually exclusive with `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Vec<DnsAnswer>>,
+    /// Present on failure. Mutually exclusive with `answers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<DnsError>,
+}
+
+/// Payload of `tunnel_error`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelErrorData {
+    /// `Some` when the error is associated with a specific stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<u32>,
+    pub code: TunnelErrorCode,
+    pub message: String,
+}
+
+// ── Binary tunnel frame layout (NOT JSON) ────────────────────────────
+//
+// Hot-path data rides on **binary** WebSocket frames. The first byte
+// is the channel type:
+//
+//   0x00            reserved sentinel (reject)
+//   0x01 TUNNEL_DATA   ordered TCP byte stream
+//                       byte  0     = 0x01
+//                       bytes 1..5  = stream_id (u32 BE)
+//                       bytes 5..9  = sequence  (u32 BE)
+//                       bytes 9..   = payload   (≤ 32 KiB)
+//   0x02 TUNNEL_UDP    unordered UDP datagram
+//                       byte  0     = 0x02
+//                       bytes 1..5  = stream_id (u32 BE)
+//                       bytes 5..   = payload   (single datagram)
+//   0x03..=0x7F     reserved for future channels (reject)
+//   0x80..=0xFF     reserved for future channels (reject)
+
+/// Channel byte for the ordered TCP byte-stream channel.
+pub const TUNNEL_DATA_CHANNEL: u8 = 0x01;
+/// Channel byte for the unordered UDP datagram channel.
+pub const TUNNEL_UDP_CHANNEL: u8 = 0x02;
+/// Header length of a TUNNEL_DATA frame: 1-byte channel + 4-byte stream_id + 4-byte sequence.
+pub const TUNNEL_DATA_HEADER_LEN: usize = 9;
+/// Header length of a TUNNEL_UDP frame: 1-byte channel + 4-byte stream_id.
+pub const TUNNEL_UDP_HEADER_LEN: usize = 5;
 
 #[cfg(test)]
 mod tests {
@@ -684,6 +923,205 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    // ── Tunnel control plane ─────────────────────────────────────────
+
+    #[test]
+    fn tunnel_open_hostname_round_trip() {
+        let frame = ServerFrame::TunnelOpen(TunnelOpenData {
+            stream_id: 7,
+            destination: TunnelDestination::Hostname {
+                host: "example.com".into(),
+                port: 443,
+            },
+            network: TunnelNetwork::Tcp,
+            initial_window: 65_536,
+        });
+        let json = serde_json::to_string(&frame).unwrap();
+        // Wire field for the destination tag must be exactly `"kind":"hostname"`.
+        assert!(json.contains(r#""kind":"hostname""#), "got: {json}");
+        assert!(json.contains(r#""network":"tcp""#));
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerFrame::TunnelOpen(d) => {
+                assert_eq!(d.stream_id, 7);
+                assert_eq!(d.network, TunnelNetwork::Tcp);
+                assert_eq!(d.initial_window, 65_536);
+                assert_eq!(
+                    d.destination,
+                    TunnelDestination::Hostname {
+                        host: "example.com".into(),
+                        port: 443
+                    }
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tunnel_open_ipv4_and_ipv6_round_trip() {
+        let v4 = ServerFrame::TunnelOpen(TunnelOpenData {
+            stream_id: 1,
+            destination: TunnelDestination::Ipv4 {
+                address: "1.2.3.4".into(),
+                port: 80,
+            },
+            network: TunnelNetwork::Udp,
+            initial_window: 1024,
+        });
+        let json = serde_json::to_string(&v4).unwrap();
+        assert!(json.contains(r#""kind":"ipv4""#), "got: {json}");
+        assert!(json.contains(r#""network":"udp""#));
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelOpen(_)));
+
+        let v6 = ServerFrame::TunnelOpen(TunnelOpenData {
+            stream_id: 2,
+            destination: TunnelDestination::Ipv6 {
+                address: "2001:db8::1".into(),
+                port: 443,
+            },
+            network: TunnelNetwork::Tcp,
+            initial_window: 4096,
+        });
+        let json = serde_json::to_string(&v6).unwrap();
+        assert!(json.contains(r#""kind":"ipv6""#), "got: {json}");
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelOpen(_)));
+    }
+
+    #[test]
+    fn tunnel_close_reason_round_trip() {
+        for reason in [
+            CloseReason::PeerClosed,
+            CloseReason::Aborted,
+            CloseReason::IdleTimeout,
+            CloseReason::PolicyDenied,
+            CloseReason::DestinationUnreachable,
+            CloseReason::ConnectionRefused,
+            CloseReason::Timeout,
+            CloseReason::StreamLimit,
+            CloseReason::ProtocolError,
+        ] {
+            let frame = ServerFrame::TunnelClose(TunnelCloseData {
+                stream_id: 11,
+                reason,
+            });
+            let json = serde_json::to_string(&frame).unwrap();
+            let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+            match parsed {
+                ServerFrame::TunnelClose(d) => {
+                    assert_eq!(d.stream_id, 11);
+                    assert_eq!(d.reason, reason);
+                }
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tunnel_window_update_round_trip() {
+        let frame = ServerFrame::TunnelWindowUpdate(TunnelWindowUpdateData {
+            stream_id: 99,
+            additional_credit: 32_768,
+        });
+        let json = serde_json::to_string(&frame).unwrap();
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerFrame::TunnelWindowUpdate(d) => {
+                assert_eq!(d.stream_id, 99);
+                assert_eq!(d.additional_credit, 32_768);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tunnel_dns_query_uses_type_wire_field() {
+        let frame = ServerFrame::TunnelDnsQuery(TunnelDnsQueryData {
+            query_id: 5,
+            name: "example.com".into(),
+            record_type: DnsRecordType::Aaaa,
+        });
+        let json = serde_json::to_string(&frame).unwrap();
+        // Critical: wire field MUST be `"type"`, not `"record_type"`.
+        assert!(
+            json.contains(r#""type":"aaaa""#),
+            "wire form must use `\"type\"`: {json}"
+        );
+        assert!(!json.contains("record_type"), "rust field must not leak");
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerFrame::TunnelDnsQuery(d) => {
+                assert_eq!(d.query_id, 5);
+                assert_eq!(d.name, "example.com");
+                assert_eq!(d.record_type, DnsRecordType::Aaaa);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tunnel_dns_response_round_trip() {
+        let success = ServerFrame::TunnelDnsResponse(TunnelDnsResponseData {
+            query_id: 1,
+            answers: Some(vec![DnsAnswer {
+                name: "example.com".into(),
+                record_type: DnsRecordType::A,
+                ttl: 300,
+                value: "1.2.3.4".into(),
+            }]),
+            error: None,
+        });
+        let json = serde_json::to_string(&success).unwrap();
+        // Each answer must use `"type"` as the wire field.
+        assert!(json.contains(r#""type":"a""#), "got: {json}");
+        // Absent error must be skipped.
+        assert!(!json.contains(r#""error""#), "got: {json}");
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelDnsResponse(_)));
+
+        let failure = ServerFrame::TunnelDnsResponse(TunnelDnsResponseData {
+            query_id: 2,
+            answers: None,
+            error: Some(DnsError {
+                code: DnsErrorCode::NxDomain,
+                message: "no such host".into(),
+            }),
+        });
+        let json = serde_json::to_string(&failure).unwrap();
+        assert!(json.contains(r#""code":"nx_domain""#), "got: {json}");
+        // Absent answers must be skipped.
+        assert!(!json.contains(r#""answers""#), "got: {json}");
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelDnsResponse(_)));
+    }
+
+    #[test]
+    fn tunnel_error_round_trip() {
+        let with_stream = ServerFrame::TunnelError(TunnelErrorData {
+            stream_id: Some(42),
+            code: TunnelErrorCode::PolicyDenied,
+            message: "destination is in deny list".into(),
+        });
+        let json = serde_json::to_string(&with_stream).unwrap();
+        assert!(json.contains(r#""code":"policy_denied""#));
+        assert!(json.contains(r#""stream_id":42"#));
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelError(_)));
+
+        let without_stream = ServerFrame::TunnelError(TunnelErrorData {
+            stream_id: None,
+            code: TunnelErrorCode::ProtocolError,
+            message: "binary frame too short".into(),
+        });
+        let json = serde_json::to_string(&without_stream).unwrap();
+        // None stream_id must be skipped.
+        assert!(!json.contains(r#""stream_id""#), "got: {json}");
+        let parsed: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerFrame::TunnelError(_)));
     }
 
     /// Verify that `SessionResumed` cannot contain nested `ServerFrame` values.

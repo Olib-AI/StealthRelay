@@ -29,6 +29,7 @@ uuid.workspace = true
 chrono.workspace = true
 axum.workspace = true
 dashmap.workspace = true
+bytes.workspace = true
 rand.workspace = true
 base64ct.workspace = true
 subtle.workspace = true

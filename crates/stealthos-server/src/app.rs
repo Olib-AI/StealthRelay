@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use crate::claim::ClaimState;
 use crate::config::ServerConfig;
 use crate::handler::MessageHandler;
+use crate::tunnel::{TunnelConfig, TunnelGateway};
 
 /// Top-level application state, shared across all server tasks.
 ///
@@ -71,6 +72,14 @@ impl AppState {
                 recovery_key_hash: String::new(),
             },
         }));
+
+        let (tunnel_config, _warnings) = TunnelConfig::from_section(&config.tunnel);
+        let tunnel_gateway = Arc::new(TunnelGateway::new(
+            tunnel_config,
+            Arc::clone(&connection_registry),
+            Arc::clone(&pool_registry),
+        ));
+
         let handler = Arc::new(MessageHandler::new(
             Arc::clone(&pool_registry),
             Arc::clone(&connection_registry),
@@ -83,6 +92,7 @@ impl AppState {
             placeholder_claim,
             PathBuf::from(&config.crypto.key_dir),
             None, // No setup state for the placeholder handler
+            tunnel_gateway,
         ));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

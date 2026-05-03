@@ -22,7 +22,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::types::ConnectionId;
 
@@ -65,6 +65,21 @@ pub enum ConnectionEvent {
         connection_id: ConnectionId,
         /// Raw text payload (unparsed).
         message: String,
+        /// Remote socket address.
+        remote_addr: SocketAddr,
+    },
+    /// A binary message was received from the client.
+    ///
+    /// The application layer routes the payload by inspecting byte 0
+    /// (the channel discriminator). Currently used only by the tunnel-exit
+    /// gateway hot path; binary frames received before authentication are
+    /// rejected by the application layer with WebSocket close code 1008.
+    BinaryReceived {
+        /// The connection that produced this message.
+        connection_id: ConnectionId,
+        /// Raw binary payload, owned (per-connection actor decoded the
+        /// `tungstenite` frame and we move ownership to avoid a copy).
+        payload: bytes::Bytes,
         /// Remote socket address.
         remote_addr: SocketAddr,
     },
@@ -232,16 +247,11 @@ impl ConnectionActor {
                                             self.max_message_size,
                                         );
                                     }
-                                    // Convert binary to text and route it.
-                                    let Ok(text) = String::from_utf8(data.to_vec()) else {
-                                        debug!(
-                                            connection_id = %self.connection_id,
-                                            "non-UTF8 binary frame dropped",
-                                        );
-                                        continue;
-                                    };
-                                    last_activity = Instant::now();
-                                    if self.emit_message_received(text).await.is_err() {
+                                    // Forward the binary frame to the application layer
+                                    // unmodified. The tunnel gateway dispatches by inspecting
+                                    // byte 0 (channel discriminator). `data` is already a
+                                    // `bytes::Bytes`-equivalent in tungstenite's `Payload`.
+                                    if self.emit_binary_received(data).await.is_err() {
                                         return "event channel closed".to_owned();
                                     }
                                 }
@@ -350,6 +360,18 @@ impl ConnectionActor {
             .send(ConnectionEvent::MessageReceived {
                 connection_id: self.connection_id,
                 message,
+                remote_addr: self.remote_addr,
+            })
+            .await
+            .map_err(|_| ())
+    }
+
+    /// Forward a received binary message to the server event channel.
+    async fn emit_binary_received(&self, payload: bytes::Bytes) -> Result<(), ()> {
+        self.event_tx
+            .send(ConnectionEvent::BinaryReceived {
+                connection_id: self.connection_id,
+                payload,
                 remote_addr: self.remote_addr,
             })
             .await

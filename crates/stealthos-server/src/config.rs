@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub logging: LogSection,
     #[serde(default)]
     pub rate_limit: RateLimitSection,
+    #[serde(default)]
+    pub tunnel: TunnelSection,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +92,58 @@ pub struct LogSection {
     /// Output format: `"json"` or `"pretty"`.
     #[serde(default = "default_log_format")]
     pub format: String,
+}
+
+/// Server-side tunnel-exit gateway configuration.
+///
+/// Each request to open a tunnel stream is gated by THREE checks (in order):
+/// 1. Server-wide kill switch: `enabled = true`.
+/// 2. Per-pool host approval: `Pool::tunnel_exit_enabled()`.
+/// 3. The connection has completed `host_auth` or `join_accepted`.
+///
+/// The default configuration has `enabled = false` so the feature is opt-in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelSection {
+    /// Server-wide kill switch. Defaults to `false` so the feature is opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum number of simultaneously-open tunnel streams per WebSocket
+    /// connection.
+    #[serde(default = "default_tunnel_max_streams_per_connection")]
+    pub max_streams_per_connection: u32,
+    /// Maximum number of simultaneously-open tunnel streams across the whole
+    /// server.
+    #[serde(default = "default_tunnel_max_streams_global")]
+    pub max_streams_global: u32,
+    /// Connect-timeout for outbound TCP / DNS lookups, in seconds.
+    #[serde(default = "default_tunnel_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Idle-stream timeout, in seconds.
+    #[serde(default = "default_tunnel_idle_stream_timeout_secs")]
+    pub idle_stream_timeout_secs: u64,
+    /// Maximum payload size of a single binary tunnel data frame, in bytes.
+    #[serde(default = "default_tunnel_max_payload_bytes")]
+    pub max_payload_bytes: u32,
+    /// Initial receive window the server grants the member, in bytes.
+    /// This bounds how much data the member may push into the server's
+    /// per-stream destination-write queue without an explicit ack.
+    #[serde(default = "default_tunnel_initial_receive_window")]
+    pub initial_receive_window: u32,
+    /// Bytes consumed by the destination since the last `tunnel_window_update`
+    /// before the server emits a fresh window update upstream.
+    #[serde(default = "default_tunnel_window_update_threshold")]
+    pub window_update_threshold: u32,
+    /// Destination ports the relay refuses to dial. Defaults block SMTP and IRC
+    /// — common abuse vectors.
+    #[serde(default = "default_tunnel_denied_ports")]
+    pub denied_destination_ports: Vec<u16>,
+    /// Optional allowlist of destination CIDRs. When non-empty, only addresses
+    /// in one of these CIDRs are reachable.
+    #[serde(default)]
+    pub allowed_destination_cidrs: Vec<String>,
+    /// Always-blocked CIDRs. The defaults block private and link-local space.
+    #[serde(default = "default_tunnel_denied_cidrs")]
+    pub denied_destination_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +217,43 @@ const fn default_max_failed_auth() -> u32 {
 const fn default_block_duration() -> u64 {
     600
 }
+const fn default_tunnel_max_streams_per_connection() -> u32 {
+    64
+}
+const fn default_tunnel_max_streams_global() -> u32 {
+    4096
+}
+const fn default_tunnel_connect_timeout_secs() -> u64 {
+    15
+}
+const fn default_tunnel_idle_stream_timeout_secs() -> u64 {
+    120
+}
+const fn default_tunnel_max_payload_bytes() -> u32 {
+    32_768
+}
+const fn default_tunnel_initial_receive_window() -> u32 {
+    262_144
+}
+const fn default_tunnel_window_update_threshold() -> u32 {
+    65_536
+}
+fn default_tunnel_denied_ports() -> Vec<u16> {
+    // SMTP submission and IRC abuse vectors. Operators can override with `[]`.
+    vec![25, 465, 587, 6667]
+}
+fn default_tunnel_denied_cidrs() -> Vec<String> {
+    vec![
+        "10.0.0.0/8".to_owned(),
+        "172.16.0.0/12".to_owned(),
+        "192.168.0.0/16".to_owned(),
+        "127.0.0.0/8".to_owned(),
+        "169.254.0.0/16".to_owned(),
+        "::1/128".to_owned(),
+        "fc00::/7".to_owned(),
+        "fe80::/10".to_owned(),
+    ]
+}
 
 // ---------------------------------------------------------------------------
 // Default impls
@@ -216,6 +307,24 @@ impl Default for RateLimitSection {
             messages_per_second: default_messages_per_second(),
             max_failed_auth: default_max_failed_auth(),
             block_duration_secs: default_block_duration(),
+        }
+    }
+}
+
+impl Default for TunnelSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_streams_per_connection: default_tunnel_max_streams_per_connection(),
+            max_streams_global: default_tunnel_max_streams_global(),
+            connect_timeout_secs: default_tunnel_connect_timeout_secs(),
+            idle_stream_timeout_secs: default_tunnel_idle_stream_timeout_secs(),
+            max_payload_bytes: default_tunnel_max_payload_bytes(),
+            initial_receive_window: default_tunnel_initial_receive_window(),
+            window_update_threshold: default_tunnel_window_update_threshold(),
+            denied_destination_ports: default_tunnel_denied_ports(),
+            allowed_destination_cidrs: Vec::new(),
+            denied_destination_cidrs: default_tunnel_denied_cidrs(),
         }
     }
 }
@@ -281,6 +390,7 @@ impl ServerConfig {
     ///
     /// Uses the convention `STEALTH_<SECTION>__<FIELD>` (double underscore
     /// separates section from field, matching serde's nested structure).
+    #[allow(clippy::too_many_lines)] // Long but trivially linear; one line per env var.
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("STEALTH_SERVER__WS_BIND") {
             self.server.ws_bind = v;
@@ -362,6 +472,46 @@ impl ServerConfig {
             && let Ok(n) = v.parse()
         {
             self.rate_limit.block_duration_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__ENABLED")
+            && let Ok(b) = v.parse()
+        {
+            self.tunnel.enabled = b;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__MAX_STREAMS_PER_CONNECTION")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.max_streams_per_connection = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__MAX_STREAMS_GLOBAL")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.max_streams_global = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__CONNECT_TIMEOUT_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.connect_timeout_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__IDLE_STREAM_TIMEOUT_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.idle_stream_timeout_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__MAX_PAYLOAD_BYTES")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.max_payload_bytes = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__INITIAL_RECEIVE_WINDOW")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.initial_receive_window = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_TUNNEL__WINDOW_UPDATE_THRESHOLD")
+            && let Ok(n) = v.parse()
+        {
+            self.tunnel.window_update_threshold = n;
         }
     }
 }

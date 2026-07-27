@@ -342,7 +342,7 @@ impl HostIdentity {
         use blake2::digest::Update;
         use blake2::digest::consts::U32;
 
-        debug_assert!(data.len() == 68);
+        debug_assert_eq!(data.len(), 68);
 
         // Recompute MAC over magic || seed.
         let mut hasher = Blake2b::<U32>::default();
@@ -365,7 +365,7 @@ impl HostIdentity {
         use chacha20poly1305::aead::Aead;
         use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 
-        debug_assert!(data.len() == 85);
+        debug_assert_eq!(data.len(), 85);
 
         // Verify sentinel to help distinguish wrong passphrase from corruption.
         if &data[81..85] != b"DONE" {

@@ -2,7 +2,7 @@
 
 **A zero-knowledge WebSocket relay server for end-to-end encrypted peer connections by [Olib AI](https://www.olib.ai)**
 
-Used in [StealthOS](https://www.stealthos.app) — The privacy-focused operating environment.
+Used in [StealthOS](https://www.stealthos.app) - The privacy-focused operating environment.
 
 ---
 
@@ -13,11 +13,11 @@ Used in [StealthOS](https://www.stealthos.app) — The privacy-focused operating
 
 ## Overview
 
-StealthRelay is a self-hosted Rust relay server that routes WebSocket messages between [ConnectionPool](https://github.com/Olib-AI/ConnectionPool) peers without ever seeing their content. All application data is end-to-end encrypted using a Noise NK handshake (dual X25519 DH) with ChaCha20-Poly1305 session ciphers — the server handles only opaque blobs.
+StealthRelay is a self-hosted Rust relay server that routes WebSocket messages between [ConnectionPool](https://github.com/Olib-AI/ConnectionPool) peers without ever seeing their content. All application data is end-to-end encrypted using a Noise NK handshake (dual X25519 DH) with ChaCha20-Poly1305 session ciphers - the server handles only opaque blobs.
 
 The relay operates on a zero-knowledge model: deploy it on your own infrastructure, claim ownership via a one-time QR code, and invite friends through cryptographically signed invitation URLs. The server authenticates hosts with Ed25519 signatures and protects against abuse with adaptive proof-of-work, per-IP rate limiting, and progressive blocking.
 
-Optionally, the relay can also act as a **VPN-like network exit**: pool hosts (and the members they approve) tunnel TCP/UDP traffic through the relay, which opens the upstream sockets and bridges bytes back. The relay's IP becomes the visible exit address. TLS to the destination stays end-to-end (member ↔ destination). Hot-path bytes ride binary WebSocket frames on the same port — no second listener, no special proxy config. Off by default; opt in with `[tunnel] enabled = true`.
+Optionally, the relay can also act as a **VPN-like network exit**: pool hosts (and the members they approve) tunnel TCP/UDP traffic through the relay, which opens the upstream sockets and bridges bytes back. The relay's IP becomes the visible exit address. TLS to the destination stays end-to-end (member ↔ destination). Hot-path bytes ride binary WebSocket frames on the same port - no second listener, no special proxy config. Off by default; opt in with `[tunnel] enabled = true`.
 
 Five Rust crates, `#![forbid(unsafe_code)]` on all of them, 227 unit tests, and 30 E2E tests.
 
@@ -49,9 +49,9 @@ After installation, a **setup page** opens automatically in your browser:
   <code>http://localhost:9091/setup?token=&lt;TOKEN&gt;</code>
 </p>
 
-The setup page displays a **QR code** — scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
+The setup page displays a **QR code** - scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
 
-> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden — even if someone can reach port 9091.
+> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden - even if someone can reach port 9091.
 
 > **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
 
@@ -59,14 +59,14 @@ The setup page displays a **QR code** — scan it with the StealthOS app to clai
 > ```bash
 > ssh -L 9091:localhost:9091 user@your-server
 > ```
-> Then open `http://localhost:9091/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs — check with `sudo journalctl -u stealth-relay | grep setup`.
+> Then open `http://localhost:9091/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs - check with `sudo journalctl -u stealth-relay | grep setup`.
 
 Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
 - Enter your server URL (`ws://your-ip:9090`)
 - Tap **Scan QR Code** and point your camera at the setup page
 - Or tap **Enter Code Manually** and paste the code
 
-The server is now bound to your device. A **recovery key** is shown once — **save it securely**. It is the only way to reclaim the server if you lose your device.
+The server is now bound to your device. A **recovery key** is shown once - **save it securely**. It is the only way to reclaim the server if you lose your device.
 
 ### 3. Create an Invitation in the App
 
@@ -77,9 +77,9 @@ Once claimed, tap **"Invite a Friend"** in the pool lobby. Share the generated l
 When friends open the invitation:
 - The server forwards their join request to you
 - You approve or reject from your device
-- Any connected member can also create invite links — but **you always approve**
+- Any connected member can also create invite links - but **you always approve**
 
-Chat, play games, share files — all end-to-end encrypted. The server routes messages but can never read them.
+Chat, play games, share files - all end-to-end encrypted. The server routes messages but can never read them.
 
 ## How It Works
 
@@ -109,39 +109,39 @@ sequenceDiagram
 
 ### Protocol Security
 
-- **Noise NK handshake** — Dual X25519 Diffie-Hellman with HKDF-SHA256 key derivation for forward-secret session establishment
-- **ChaCha20-Poly1305 session cipher** — Authenticated encryption for all application data with automatic symmetric ratchet at 2^20 messages
-- **Ed25519 host authentication** — Domain-separated timestamp signatures verified by the relay before pool creation
-- **HMAC invitation tokens** — 256-bit tokens with HKDF derivation and constant-time comparison; one-time use, time-limited, host approval required
-- **Server claiming** — One-time 256-bit QR code visible only in Docker logs; per-IP rate-limited with progressive blocking and recovery key fallback
-- **Host key integrity** — Identity key files use a v2 format with 4-byte magic (`STKY`), 32-byte seed, and 32-byte BLAKE2b-256 MAC; corruption or tampering is detected on load
-- **Session tokens** — 32-byte server-issued tokens required for all privileged host operations and guest `Forward` frames (constant-time comparison)
-- **Display name sanitization** — Control characters, newlines, and excessive length (>64 chars) stripped before logging or storage
+- **Noise NK handshake** - Dual X25519 Diffie-Hellman with HKDF-SHA256 key derivation for forward-secret session establishment
+- **ChaCha20-Poly1305 session cipher** - Authenticated encryption for all application data with automatic symmetric ratchet at 2^20 messages
+- **Ed25519 host authentication** - Domain-separated timestamp signatures verified by the relay before pool creation
+- **HMAC invitation tokens** - 256-bit tokens with HKDF derivation and constant-time comparison; one-time use, time-limited, host approval required
+- **Server claiming** - One-time 256-bit QR code visible only in Docker logs; per-IP rate-limited with progressive blocking and recovery key fallback
+- **Host key integrity** - Identity key files use a v2 format with 4-byte magic (`STKY`), 32-byte seed, and 32-byte BLAKE2b-256 MAC; corruption or tampering is detected on load
+- **Session tokens** - 32-byte server-issued tokens required for all privileged host operations and guest `Forward` frames (constant-time comparison)
+- **Display name sanitization** - Control characters, newlines, and excessive length (>64 chars) stripped before logging or storage
 
 ### Anti-Abuse
 
-- **Adaptive proof-of-work** — SHA-256 hashcash with difficulty that scales from 18-bit (~50ms) to 26-bit (~13s) based on request rate
-- **Per-IP rate limiting** — Connection rate, message rate, and failed authentication tracking with IPv6 /48 normalization
-- **Progressive blocking** — IPs exceeding limits are blocked for configurable durations (default 10 minutes)
-- **JSON depth bomb defense** — Recursive nesting in `SessionResumed` frames is structurally prevented by using flat `BufferedRelayedMessage` types
-- **64 KB message cap** — Oversized WebSocket frames are rejected before processing
-- **Connection registry cleanup** — Connections are properly unregistered on disconnect, preventing `active_count` drift from blocking new connections
+- **Adaptive proof-of-work** - SHA-256 hashcash with difficulty that scales from 18-bit (~50ms) to 26-bit (~13s) based on request rate
+- **Per-IP rate limiting** - Connection rate, message rate, and failed authentication tracking with IPv6 /48 normalization
+- **Progressive blocking** - IPs exceeding limits are blocked for configurable durations (default 10 minutes)
+- **JSON depth bomb defense** - Recursive nesting in `SessionResumed` frames is structurally prevented by using flat `BufferedRelayedMessage` types
+- **64 KB message cap** - Oversized WebSocket frames are rejected before processing
+- **Connection registry cleanup** - Connections are properly unregistered on disconnect, preventing `active_count` drift from blocking new connections
 
 ### Operations
 
-- **Docker-first deployment** — Multi-stage build producing a minimal Debian image with no shell
-- **Cloudflare Tunnel support** — Production deployment via `cloudflared` sidecar for TLS termination without managing certificates
-- **Native TLS** — Optional `rustls` with SPKI SHA-256 pin verification for direct TLS termination
-- **Recovery key** — One-time recovery key issued at claim time for server rebinding if the host device is lost
-- **Graceful shutdown** — Signal handling with connection draining
-- **Mutex poison recovery** — All `claim_state` mutex accesses recover from poison (via `PoisonError::into_inner`) instead of panicking, preventing a single thread panic from killing the server
-- **`Arc<str>` broadcast** — Broadcast messages share one `Arc<str>` allocation across all recipients instead of cloning per-peer, reducing allocation pressure for large pools
+- **Docker-first deployment** - Multi-stage build producing a minimal Debian image with no shell
+- **Cloudflare Tunnel support** - Production deployment via `cloudflared` sidecar for TLS termination without managing certificates
+- **Native TLS** - Optional `rustls` with SPKI SHA-256 pin verification for direct TLS termination
+- **Recovery key** - One-time recovery key issued at claim time for server rebinding if the host device is lost
+- **Graceful shutdown** - Signal handling with connection draining
+- **Mutex poison recovery** - All `claim_state` mutex accesses recover from poison (via `PoisonError::into_inner`) instead of panicking, preventing a single thread panic from killing the server
+- **`Arc<str>` broadcast** - Broadcast messages share one `Arc<str>` allocation across all recipients instead of cloning per-peer, reducing allocation pressure for large pools
 
 ### Observability
 
-- **Structured logging** — JSON or pretty output via `tracing` with per-crate filter directives
-- **Prometheus metrics** — Connection counts, pool counts, message rates exposed on a dedicated metrics port
-- **Health endpoint** — JSON health status with built-in Docker `HEALTHCHECK`
+- **Structured logging** - JSON or pretty output via `tracing` with per-crate filter directives
+- **Prometheus metrics** - Connection counts, pool counts, message rates exposed on a dedicated metrics port
+- **Health endpoint** - JSON health status with built-in Docker `HEALTHCHECK`
 
 ## Architecture
 
@@ -163,7 +163,7 @@ graph TD
 
 ## Security
 
-Security is not bolted on — it is structural. Every layer enforces its own guarantees.
+Security is not bolted on - it is structural. Every layer enforces its own guarantees.
 
 ### Server Authentication (Ed25519)
 
@@ -171,12 +171,12 @@ The host authenticates to the relay by signing `pool_id || timestamp || nonce` w
 
 ### Invitation Tokens
 
-Invitation tokens are 256-bit secrets derived via HKDF. The relay stores only the HMAC commitment — never the raw token. Tokens are:
+Invitation tokens are 256-bit secrets derived via HKDF. The relay stores only the HMAC commitment - never the raw token. Tokens are:
 
 - **One-time use** (or configurable `max_uses`)
 - **Time-limited** (configurable `expires_in_secs`)
-- **Host-approved** — the relay forwards join requests to the host for explicit approval
-- **Ed25519-signed** — invitation URLs include a signature binding the token to the server address and pool ID
+- **Host-approved** - the relay forwards join requests to the host for explicit approval
+- **Ed25519-signed** - invitation URLs include a signature binding the token to the server address and pool ID
 
 ### Proof-of-Work
 
@@ -269,7 +269,7 @@ All display names received from clients are sanitized before logging or storage:
 
 ### Native Install (Recommended)
 
-The fastest way to self-host on your own hardware — a laptop, desktop, or single-board computer like a Raspberry Pi.
+The fastest way to self-host on your own hardware - a laptop, desktop, or single-board computer like a Raspberry Pi.
 
 **Linux / macOS:**
 
@@ -310,7 +310,7 @@ Deploy StealthRelay to your preferred cloud provider:
 | **DigitalOcean** | [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/Olib-AI/StealthRelay/tree/main) | App Platform, auto-deploy on push |
 | **Fly.io** | `fly launch --copy-config` | Global edge, persistent volume |
 
-All providers terminate TLS at the edge — no certificate management needed.
+All providers terminate TLS at the edge - no certificate management needed.
 
 ### Docker Compose
 
@@ -342,7 +342,7 @@ docker compose -f docker/docker-compose.yml \
                -f docker/docker-compose.cloudflared.yml up -d
 ```
 
-The overlay removes the public WebSocket port binding — all traffic flows through the tunnel. Your relay will be available at `wss://your-tunnel-hostname`.
+The overlay removes the public WebSocket port binding - all traffic flows through the tunnel. Your relay will be available at `wss://your-tunnel-hostname`.
 
 ### Native TLS
 
@@ -354,15 +354,15 @@ All configuration values can be overridden with environment variables using the 
 
 | Environment Variable | Compose Variable | Description |
 |---------------------|-----------------|-------------|
-| `STEALTH_SERVER__WS_BIND` | — | WebSocket bind address |
-| `STEALTH_SERVER__METRICS_BIND` | — | Metrics bind address |
+| `STEALTH_SERVER__WS_BIND` | - | WebSocket bind address |
+| `STEALTH_SERVER__METRICS_BIND` | - | Metrics bind address |
 | `STEALTH_LOGGING__LEVEL` | `STEALTH_LOG_LEVEL` | Log filter directive |
 | `STEALTH_LOGGING__FORMAT` | `STEALTH_LOG_FORMAT` | Output format (`json` or `pretty`) |
-| `STEALTH_CRYPTO__KEY_DIR` | — | Host identity key directory |
-| `STEALTH_TUNNEL__ENABLED` | — | Enable/disable the VPN-like tunnel-exit gateway (default `false`) |
-| — | `STEALTH_WS_PORT` | Host-side WebSocket port mapping |
-| — | `STEALTH_METRICS_PORT` | Host-side metrics port mapping |
-| — | `CLOUDFLARED_TOKEN` | Cloudflare Tunnel token |
+| `STEALTH_CRYPTO__KEY_DIR` | - | Host identity key directory |
+| `STEALTH_TUNNEL__ENABLED` | - | Enable/disable the VPN-like tunnel-exit gateway (default `false`) |
+| - | `STEALTH_WS_PORT` | Host-side WebSocket port mapping |
+| - | `STEALTH_METRICS_PORT` | Host-side metrics port mapping |
+| - | `CLOUDFLARED_TOKEN` | Cloudflare Tunnel token |
 
 ## Configuration
 
@@ -414,7 +414,7 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 
 ### Tunnel Exit (VPN-like)
 
-Off by default. When enabled, the relay opens TCP/UDP sockets to internet destinations on behalf of authenticated pool members and bridges bytes back over their existing WebSocket. Permission is two-level: server admin enables the gateway here, then each pool host opts in for *their* members via the in-app `Allow Members to Use Relay Exit` toggle (the pool host themselves can always use the relay once `enabled = true` — they don't need to grant themselves permission).
+Off by default. When enabled, the relay opens TCP/UDP sockets to internet destinations on behalf of authenticated pool members and bridges bytes back over their existing WebSocket. Permission is two-level: server admin enables the gateway here, then each pool host opts in for *their* members via the in-app `Allow Members to Use Relay Exit` toggle (the pool host themselves can always use the relay once `enabled = true` - they don't need to grant themselves permission).
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -434,7 +434,7 @@ Off by default. When enabled, the relay opens TCP/UDP sockets to internet destin
 
 1. `tunnel.enabled = true` (server-wide).
 2. Connection has completed `host_auth_success` (host) **or** `join_accepted` (guest).
-3. For **guests** only: the pool host has set `pool.tunnel_exit_enabled = true` via `update_pool_config`. The pool **host** bypasses this gate — they can use the relay for their own traffic regardless.
+3. For **guests** only: the pool host has set `pool.tunnel_exit_enabled = true` via `update_pool_config`. The pool **host** bypasses this gate - they can use the relay for their own traffic regardless.
 
 Failures at any gate respond with `tunnel_close { reason: policy_denied }` (or a `tunnel_dns_response` with `policy_denied` for DNS).
 
@@ -450,7 +450,7 @@ Failures at any gate respond with `tunnel_close { reason: policy_denied }` (or a
 **What the relay can and cannot see:**
 
 - Sees: destination hostname/port, byte counts, timing, source peer ID.
-- Does **not** see: the contents of TLS-encrypted streams (e.g. HTTPS payloads). For plain HTTP the relay sees the bytes — but this is *your* relay.
+- Does **not** see: the contents of TLS-encrypted streams (e.g. HTTPS payloads). For plain HTTP the relay sees the bytes - but this is *your* relay.
 
 ## API Reference
 
@@ -509,13 +509,13 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 
 | Code | Meaning |
 |------|---------|
-| `400` | Bad request — malformed frame, invalid parameters, or missing required fields |
-| `401` | Unauthorized — invalid signature, expired timestamp, or invalid session token |
-| `403` | Forbidden — server already claimed, peer not authorized, or operation not permitted |
-| `404` | Not found — pool or invitation does not exist |
-| `428` | Precondition required — server is unclaimed, send `claim_server` first |
-| `429` | Rate limited — too many requests, retry after backoff |
-| `503` | Service unavailable — max pools reached, pool full, or server is shutting down |
+| `400` | Bad request - malformed frame, invalid parameters, or missing required fields |
+| `401` | Unauthorized - invalid signature, expired timestamp, or invalid session token |
+| `403` | Forbidden - server already claimed, peer not authorized, or operation not permitted |
+| `404` | Not found - pool or invitation does not exist |
+| `428` | Precondition required - server is unclaimed, send `claim_server` first |
+| `429` | Rate limited - too many requests, retry after backoff |
+| `503` | Service unavailable - max pools reached, pool full, or server is shutting down |
 
 ### HTTP Endpoints
 
@@ -619,7 +619,7 @@ docker build -t stealth-relay .
 
 A React web app lets friends without StealthOS or an iPhone join your pool from any browser. Same E2E encrypted protocol, no app install required.
 
-**Hosted version:** [web.stealthos.app](https://web.stealthos.app) — paste an invitation link and join instantly.
+**Hosted version:** [web.stealthos.app](https://web.stealthos.app) - paste an invitation link and join instantly.
 
 **Self-host with Docker:**
 
@@ -685,9 +685,9 @@ SOFTWARE.
 
 ## Credits
 
-- [Olib AI](https://www.olib.ai) — Project maintainer and [StealthOS](https://www.stealthos.app) developer
-- [ConnectionPool](https://github.com/Olib-AI/ConnectionPool) — Swift P2P mesh networking client library
-- [PoolChat](https://github.com/Olib-AI/PoolChat) — End-to-end encrypted chat built on ConnectionPool
+- [Olib AI](https://www.olib.ai) - Project maintainer and [StealthOS](https://www.stealthos.app) developer
+- [ConnectionPool](https://github.com/Olib-AI/ConnectionPool) - Swift P2P mesh networking client library
+- [PoolChat](https://github.com/Olib-AI/PoolChat) - End-to-end encrypted chat built on ConnectionPool
 
 ## Contributing
 

@@ -65,6 +65,8 @@ COPY config/default.toml /etc/stealth-relay/config.toml
 USER stealthos
 
 # WebSocket port + metrics port.
+# Claim code:  docker exec <container> stealth-relay claim-code
+#
 # 9090 WebSocket, 9091 health/metrics, 9092 setup/claim page.
 # Publish 9091 and 9092 to 127.0.0.1 only: the first fingerprints the
 # server, the second hands out ownership of it.

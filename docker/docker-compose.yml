@@ -6,6 +6,11 @@
 #   docker compose -f docker/docker-compose.yml up -d
 #   docker compose -f docker/docker-compose.yml logs -f stealth-relay
 #
+# Claim code (withheld from the logs, since a captured log would hold a
+# credential that stays valid until the server is claimed):
+#   docker compose -f docker/docker-compose.yml exec stealth-relay \
+#       stealth-relay claim-code
+#
 # With Cloudflare Tunnel:
 #   docker compose -f docker/docker-compose.yml \
 #                  -f docker/docker-compose.cloudflared.yml up -d

@@ -35,6 +35,14 @@ setup_bind = "127.0.0.1:9092"
 # Set to 0 to disable the expiry.
 setup_window_secs = 3600
 
+# Print the claim code to stderr even when stderr is not a terminal.
+# Off by default: unlike the time-boxed setup token, the claim code stays
+# valid until the server is claimed, so a captured log holds a working
+# credential for as long as the server sits unclaimed. When stderr IS a
+# terminal the code is printed regardless. While this is off and the output
+# is being captured, read the code with `stealth-relay claim-code`.
+print_claim_code_to_log = false
+
 # Maximum number of concurrent WebSocket connections.
 max_connections = 500
 

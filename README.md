@@ -53,13 +53,21 @@ The setup page displays a **QR code** - scan it with the StealthOS app to claim 
 
 > **Security:** The setup page has its own listener (`server.setup_bind`, port 9092) and never shares the health/metrics port, which operators routinely publish. Reaching it needs a 256-bit token printed to the server console; the token buys a session cookie once and is then dropped from the URL. Five bad tokens lock the source address out for five minutes, and one hour after startup the page stops handing out the claim code entirely - restart the relay to open a new setup window.
 
-> **Headless / Raspberry Pi?** The installer binds the setup page to all interfaces (`0.0.0.0:9092`) and prints the LAN-accessible URL, so you can claim from a laptop. Set `setup_bind = "127.0.0.1:9092"` if that network is not one you trust.
+> **Headless / Raspberry Pi?** The installer asks where the claim page should listen and defaults to `127.0.0.1:9092`. Answer `2` (or pass `--setup-lan`) to bind it to `0.0.0.0:9092` and claim from a laptop on the same network - a trusted LAN behind a router, never a machine with a public IP.
 
 > **Remote server (SSH)?** With the default `127.0.0.1:9092` bind the page is not reachable remotely. Forward the port instead:
 > ```bash
 > ssh -L 9092:localhost:9092 user@your-server
 > ```
-> Then open `http://localhost:9092/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs - check with `sudo journalctl -u stealth-relay | grep setup`. You can also skip the page entirely: the claim code itself is in the startup banner, and the app accepts it under **Enter Code Manually**.
+> Then open `http://localhost:9092/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs - check with `sudo journalctl -u stealth-relay | grep setup`.
+
+> **Where is the claim code?** When the relay's output goes to a terminal, the claim code is printed in the startup banner as before. When it is being captured to a log - Docker, systemd, Fly, Render - the code is **withheld** and written to an owner-only file instead, because unlike the time-boxed setup token it stays valid until someone claims the server. Read it back on the server with:
+> ```bash
+> stealth-relay claim-code                       # native install
+> docker exec stealth-relay stealth-relay claim-code
+> fly ssh console -C "stealth-relay claim-code"
+> ```
+> Set `server.print_claim_code_to_log = true` if a deployment gives you no way to run that.
 
 Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
 - Enter your server URL (`ws://your-ip:9090`)
@@ -113,7 +121,7 @@ sequenceDiagram
 - **ChaCha20-Poly1305 session cipher** - Authenticated encryption for all application data with automatic symmetric ratchet at 2^20 messages
 - **Ed25519 host authentication** - Domain-separated timestamp signatures verified by the relay before pool creation
 - **HMAC invitation tokens** - 256-bit tokens with HKDF derivation and constant-time comparison; one-time use, time-limited, host approval required
-- **Server claiming** - One-time 256-bit QR code visible only in the server console; per-IP rate-limited with progressive blocking and recovery key fallback
+- **Server claiming** - One-time 256-bit QR code shown on the server console, or written to an owner-only file (never the log stream) when that output is being captured; per-IP rate-limited with progressive blocking and recovery key fallback
 - **Isolated setup surface** - The claim page runs on its own listener (loopback by default), never on the health/metrics port. A 256-bit token is exchanged once for an `HttpOnly` session cookie and dropped from the URL, bad tokens lock the source address out, and the page stops serving the claim code an hour after startup
 - **Host key integrity** - Identity key files use a v2 format with 4-byte magic (`STKY`), 32-byte seed, and 32-byte BLAKE2b-256 MAC; corruption or tampering is detected on load
 - **Session tokens** - 32-byte server-issued tokens required for all privileged host operations and guest `Forward` frames (constant-time comparison)
@@ -379,6 +387,7 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 | `server.metrics_bind` | `127.0.0.1:9091` | Address for the internal health/metrics HTTP endpoint |
 | `server.setup_bind` | `127.0.0.1:9092` | Address for the setup/claim page. Kept off the metrics listener because this page hands out server ownership. Setting it equal to `metrics_bind` merges the two |
 | `server.setup_window_secs` | `3600` | Seconds after startup during which the setup page serves the claim code. `0` disables the expiry |
+| `server.print_claim_code_to_log` | `false` | Print the claim code to stderr even when stderr is not a terminal. Off by default: the code stays valid until the server is claimed, so a captured log holds a live credential. Use `stealth-relay claim-code` instead |
 | `server.max_connections` | `500` | Maximum number of concurrent WebSocket connections |
 | `server.max_message_size` | `65536` | Maximum size of a single WebSocket message in bytes (64 KiB) |
 | `server.idle_timeout` | `600` | Seconds of inactivity before a connection is closed (10 min) |
@@ -531,6 +540,16 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 | `GET /metrics` | 9091 | Prometheus metrics |
 | `GET /setup` | 9092 | Claim page (token or session required, time-boxed) |
 | `GET /setup/status` | 9092 | Claim status poll (same credential as `/setup`) |
+
+### CLI
+
+| Command | Description |
+|---------|-------------|
+| `stealth-relay serve --config <path>` | Start the relay |
+| `stealth-relay claim-code --config <path>` | Print the claim code of an unclaimed server |
+| `stealth-relay healthcheck --url <url>` | Probe a running server (exit 0 when healthy) |
+| `stealth-relay generate-identity --output <dir>` | Generate a host identity keypair |
+| `stealth-relay version` | Print version information |
 
 ## Project Structure
 

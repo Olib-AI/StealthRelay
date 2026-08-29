@@ -8,7 +8,7 @@
 //! is persisted to `host_binding.json`. All future `HostAuth` frames must come
 //! from the bound host key.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rand::RngCore;
@@ -19,6 +19,14 @@ use zeroize::Zeroize;
 
 /// Binding file name within the key directory.
 const BINDING_FILENAME: &str = "host_binding.json";
+
+/// File the claim code is written to when it is withheld from the logs.
+///
+/// Lives beside `host.key` in the key directory, which is already the most
+/// sensitive thing on the box: anyone who can read that directory can
+/// impersonate the server outright, so the claim code adds no new exposure
+/// there. It is removed the moment the server is claimed.
+const CLAIM_CODE_FILENAME: &str = "claim-code.txt";
 
 /// Maximum claim attempts before the server blocks for a cooldown period.
 const MAX_CLAIM_ATTEMPTS: u32 = 3;
@@ -218,6 +226,7 @@ impl ClaimState {
                 };
 
                 save_binding(key_dir, &binding)?;
+                remove_claim_code_file(key_dir);
                 rate_limiter.reset();
                 claim_secret.zeroize();
 
@@ -401,6 +410,72 @@ fn save_binding(key_dir: &Path, binding: &HostBinding) -> Result<(), ClaimError>
 }
 
 /// Encode bytes as lowercase hex string.
+/// Path of the claim-code file within `key_dir`.
+pub fn claim_code_path(key_dir: &Path) -> PathBuf {
+    key_dir.join(CLAIM_CODE_FILENAME)
+}
+
+/// Write the claim code to an owner-only file in `key_dir`.
+///
+/// Used when stderr is not a terminal, i.e. when the banner would land in a
+/// log aggregator. The claim secret is valid until someone claims the server,
+/// so unlike the time-boxed setup token it must not go anywhere that keeps
+/// copies. `stealth-relay claim-code` reads this file back.
+pub fn write_claim_code_file(
+    key_dir: &Path,
+    claim_secret: &[u8; 32],
+    setup_url: Option<&str>,
+) -> std::io::Result<PathBuf> {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    let full_hex = hex_encode(claim_secret);
+    let mut body = String::with_capacity(512);
+    body.push_str("StealthOS Relay -- server claim code\n");
+    body.push_str("====================================\n\n");
+    body.push_str("Enter this code in the StealthOS app (Enter Code Manually),\n");
+    body.push_str("or scan the QR code on the setup page.\n\n");
+    let _ = writeln!(body, "  {}\n", format_claim_code(&full_hex));
+    let _ = writeln!(body, "  stealth://claim/{full_hex}\n");
+    if let Some(url) = setup_url {
+        let _ = writeln!(body, "Setup page: {url}\n");
+    }
+    body.push_str("Anyone with this code can claim this server and every pool\n");
+    body.push_str("on it. It is deleted automatically once the server is claimed.\n");
+
+    let path = claim_code_path(key_dir);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(body.as_bytes())?;
+    file.sync_all()?;
+    Ok(path)
+}
+
+/// Delete the claim-code file. Best effort: a failure here is not worth
+/// failing a claim over, and the code it holds is dead once claimed.
+pub fn remove_claim_code_file(key_dir: &Path) {
+    let path = claim_code_path(key_dir);
+    if path.exists() && let Err(e) = std::fs::remove_file(&path) {
+        warn!(path = %path.display(), "failed to remove claim code file: {e}");
+    }
+}
+
+/// Group a 64-char hex claim code into `XXXX-XXXX-...` for manual entry.
+fn format_claim_code(full_hex: &str) -> String {
+    full_hex
+        .as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or("????"))
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(bytes.len() * 2);
@@ -491,12 +566,7 @@ pub fn print_claim_banner(claim_secret: &[u8; 32]) {
 
     // Format the FULL 64-char hex as XXXX-XXXX-... for manual entry.
     // All 64 chars are needed — the server requires the complete 32-byte secret.
-    let formatted: String = full_hex
-        .as_bytes()
-        .chunks(4)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or("????"))
-        .collect::<Vec<_>>()
-        .join("-");
+    let formatted = format_claim_code(&full_hex);
 
     let url = format!("stealth://claim/{full_hex}");
 
@@ -662,6 +732,53 @@ mod tests {
     fn print_banner_does_not_panic() {
         let secret = [0xab; 32];
         print_claim_banner(&secret);
+    }
+
+    #[test]
+    fn claim_code_file_is_written_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ClaimState::load_or_create(dir.path());
+        let secret = *state.claim_secret().unwrap();
+
+        let path = write_claim_code_file(dir.path(), &secret, Some("http://127.0.0.1:9092/setup"))
+            .expect("write claim code");
+        let contents = std::fs::read_to_string(&path).unwrap();
+
+        // The full code must be recoverable, grouped and raw.
+        let full_hex = hex_encode(&secret);
+        assert!(contents.contains(&format_claim_code(&full_hex)));
+        assert!(contents.contains(&format!("stealth://claim/{full_hex}")));
+        assert!(contents.contains("http://127.0.0.1:9092/setup"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "claim code file must be owner-only");
+        }
+    }
+
+    /// The file holds a credential that is live until the server is claimed,
+    /// so claiming must take it away.
+    #[test]
+    fn claiming_removes_the_claim_code_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = ClaimState::load_or_create(dir.path());
+        let secret = *state.claim_secret().unwrap();
+        let path = write_claim_code_file(dir.path(), &secret, None).unwrap();
+        assert!(path.exists());
+
+        state
+            .try_claim(&secret, &[7u8; 32], dir.path(), "fp")
+            .expect("claim");
+        assert!(!path.exists(), "claim code file must be gone after claiming");
+    }
+
+    #[test]
+    fn removing_a_missing_claim_code_file_is_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        remove_claim_code_file(dir.path());
+        assert!(!claim_code_path(dir.path()).exists());
     }
 
     #[test]

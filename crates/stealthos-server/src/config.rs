@@ -57,6 +57,15 @@ pub struct ServerSection {
     /// once the window closes, claiming needs a server restart.
     #[serde(default = "default_setup_window_secs")]
     pub setup_window_secs: u64,
+    /// Print the claim code to stderr even when stderr is not a terminal.
+    ///
+    /// Off by default: the claim code is valid until the server is claimed,
+    /// so a captured log keeps a working credential for as long as the server
+    /// stays unclaimed. When stderr is a terminal the code is printed
+    /// regardless -- nothing is collecting it there. Turn this on only if the
+    /// deployment offers no way to run `stealth-relay claim-code`.
+    #[serde(default)]
+    pub print_claim_code_to_log: bool,
     /// Maximum concurrent WebSocket connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
@@ -338,6 +347,7 @@ impl Default for ServerSection {
             metrics_bind: default_metrics_bind(),
             setup_bind: default_setup_bind(),
             setup_window_secs: default_setup_window_secs(),
+            print_claim_code_to_log: false,
             max_connections: default_max_connections(),
             max_message_size: default_max_message_size(),
             idle_timeout: default_idle_timeout(),
@@ -481,6 +491,11 @@ impl ServerConfig {
             && let Ok(n) = v.parse()
         {
             self.server.setup_window_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__PRINT_CLAIM_CODE_TO_LOG")
+            && let Ok(b) = v.parse()
+        {
+            self.server.print_claim_code_to_log = b;
         }
         if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_CONNECTIONS")
             && let Ok(n) = v.parse()

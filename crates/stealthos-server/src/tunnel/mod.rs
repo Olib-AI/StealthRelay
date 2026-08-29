@@ -1155,11 +1155,11 @@ mod tests {
     #[tokio::test]
     async fn tunnel_open_rejected_for_ipv4_mapped_ipv6_of_denied_cidr() {
         let spellings = [
-            "::ffff:192.168.1.1",       // IPv4-mapped
-            "::ffff:169.254.169.254",   // cloud metadata, via mapped form
-            "::192.168.1.1",            // IPv4-compatible (deprecated)
-            "2002:c0a8:0101::",         // 6to4
-            "64:ff9b::192.168.1.1",     // NAT64 well-known prefix
+            "::ffff:192.168.1.1",     // IPv4-mapped
+            "::ffff:169.254.169.254", // cloud metadata, via mapped form
+            "::192.168.1.1",          // IPv4-compatible (deprecated)
+            "2002:c0a8:0101::",       // 6to4
+            "64:ff9b::192.168.1.1",   // NAT64 well-known prefix
         ];
         for (i, address) in spellings.iter().enumerate() {
             let mut h = build_gw(|c| {

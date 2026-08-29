@@ -140,10 +140,7 @@ fn alternate_forms(addr: IpAddr) -> [Option<IpAddr>; 2] {
             // The canonical IPv4 form, plus that form re-mapped, so an
             // operator's `::ffff:0:0/96` entry catches embedded spellings too.
             embedded.map_or([None, None], |v4| {
-                [
-                    Some(IpAddr::V4(v4)),
-                    Some(IpAddr::V6(v4.to_ipv6_mapped())),
-                ]
+                [Some(IpAddr::V4(v4)), Some(IpAddr::V6(v4.to_ipv6_mapped()))]
             })
         }
     }
@@ -359,11 +356,11 @@ mod tests {
         assert!(warns.is_empty());
 
         for spelling in [
-            "::ffff:10.0.0.1",       // IPv4-mapped
+            "::ffff:10.0.0.1",        // IPv4-mapped
             "::ffff:169.254.169.254", // cloud metadata service
-            "::10.0.0.1",            // IPv4-compatible (deprecated)
-            "2002:0a00:0001::",      // 6to4
-            "64:ff9b::10.0.0.1",     // NAT64 well-known prefix
+            "::10.0.0.1",             // IPv4-compatible (deprecated)
+            "2002:0a00:0001::",       // 6to4
+            "64:ff9b::10.0.0.1",      // NAT64 well-known prefix
             "::ffff:127.0.0.1",
         ] {
             let addr: IpAddr = spelling.parse().unwrap();

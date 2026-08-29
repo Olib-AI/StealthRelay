@@ -644,12 +644,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 /// A terminal on stderr means an operator is watching a console, so the
 /// banner is safe to print; anything else is a capture pipe, and the code
 /// goes to an owner-only file that `stealth-relay claim-code` reads back.
-fn announce_claim_code(
-    key_dir: &Path,
-    secret: &[u8; 32],
-    setup_url: &str,
-    print_to_log: bool,
-) {
+fn announce_claim_code(key_dir: &Path, secret: &[u8; 32], setup_url: &str, print_to_log: bool) {
     if std::io::IsTerminal::is_terminal(&std::io::stderr()) || print_to_log {
         claim::print_claim_banner(secret);
         return;
@@ -724,10 +719,7 @@ fn run_claim_code(config_path: Option<&Path>) -> anyhow::Result<()> {
                 ))
             }
         }
-        Err(e) => Err(anyhow::anyhow!(
-            "failed to read {}: {e}",
-            path.display()
-        )),
+        Err(e) => Err(anyhow::anyhow!("failed to read {}: {e}", path.display())),
     }
 }
 

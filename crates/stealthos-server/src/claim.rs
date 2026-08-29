@@ -461,7 +461,9 @@ pub fn write_claim_code_file(
 /// failing a claim over, and the code it holds is dead once claimed.
 pub fn remove_claim_code_file(key_dir: &Path) {
     let path = claim_code_path(key_dir);
-    if path.exists() && let Err(e) = std::fs::remove_file(&path) {
+    if path.exists()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
         warn!(path = %path.display(), "failed to remove claim code file: {e}");
     }
 }
@@ -771,7 +773,10 @@ mod tests {
         state
             .try_claim(&secret, &[7u8; 32], dir.path(), "fp")
             .expect("claim");
-        assert!(!path.exists(), "claim code file must be gone after claiming");
+        assert!(
+            !path.exists(),
+            "claim code file must be gone after claiming"
+        );
     }
 
     #[test]

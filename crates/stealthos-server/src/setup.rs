@@ -89,9 +89,9 @@ impl TokenThrottle {
             .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients.get(&client).is_some_and(|a| {
-            a.failures >= MAX_TOKEN_ATTEMPTS && a.last.elapsed() < TOKEN_LOCKOUT
-        })
+        clients
+            .get(&client)
+            .is_some_and(|a| a.failures >= MAX_TOKEN_ATTEMPTS && a.last.elapsed() < TOKEN_LOCKOUT)
     }
 
     fn record_failure(&self, client: IpAddr) {
@@ -181,7 +181,11 @@ impl SetupState {
     ///
     /// `window_secs` bounds how long the claim secret remains available;
     /// `0` disables the expiry.
-    pub fn new(claim_state: Arc<Mutex<ClaimState>>, version: &'static str, window_secs: u64) -> Self {
+    pub fn new(
+        claim_state: Arc<Mutex<ClaimState>>,
+        version: &'static str,
+        window_secs: u64,
+    ) -> Self {
         let mut setup_token = [0u8; SETUP_TOKEN_LEN];
         rand::rngs::OsRng.fill_bytes(&mut setup_token);
         let mut session_token = [0u8; SETUP_TOKEN_LEN];
@@ -486,10 +490,9 @@ async fn status_handler(
             axum::Json(serde_json::json!({"error": "forbidden"})),
         )
             .into_response();
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         return response;
     }
 
@@ -1459,7 +1462,10 @@ mod tests {
 
     /// Cookie header value a browser would send back after a redirect.
     fn session_cookie_of(setup: &SetupState) -> String {
-        format!("{SESSION_COOKIE}={}", claim::hex_encode(&setup.session_token))
+        format!(
+            "{SESSION_COOKIE}={}",
+            claim::hex_encode(&setup.session_token)
+        )
     }
 
     fn make_unclaimed_state() -> (Arc<SetupState>, Arc<Mutex<ClaimState>>) {
@@ -1665,11 +1671,7 @@ mod tests {
                 .checked_sub(Duration::from_secs(10))
                 .expect("test clock is far enough from the epoch"),
             window: Some(Duration::from_secs(1)),
-            ..SetupState::new(
-                Arc::clone(&setup.claim_state),
-                "0.0.0-test",
-                1,
-            )
+            ..SetupState::new(Arc::clone(&setup.claim_state), "0.0.0-test", 1)
         });
         assert!(expired.window_expired());
 

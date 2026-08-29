@@ -8,7 +8,8 @@
 # Linux builds, see Dockerfile.archlinux.
 #
 # Build:  docker build -t stealth-relay .
-# Run:    docker run -p 9090:9090 -p 9091:9091 stealth-relay
+# Run:    docker run -p 9090:9090 -p 127.0.0.1:9091:9091 \
+#                    -p 127.0.0.1:9092:9092 stealth-relay
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build the release binary
@@ -64,7 +65,12 @@ COPY config/default.toml /etc/stealth-relay/config.toml
 USER stealthos
 
 # WebSocket port + metrics port.
-EXPOSE 9090 9091
+# Claim code:  docker exec <container> stealth-relay claim-code
+#
+# 9090 WebSocket, 9091 health/metrics, 9092 setup/claim page.
+# Publish 9091 and 9092 to 127.0.0.1 only: the first fingerprints the
+# server, the second hands out ownership of it.
+EXPOSE 9090 9091 9092
 
 # Health check against the internal metrics endpoint.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

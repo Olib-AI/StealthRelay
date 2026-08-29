@@ -20,7 +20,10 @@ RUN pacman -Syu --noconfirm && \
 COPY --from=builder /build/target/release/stealth-relay /usr/local/bin/stealth-relay
 COPY config/default.toml /etc/stealth-relay/config.toml
 USER stealthos
-EXPOSE 9090 9091
+# 9090 WebSocket, 9091 health/metrics, 9092 setup/claim page.
+# Publish 9091 and 9092 to 127.0.0.1 only: the first fingerprints the
+# server, the second hands out ownership of it.
+EXPOSE 9090 9091 9092
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/stealth-relay", "healthcheck", "--url", "http://127.0.0.1:9091/health"]
 ENTRYPOINT ["/usr/local/bin/stealth-relay"]

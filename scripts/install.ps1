@@ -22,6 +22,14 @@
 .PARAMETER NoBrowser
     Don't auto-open the browser after installation.
 
+.PARAMETER SetupLan
+    Serve the claim page to your local network (0.0.0.0:9092) instead of
+    127.0.0.1 only. Trusted networks only: whoever reaches the page and
+    obtains the setup token can claim this server.
+
+.PARAMETER SetupBind
+    Bind the claim page to a specific address (default "127.0.0.1:9092").
+
 .EXAMPLE
     # Install latest version
     .\install.ps1
@@ -41,7 +49,9 @@ param(
     [switch]$Uninstall,
     [switch]$Update,
     [switch]$NoService,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$SetupLan,
+    [string]$SetupBind = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -151,6 +161,40 @@ function Install-Binary {
     Write-Success "Binary installed"
 }
 
+# ── Setup page bind selection ─────────────────────────────────────────────────
+#
+# The claim page hands out ownership of this server, so it is loopback-only
+# unless someone says otherwise. A home machine behind a router and a cloud VM
+# with a public IP look the same from in here, so ask and default to safe.
+
+function Get-SetupBind {
+    if ($SetupBind) { return $SetupBind }
+    if ($SetupLan)  { return "0.0.0.0:9092" }
+
+    # Non-interactive install (CI, provisioning): keep the safe default.
+    if (-not [Environment]::UserInteractive) {
+        Write-Info "Claim page will listen on 127.0.0.1:9092 (use -SetupLan to allow LAN access)"
+        return "127.0.0.1:9092"
+    }
+
+    Write-Host ""
+    Write-Host "  Where should the claim page listen?" -ForegroundColor White
+    Write-Host "  It shows the code that claims this server. Anyone who can reach"
+    Write-Host "  the page and obtain the setup token can take ownership."
+    Write-Host ""
+    Write-Host "    1) 127.0.0.1 only (default) - claim from this machine"
+    Write-Host "    2) This whole network - claim from a laptop or phone on the LAN."
+    Write-Host "       Trusted networks only, never a machine with a public IP."
+    Write-Host ""
+    $answer = Read-Host "  Choice [1]"
+    if ($answer -eq "2") {
+        Write-Warn "Claim page will listen on 0.0.0.0:9092 - make sure this network is trusted"
+        return "0.0.0.0:9092"
+    }
+    Write-Info "Claim page will listen on 127.0.0.1:9092"
+    return "127.0.0.1:9092"
+}
+
 # ── Create directories and config ─────────────────────────────────────────────
 
 function Initialize-Config {
@@ -173,6 +217,9 @@ function Initialize-Config {
         return
     }
 
+    # Only asked on a fresh install; an update keeps the existing config.
+    $EffectiveSetupBind = Get-SetupBind
+
     Write-Info "Generating config at $ConfigPath..."
     $configContent = @"
 # StealthOS Relay Server - Configuration
@@ -180,7 +227,14 @@ function Initialize-Config {
 
 [server]
 ws_bind = "0.0.0.0:9090"
-metrics_bind = "0.0.0.0:9091"
+# Health and metrics describe this server, so they stay on loopback.
+metrics_bind = "127.0.0.1:9091"
+# The setup/claim page has its own listener. Whoever reaches it and obtains
+# the setup token can claim this server, so it is protected by a 256-bit
+# token, locks out repeated bad tokens, and stops serving the claim code an
+# hour after startup.
+setup_bind = "$EffectiveSetupBind"
+setup_window_secs = 3600
 max_connections = 500
 max_message_size = 65536
 idle_timeout = 600
@@ -329,6 +383,9 @@ function Show-SetupUrl {
     Write-Host ""
     Write-Host "  WebSocket relay:  ws://127.0.0.1:9090" -ForegroundColor White
     Write-Host "  Health check:     http://127.0.0.1:9091/health" -ForegroundColor White
+    Write-Host "  Setup page:       http://127.0.0.1:9092/setup (token required," -ForegroundColor White
+    Write-Host "                    stops serving the claim code 1h after startup)" -ForegroundColor White
+    Write-Host "  Claim code:       stealth-relay.exe claim-code" -ForegroundColor White
     Write-Host "================================================================" -ForegroundColor White
     Write-Host ""
 

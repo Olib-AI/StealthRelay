@@ -37,6 +37,35 @@ pub struct ServerSection {
     /// Health/metrics HTTP bind address (should be internal-only).
     #[serde(default = "default_metrics_bind")]
     pub metrics_bind: String,
+    /// Setup/claim page bind address.
+    ///
+    /// This listener serves the page that displays the claim secret, so it
+    /// is deliberately separate from `metrics_bind`: exposing health and
+    /// metrics to a load balancer must not also expose server ownership.
+    /// Defaults to loopback -- reach it over `ssh -L` / `fly proxy` rather
+    /// than by binding it to a public interface.
+    ///
+    /// Setting it equal to `metrics_bind` merges the two onto one listener
+    /// (the pre-0.5.3 behaviour), which is supported but warned about at
+    /// startup.
+    #[serde(default = "default_setup_bind")]
+    pub setup_bind: String,
+    /// How long after startup the setup page will hand out the claim secret,
+    /// in seconds. `0` disables the expiry.
+    ///
+    /// Bounds the damage of a setup URL that leaks through a log aggregator:
+    /// once the window closes, claiming needs a server restart.
+    #[serde(default = "default_setup_window_secs")]
+    pub setup_window_secs: u64,
+    /// Print the claim code to stderr even when stderr is not a terminal.
+    ///
+    /// Off by default: the claim code is valid until the server is claimed,
+    /// so a captured log keeps a working credential for as long as the server
+    /// stays unclaimed. When stderr is a terminal the code is printed
+    /// regardless -- nothing is collecting it there. Turn this on only if the
+    /// deployment offers no way to run `stealth-relay claim-code`.
+    #[serde(default)]
+    pub print_claim_code_to_log: bool,
     /// Maximum concurrent WebSocket connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
@@ -188,6 +217,15 @@ fn default_ws_bind() -> String {
 fn default_metrics_bind() -> String {
     "127.0.0.1:9091".to_owned()
 }
+fn default_setup_bind() -> String {
+    "127.0.0.1:9092".to_owned()
+}
+const fn default_setup_window_secs() -> u64 {
+    // One hour is long enough for an unattended first boot to be claimed by
+    // hand, short enough that a leaked setup URL goes stale before it is
+    // scraped out of a log archive.
+    3600
+}
 const fn default_max_connections() -> usize {
     500
 }
@@ -266,14 +304,35 @@ fn default_tunnel_denied_ports() -> Vec<u16> {
 }
 fn default_tunnel_denied_cidrs() -> Vec<String> {
     vec![
+        // RFC 1918 private space.
         "10.0.0.0/8".to_owned(),
         "172.16.0.0/12".to_owned(),
         "192.168.0.0/16".to_owned(),
+        // Loopback, link-local (which covers the 169.254.169.254 cloud
+        // metadata service), and "this network".
         "127.0.0.0/8".to_owned(),
         "169.254.0.0/16".to_owned(),
+        "0.0.0.0/8".to_owned(),
+        // Carrier-grade NAT, IETF protocol assignments, benchmarking.
+        "100.64.0.0/10".to_owned(),
+        "192.0.0.0/24".to_owned(),
+        "198.18.0.0/15".to_owned(),
+        // Multicast, and reserved space (which includes 255.255.255.255).
+        "224.0.0.0/4".to_owned(),
+        "240.0.0.0/4".to_owned(),
+        // IPv6 loopback, unique-local and link-local.
         "::1/128".to_owned(),
         "fc00::/7".to_owned(),
         "fe80::/10".to_owned(),
+        // IPv4-in-IPv6 transition space. The matcher already resolves the
+        // IPv4 inside these and applies the blocks above to it; listing the
+        // prefixes keeps them blocked even when an operator replaces the
+        // IPv4 entries with an allowlist of their own.
+        "::/96".to_owned(),
+        "64:ff9b::/96".to_owned(),
+        "64:ff9b:1::/48".to_owned(),
+        "2002::/16".to_owned(),
+        "2001::/32".to_owned(),
     ]
 }
 
@@ -286,6 +345,9 @@ impl Default for ServerSection {
         Self {
             ws_bind: default_ws_bind(),
             metrics_bind: default_metrics_bind(),
+            setup_bind: default_setup_bind(),
+            setup_window_secs: default_setup_window_secs(),
+            print_claim_code_to_log: false,
             max_connections: default_max_connections(),
             max_message_size: default_max_message_size(),
             idle_timeout: default_idle_timeout(),
@@ -421,6 +483,19 @@ impl ServerConfig {
         }
         if let Ok(v) = std::env::var("STEALTH_SERVER__METRICS_BIND") {
             self.server.metrics_bind = v;
+        }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__SETUP_BIND") {
+            self.server.setup_bind = v;
+        }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__SETUP_WINDOW_SECS")
+            && let Ok(n) = v.parse()
+        {
+            self.server.setup_window_secs = n;
+        }
+        if let Ok(v) = std::env::var("STEALTH_SERVER__PRINT_CLAIM_CODE_TO_LOG")
+            && let Ok(b) = v.parse()
+        {
+            self.server.print_claim_code_to_log = b;
         }
         if let Ok(v) = std::env::var("STEALTH_SERVER__MAX_CONNECTIONS")
             && let Ok(n) = v.parse()

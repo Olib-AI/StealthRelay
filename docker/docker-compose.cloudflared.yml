@@ -20,6 +20,7 @@ services:
     # Remove public port binding — all traffic goes through the tunnel.
     ports: !override
       - "127.0.0.1:${STEALTH_METRICS_PORT:-9091}:9091"
+      - "127.0.0.1:${STEALTH_SETUP_PORT:-9092}:9092"
 
   cloudflared:
     image: cloudflare/cloudflared:2025.4.0

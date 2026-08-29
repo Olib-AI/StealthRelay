@@ -49,6 +49,9 @@ UNINSTALL=false
 UPDATE=false
 NO_SERVICE=false
 NO_BROWSER=false
+# Empty means "not chosen yet" -- choose_setup_bind() asks, or defaults to
+# loopback. The claim page hands out ownership of this server.
+SETUP_BIND=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -57,6 +60,9 @@ while [[ $# -gt 0 ]]; do
         --update)    UPDATE=true; shift ;;
         --no-service) NO_SERVICE=true; shift ;;
         --no-browser) NO_BROWSER=true; shift ;;
+        --setup-lan)   SETUP_BIND="0.0.0.0:9092"; shift ;;
+        --setup-local) SETUP_BIND="127.0.0.1:9092"; shift ;;
+        --setup-bind)  SETUP_BIND="$2"; shift 2 ;;
         --help|-h)
             echo "StealthOS Relay Installer"
             echo ""
@@ -68,6 +74,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --update             Update binary, preserve keys and config"
             echo "  --no-service         Don't create/enable system service"
             echo "  --no-browser         Don't auto-open browser after install"
+            echo "  --setup-lan          Serve the claim page to your local network"
+            echo "                       (0.0.0.0:9092). Trusted networks only: whoever"
+            echo "                       reaches the page and gets the token can claim"
+            echo "                       this server."
+            echo "  --setup-local        Keep the claim page on 127.0.0.1:9092 (default)"
+            echo "  --setup-bind ADDR    Bind the claim page to a specific address"
             echo "  --help               Show this help message"
             exit 0
             ;;
@@ -199,6 +211,49 @@ install_binary() {
     info "Installed: ${version_output}"
 }
 
+# ── Setup page bind selection ─────────────────────────────────────────────────
+#
+# The claim page hands out ownership of this server, so it is loopback-only
+# unless someone says otherwise. From inside the installer a Raspberry Pi on a
+# home LAN and a VPS with a public IP are indistinguishable, and guessing wrong
+# on a VPS puts the claim page on the internet -- so ask, and default to safe.
+
+choose_setup_bind() {
+    # An explicit flag wins; never prompt over it.
+    if [ -n "$SETUP_BIND" ]; then
+        return
+    fi
+
+    SETUP_BIND="127.0.0.1:9092"
+
+    # "curl ... | sh" leaves stdin pointing at the script, so read the answer
+    # from the terminal directly. No terminal (CI, provisioning) keeps safe.
+    if [ ! -r /dev/tty ]; then
+        info "Claim page will listen on 127.0.0.1:9092 (use --setup-lan to allow LAN access)"
+        return
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Where should the claim page listen?${NC}"
+    echo "  It shows the code that claims this server. Anyone who can reach"
+    echo "  the page and obtain the setup token can take ownership."
+    echo ""
+    echo "    1) 127.0.0.1 only (default) - claim from this machine, or over"
+    echo "       ssh -L 9092:127.0.0.1:9092 user@this-host"
+    echo "    2) This whole network - claim from a laptop or phone on the LAN."
+    echo "       Choose this only for a trusted network behind a router, never"
+    echo "       for a machine with a public IP."
+    echo ""
+    printf "  Choice [1]: "
+    local answer=""
+    read -r answer < /dev/tty || answer=""
+    case "$answer" in
+        2) SETUP_BIND="0.0.0.0:9092"
+           warn "Claim page will listen on 0.0.0.0:9092 - make sure this network is trusted" ;;
+        *) info "Claim page will listen on 127.0.0.1:9092" ;;
+    esac
+}
+
 # ── Create directories and config ─────────────────────────────────────────────
 
 create_dirs_and_config() {
@@ -227,6 +282,9 @@ create_dirs_and_config() {
         return
     fi
 
+    # Only asked on a fresh install: an update keeps the existing config.
+    choose_setup_bind
+
     info "Generating config at ${CONFIG_PATH}..."
     $SUDO_CMD tee "$CONFIG_PATH" > /dev/null << TOML
 # StealthOS Relay Server — Configuration
@@ -234,9 +292,15 @@ create_dirs_and_config() {
 
 [server]
 ws_bind = "0.0.0.0:9090"
-# Bound to all interfaces so the setup page is accessible from your
-# local network (e.g., from a laptop when the relay runs on a Pi).
-metrics_bind = "0.0.0.0:9091"
+# Health and metrics describe this server, so they stay on loopback.
+metrics_bind = "127.0.0.1:9091"
+# The setup/claim page has its own listener. Whoever reaches it and obtains
+# the setup token can claim this server, so it is protected by a 256-bit
+# token, locks out repeated bad tokens, and stops serving the claim code an
+# hour after startup. With the loopback default, reach it by forwarding the
+# port: ssh -L 9092:127.0.0.1:9092 user@this-host
+setup_bind = "${SETUP_BIND}"
+setup_window_secs = 3600
 max_connections = 500
 max_message_size = 65536
 idle_timeout = 600
@@ -506,6 +570,15 @@ wait_for_health() {
 show_setup_url() {
     local setup_url=""
 
+    # On an update the config already exists and choose_setup_bind never ran,
+    # so read the effective bind back out of it.
+    local setup_bind="$SETUP_BIND"
+    if [ -z "$setup_bind" ] && [ -f "$CONFIG_PATH" ]; then
+        setup_bind=$(grep -E '^[[:space:]]*setup_bind[[:space:]]*=' "$CONFIG_PATH" \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/') || true
+    fi
+    setup_bind="${setup_bind:-127.0.0.1:9092}"
+
     if [ "$OS" = "linux" ]; then
         setup_url=$(journalctl -u "$SERVICE_NAME" --no-pager -n 30 2>/dev/null \
             | grep -oP 'http://[^ ]*setup\?token=[a-f0-9]+' | head -1) || true
@@ -531,19 +604,27 @@ show_setup_url() {
         echo ""
         echo -e "  ${GREEN}${BOLD}${setup_url}${NC}"
         echo ""
-        echo -e "  Or from another device on your network:"
-        # Get local IP
-        local local_ip
-        if command -v hostname >/dev/null 2>&1; then
-            local_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
-        fi
-        if [ -z "${local_ip:-}" ] && command -v ifconfig >/dev/null 2>&1; then
-            local_ip=$(ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1) || true
-        fi
-        if [ -n "${local_ip:-}" ]; then
-            local lan_url="${setup_url/0.0.0.0/${local_ip}}"
-            lan_url="${lan_url/127.0.0.1/${local_ip}}"
-            echo -e "  ${BLUE}${lan_url}${NC}"
+        # Only advertise a LAN address when the claim page actually listens on
+        # one. Otherwise tell them how to forward the port instead.
+        if [[ "$setup_bind" == 0.0.0.0:* || "$setup_bind" == "[::]:"* ]]; then
+            echo -e "  Or from another device on your network:"
+            local local_ip
+            if command -v hostname >/dev/null 2>&1; then
+                local_ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+            fi
+            if [ -z "${local_ip:-}" ] && command -v ifconfig >/dev/null 2>&1; then
+                local_ip=$(ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1) || true
+            fi
+            if [ -n "${local_ip:-}" ]; then
+                local lan_url="${setup_url/0.0.0.0/${local_ip}}"
+                lan_url="${lan_url/127.0.0.1/${local_ip}}"
+                echo -e "  ${BLUE}${lan_url}${NC}"
+                echo ""
+            fi
+        else
+            echo -e "  Claiming from another machine? Forward the port first:"
+            echo -e "  ${BLUE}ssh -L 9092:127.0.0.1:9092 $(whoami)@$(hostname 2>/dev/null || echo this-host)${NC}"
+            echo -e "  then open the URL above in your local browser."
             echo ""
         fi
     else
@@ -558,6 +639,9 @@ show_setup_url() {
 
     echo -e "  WebSocket relay:  ws://0.0.0.0:9090"
     echo -e "  Health check:     http://127.0.0.1:9091/health"
+    echo -e "  Setup page:       http://${setup_bind}/setup (token required,"
+    echo -e "                    stops serving the claim code 1h after startup)"
+    echo -e "  Claim code:       ${BINARY_NAME} claim-code"
     echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
     echo ""
 

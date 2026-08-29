@@ -21,6 +21,28 @@ ws_bind = "0.0.0.0:9090"
 # Keep this on localhost or an internal network — do NOT expose publicly.
 metrics_bind = "127.0.0.1:9091"
 
+# Address for the setup/claim page. This listener serves the page that
+# displays the claim secret, so it is kept separate from metrics_bind:
+# exposing health checks to a load balancer must not also expose server
+# ownership. Reach it over an authenticated tunnel — `ssh -L 9092:127.0.0.1:9092`
+# or `fly proxy 9092` — rather than binding it to a public interface.
+# Setting it to the same value as metrics_bind merges both onto one listener.
+setup_bind = "127.0.0.1:9092"
+
+# Seconds after startup during which the setup page will hand out the claim
+# secret. Once the window closes, claiming requires a server restart, which
+# bounds the damage of a setup URL that leaks through a log aggregator.
+# Set to 0 to disable the expiry.
+setup_window_secs = 3600
+
+# Print the claim code to stderr even when stderr is not a terminal.
+# Off by default: unlike the time-boxed setup token, the claim code stays
+# valid until the server is claimed, so a captured log holds a working
+# credential for as long as the server sits unclaimed. When stderr IS a
+# terminal the code is printed regardless. While this is off and the output
+# is being captured, read the code with `stealth-relay claim-code`.
+print_claim_code_to_log = false
+
 # Maximum number of concurrent WebSocket connections.
 max_connections = 500
 
@@ -160,15 +182,39 @@ denied_destination_ports = [25, 465, 587, 6667]
 # in one of these CIDRs are reachable. Empty list means "no allowlist".
 allowed_destination_cidrs = []
 
-# Always-blocked CIDRs. The defaults block private and link-local space so
-# the relay cannot be turned into an SSRF gadget against the host's own LAN.
+# Always-blocked CIDRs. The defaults block private, loopback, link-local and
+# other special-use space so the relay cannot be turned into an SSRF gadget
+# against the host's own LAN or its cloud metadata service.
+#
+# An IPv4 entry also blocks the IPv6 spellings of the same host
+# (::ffff:a.b.c.d, ::a.b.c.d, 2002:..., 64:ff9b::...), so there is no need to
+# restate these ranges in IPv6 form.
 denied_destination_cidrs = [
+  # RFC 1918 private space.
   "10.0.0.0/8",
   "172.16.0.0/12",
   "192.168.0.0/16",
+  # Loopback, link-local (covers the 169.254.169.254 metadata service),
+  # and "this network".
   "127.0.0.0/8",
   "169.254.0.0/16",
+  "0.0.0.0/8",
+  # Carrier-grade NAT, IETF protocol assignments, benchmarking.
+  "100.64.0.0/10",
+  "192.0.0.0/24",
+  "198.18.0.0/15",
+  # Multicast and reserved space (the latter includes 255.255.255.255).
+  "224.0.0.0/4",
+  "240.0.0.0/4",
+  # IPv6 loopback, unique-local, link-local.
   "::1/128",
   "fc00::/7",
   "fe80::/10",
+  # IPv4-in-IPv6 transition space, blocked wholesale so the entries above
+  # keep applying even if an operator swaps the IPv4 list for their own.
+  "::/96",
+  "64:ff9b::/96",
+  "64:ff9b:1::/48",
+  "2002::/16",
+  "2001::/32",
 ]

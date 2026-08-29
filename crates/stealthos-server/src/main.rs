@@ -10,7 +10,11 @@
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::missing_errors_doc,
+    // The frame handlers share one signature so the dispatcher can treat them
+    // alike, whether or not a given handler has anything to await. Rust 1.98
+    // split the second name out of the first; both are needed to keep that.
     clippy::unused_async,
+    clippy::unused_async_trait_impl,
     clippy::too_many_lines,
     clippy::significant_drop_tightening
 )]
@@ -23,7 +27,7 @@ mod setup;
 mod tunnel;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,6 +65,16 @@ enum Commands {
         #[arg(short, long, default_value = "http://127.0.0.1:9091/health")]
         url: String,
     },
+    /// Print this server's claim code (only while it is unclaimed).
+    ///
+    /// The code is withheld from the startup logs when that output is being
+    /// captured rather than shown on a terminal; this reads it back from the
+    /// key directory.
+    ClaimCode {
+        /// Path to TOML configuration file (for `crypto.key_dir`).
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
     /// Generate a host identity keypair.
     GenerateIdentity {
         /// Output directory for key files.
@@ -80,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
             config: config_path,
         } => run_server(config_path).await,
         Commands::Healthcheck { url } => run_healthcheck(&url).await,
+        Commands::ClaimCode {
+            config: config_path,
+        } => run_claim_code(config_path.as_deref()),
         Commands::GenerateIdentity { output } => run_generate_identity(output),
         Commands::Version => {
             println!(
@@ -132,30 +149,33 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             Arc::new(setup::SetupState::new(
                 Arc::clone(&shared_claim),
                 env!("CARGO_PKG_VERSION"),
+                config.server.setup_window_secs,
             )),
             shared_claim,
         ))
     } else {
-        if let Some(secret) = claim_state.claim_secret() {
-            claim::print_claim_banner(secret);
-        }
         // Wrap in Arc<Mutex<>> for sharing between handler and setup page.
         let shared_claim = Arc::new(Mutex::new(claim_state));
         let ss = Arc::new(setup::SetupState::new(
             Arc::clone(&shared_claim),
             env!("CARGO_PKG_VERSION"),
+            config.server.setup_window_secs,
         ));
-        let token = ss.token_hex();
-        let metrics_addr = &config.server.metrics_bind;
-        eprintln!();
-        eprintln!("  ┌─────────────────────────────────────────────────────────┐");
-        eprintln!("  │  Open this URL in your browser to claim the server:     │");
-        eprintln!("  │                                                         │");
-        eprintln!("  │  http://{metrics_addr}/setup?token={token}");
-        eprintln!("  │                                                         │");
-        eprintln!("  │  (The token protects this page from unauthorized access)│");
-        eprintln!("  └─────────────────────────────────────────────────────────┘");
-        eprintln!();
+        let setup_url = setup_page_url(&config.server.setup_bind, &ss.token_hex());
+        {
+            let cs = shared_claim
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(secret) = cs.claim_secret() {
+                announce_claim_code(
+                    &key_dir,
+                    secret,
+                    &setup_url,
+                    config.server.print_claim_code_to_log,
+                );
+            }
+        }
+        print_setup_url_banner(&setup_url, config.server.setup_window_secs);
         Some((ss, shared_claim))
     };
 
@@ -207,6 +227,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid metrics_bind address: {e}"))?;
 
+    // The setup page hands out server ownership, so it gets its own listener
+    // rather than riding along with health and metrics, which operators
+    // routinely publish to a load balancer. Pointing both at the same address
+    // is still supported; it merges them onto one listener.
+    let setup_bind: SocketAddr = config
+        .server
+        .setup_bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid setup_bind address: {e}"))?;
+    let merge_setup = setup_bind == metrics_bind;
+
     // Capture the setup URL before moving setup_state_arc into the spawned task.
     let setup_url = {
         let is_unclaimed = !shared_claim
@@ -214,10 +245,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_claimed();
         if is_unclaimed {
-            Some(format!(
-                "http://{}/setup?token={}",
-                metrics_bind,
-                setup_state_arc.token_hex()
+            if !setup_bind.ip().is_loopback() {
+                warn!(
+                    bind = %setup_bind,
+                    "setup page is bound to a non-loopback address: anyone who can \
+                     reach it and obtain the setup token can claim this server. \
+                     Prefer a loopback bind reached over `ssh -L` or `fly proxy`."
+                );
+            }
+            Some(setup_page_url(
+                &config.server.setup_bind,
+                &setup_state_arc.token_hex(),
             ))
         } else {
             None
@@ -226,11 +264,13 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // Keep a clone for the message handler so it can pass the recovery key.
     let setup_state_for_handler = Arc::clone(&setup_state_arc);
+    let setup_state_for_listener = Arc::clone(&setup_state_arc);
 
     let health_handle = tokio::spawn(async move {
-        let health_app = health_router(health_state);
-        let setup_app = setup::setup_router(setup_state_arc);
-        let app = health_app.merge(setup_app);
+        let mut app = health_router(health_state);
+        if merge_setup {
+            app = app.merge(setup::setup_router(setup_state_arc));
+        }
         let listener = match TcpListener::bind(metrics_bind).await {
             Ok(l) => l,
             Err(e) => {
@@ -238,12 +278,50 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 return;
             }
         };
-        info!(bind = %metrics_bind, "health/metrics/setup endpoint listening");
+        if merge_setup {
+            warn!(
+                bind = %metrics_bind,
+                "setup_bind equals metrics_bind: the claim page is served on the \
+                 health/metrics listener. Split them if that listener is published."
+            );
+        }
+        info!(bind = %metrics_bind, merged_setup = merge_setup, "health/metrics endpoint listening");
 
-        if let Err(e) = axum::serve(listener, app).await {
+        // Connection info is what the setup routes throttle bad tokens on.
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             error!("health server error: {e}");
         }
     });
+
+    let setup_handle = if merge_setup {
+        None
+    } else {
+        Some(tokio::spawn(async move {
+            let app = setup::setup_router(setup_state_for_listener);
+            let listener = match TcpListener::bind(setup_bind).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(bind = %setup_bind, "failed to bind setup listener: {e}");
+                    return;
+                }
+            };
+            info!(bind = %setup_bind, "setup endpoint listening");
+
+            if let Err(e) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
+                error!("setup server error: {e}");
+            }
+        }))
+    };
 
     // Auto-open browser for the setup page (non-Docker native installs only).
     if let Some(ref url) = setup_url {
@@ -549,6 +627,9 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     health_handle.abort();
+    if let Some(handle) = setup_handle {
+        handle.abort();
+    }
     housekeeping_handle.abort();
     eviction_handle.abort();
 
@@ -559,6 +640,112 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 /// Format the first 8 bytes of a fingerprint as hex.
 ///
 /// Uses a stack-allocated buffer to avoid per-byte `format!` allocations.
+/// Put the claim code where the operator can reach it, without putting it
+/// somewhere that keeps copies.
+///
+/// The claim secret stays valid until somebody claims the server, so unlike
+/// the time-boxed setup token it must not be handed to a log aggregator.
+/// A terminal on stderr means an operator is watching a console, so the
+/// banner is safe to print; anything else is a capture pipe, and the code
+/// goes to an owner-only file that `stealth-relay claim-code` reads back.
+fn announce_claim_code(key_dir: &Path, secret: &[u8; 32], setup_url: &str, print_to_log: bool) {
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) || print_to_log {
+        claim::print_claim_banner(secret);
+        return;
+    }
+
+    match claim::write_claim_code_file(key_dir, secret, Some(setup_url)) {
+        Ok(path) => {
+            eprintln!();
+            eprintln!("  SERVER CLAIM REQUIRED");
+            eprintln!();
+            eprintln!("  The claim code is not printed here: this output is being captured");
+            eprintln!("  to a log, and the code stays valid until the server is claimed.");
+            eprintln!("  Open the setup URL below, or read the code on the server with:");
+            eprintln!();
+            eprintln!("      stealth-relay claim-code");
+            eprintln!();
+            eprintln!("  Code file: {}", path.display());
+            eprintln!("  Set server.print_claim_code_to_log = true to print it here instead.");
+        }
+        Err(e) => {
+            // A server nobody can claim is worse than one whose code is in
+            // the log, so fall back to the banner rather than stranding it.
+            eprintln!();
+            eprintln!("  could not write the claim code file ({e}); printing it here instead");
+            claim::print_claim_banner(secret);
+        }
+    }
+}
+
+/// Print the box telling the operator where to claim the server.
+fn print_setup_url_banner(setup_url: &str, window_secs: u64) {
+    eprintln!();
+    eprintln!("  ┌─────────────────────────────────────────────────────────┐");
+    eprintln!("  │  Open this URL in your browser to claim the server:     │");
+    eprintln!("  │                                                         │");
+    eprintln!("  │  {setup_url}");
+    eprintln!("  │                                                         │");
+    eprintln!("  │  (The token protects this page from unauthorized access)│");
+    eprintln!("  └─────────────────────────────────────────────────────────┘");
+    if window_secs > 0 {
+        eprintln!(
+            "     The claim code stops being served {} minutes after startup;",
+            window_secs / 60
+        );
+        eprintln!("     restart the relay to open a new setup window.");
+    }
+    eprintln!();
+}
+
+/// `claim-code` subcommand -- print the claim code of an unclaimed server.
+fn run_claim_code(config_path: Option<&Path>) -> anyhow::Result<()> {
+    let config = ServerConfig::load(config_path)?;
+    let key_dir = PathBuf::from(&config.crypto.key_dir);
+    let path = claim::claim_code_path(&key_dir);
+
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            print!("{contents}");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if key_dir.join("host_binding.json").exists() {
+                Err(anyhow::anyhow!(
+                    "this server is already claimed; there is no claim code to show"
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "no claim code at {}. The server writes it at startup while \
+                     unclaimed -- start the relay first, or check that \
+                     crypto.key_dir matches the running server.",
+                    path.display()
+                ))
+            }
+        }
+        Err(e) => Err(anyhow::anyhow!("failed to read {}: {e}", path.display())),
+    }
+}
+
+/// Build the URL an operator opens to claim the server.
+///
+/// A wildcard bind (`0.0.0.0` / `::`) is rewritten to loopback: the operator
+/// is being told where to point *their* browser, and loopback is the address
+/// that works whether they are on the box or forwarding a port to it.
+fn setup_page_url(setup_bind: &str, token: &str) -> String {
+    let host = match setup_bind.parse::<SocketAddr>() {
+        Ok(addr) if addr.ip().is_unspecified() => {
+            if addr.is_ipv6() {
+                format!("[::1]:{}", addr.port())
+            } else {
+                format!("127.0.0.1:{}", addr.port())
+            }
+        }
+        _ => setup_bind.to_owned(),
+    };
+    format!("http://{host}/setup?token={token}")
+}
+
 fn hex_short(bytes: &[u8; 32]) -> String {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
     let mut buf = [0u8; 16];

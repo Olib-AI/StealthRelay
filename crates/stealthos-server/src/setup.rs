@@ -1,19 +1,34 @@
 //! Secure setup page -- serves a token-protected HTML page with the claim QR code.
 //!
-//! When the server is unclaimed, the `/setup?token=<TOKEN>` endpoint renders
-//! an HTML page with an inline SVG QR code and manual claim code. The setup
-//! token is a separate secret (8 bytes, printed to stderr at startup) that
-//! prevents unauthorized access to the claim secret even if the metrics port
-//! is reachable.
+//! While the server is unclaimed, `/setup?token=<TOKEN>` renders an HTML page
+//! with an inline SVG QR code and the manual claim code. Anyone who reads that
+//! page owns the server, so the surface is defended on four axes:
+//!
+//! * **Reachability.** The routes live on their own listener
+//!   (`server.setup_bind`, loopback by default) instead of riding along with
+//!   health and metrics, which operators routinely publish.
+//! * **Secrecy of the token.** 32 bytes of `OsRng`, compared in constant time.
+//!   A valid token is exchanged once for an `HttpOnly` session cookie and the
+//!   caller is redirected to a token-free URL, so the secret-bearing link stops
+//!   travelling in browser history, `Referer` headers and proxy logs.
+//! * **Guessing.** Failed token presentations lock the source address out.
+//! * **Lifetime.** The claim secret is only served inside
+//!   `server.setup_window_secs` of startup. After that the page is inert until
+//!   the server is restarted, so a setup URL scraped out of a log archive
+//!   hours later is worth nothing.
 //!
 //! After the server is claimed, the endpoint returns a "Server Claimed" page
 //! and never reveals the claim secret again.
 
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse};
+use axum::extract::{ConnectInfo, FromRequestParts, Query, State};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::{Router, routing::get};
 use rand::RngCore;
 use serde::Deserialize;
@@ -21,11 +36,130 @@ use subtle::ConstantTimeEq;
 
 use crate::claim::{self, ClaimState};
 
+/// Length of the setup token, in bytes.
+///
+/// Matches the claim secret it guards: a token shorter than the secret would
+/// just move the attack to the cheaper half of the pair.
+const SETUP_TOKEN_LEN: usize = 32;
+
+/// Name of the cookie carrying a setup session.
+const SESSION_COOKIE: &str = "stealth_setup";
+
+/// Failed token presentations from one address before it is locked out.
+const MAX_TOKEN_ATTEMPTS: u32 = 5;
+
+/// How long a locked-out address stays locked out.
+const TOKEN_LOCKOUT: Duration = Duration::from_secs(300);
+
+/// Cap on addresses tracked by the throttle, so a spray from many sources
+/// cannot grow the map without bound.
+const MAX_TRACKED_CLIENTS: usize = 1024;
+
+/// Response headers for every setup page.
+///
+/// A setup page can contain the claim secret: it must not be cached by a
+/// browser or an intermediary, must not leak its own URL through a `Referer`,
+/// and must not be framed by another origin.
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+script-src 'unsafe-inline'; img-src data:; \
+connect-src 'self' https://api.github.com; form-action 'none'; \
+frame-ancestors 'none'; base-uri 'none'";
+
+/// Per-address record of failed token presentations.
+#[derive(Clone, Copy)]
+struct ClientAttempts {
+    failures: u32,
+    /// When the most recent failure was recorded.
+    last: Instant,
+}
+
+/// Lockout for repeated bad setup tokens.
+///
+/// Keyed by peer address, which over TCP cannot be spoofed. The setup
+/// listener is loopback-bound by default, so this mostly matters for
+/// operators who deliberately expose it on a LAN.
+#[derive(Default)]
+struct TokenThrottle {
+    clients: Mutex<HashMap<IpAddr, ClientAttempts>>,
+}
+
+impl TokenThrottle {
+    fn is_locked(&self, client: IpAddr) -> bool {
+        let clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clients
+            .get(&client)
+            .is_some_and(|a| a.failures >= MAX_TOKEN_ATTEMPTS && a.last.elapsed() < TOKEN_LOCKOUT)
+    }
+
+    fn record_failure(&self, client: IpAddr) {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = clients.get_mut(&client) {
+            // A failure after the lockout expired starts a fresh count.
+            if entry.last.elapsed() >= TOKEN_LOCKOUT {
+                entry.failures = 0;
+            }
+            entry.failures = entry.failures.saturating_add(1);
+            entry.last = Instant::now();
+            return;
+        }
+        if clients.len() >= MAX_TRACKED_CLIENTS {
+            clients.retain(|_, a| a.last.elapsed() < TOKEN_LOCKOUT);
+            // Still full: evict the least recently seen address to make room,
+            // so a new client is always tracked.
+            if clients.len() >= MAX_TRACKED_CLIENTS
+                && let Some(oldest) = clients
+                    .iter()
+                    .min_by_key(|(_, a)| a.last)
+                    .map(|(ip, _)| *ip)
+            {
+                clients.remove(&oldest);
+            }
+        }
+        clients.insert(
+            client,
+            ClientAttempts {
+                failures: 1,
+                last: Instant::now(),
+            },
+        );
+    }
+
+    fn reset(&self, client: IpAddr) {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clients.remove(&client);
+    }
+}
+
+/// Outcome of authorizing a request for the setup surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// The request carried a valid session cookie.
+    Session,
+    /// The request carried the valid setup token and should be handed a
+    /// session cookie.
+    Token,
+    /// No valid credential.
+    Denied,
+    /// Too many failed token presentations from this address.
+    LockedOut,
+}
+
 /// Shared state for the setup page handler.
 pub struct SetupState {
-    /// One-time setup token (8 bytes). Printed to stderr at startup.
-    /// Required in the `?token=` query parameter to access the setup page.
-    setup_token: [u8; 8],
+    /// One-time setup token. Printed to stderr at startup and required, once,
+    /// to open a setup session.
+    setup_token: [u8; SETUP_TOKEN_LEN],
+    /// Value of the session cookie handed out in exchange for the token.
+    session_token: [u8; SETUP_TOKEN_LEN],
     /// Reference to the shared claim state.
     claim_state: Arc<Mutex<ClaimState>>,
     /// Server version string (from `CARGO_PKG_VERSION`).
@@ -33,22 +167,42 @@ pub struct SetupState {
     /// Recovery key (hex string), set once at claim time, cleared after first read.
     /// This allows the setup page to show the recovery key one time after claiming.
     recovery_key: Mutex<Option<String>>,
+    /// When this state was created, i.e. server startup.
+    opened_at: Instant,
+    /// How long after `opened_at` the claim secret stays available.
+    /// `None` disables the expiry.
+    window: Option<Duration>,
+    /// Lockout for repeated bad tokens.
+    throttle: TokenThrottle,
 }
 
 impl SetupState {
     /// Create a new setup state with a random token.
-    pub fn new(claim_state: Arc<Mutex<ClaimState>>, version: &'static str) -> Self {
-        let mut setup_token = [0u8; 8];
+    ///
+    /// `window_secs` bounds how long the claim secret remains available;
+    /// `0` disables the expiry.
+    pub fn new(
+        claim_state: Arc<Mutex<ClaimState>>,
+        version: &'static str,
+        window_secs: u64,
+    ) -> Self {
+        let mut setup_token = [0u8; SETUP_TOKEN_LEN];
         rand::rngs::OsRng.fill_bytes(&mut setup_token);
+        let mut session_token = [0u8; SETUP_TOKEN_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut session_token);
         Self {
             setup_token,
+            session_token,
             claim_state,
             version,
             recovery_key: Mutex::new(None),
+            opened_at: Instant::now(),
+            window: (window_secs > 0).then(|| Duration::from_secs(window_secs)),
+            throttle: TokenThrottle::default(),
         }
     }
 
-    /// Return the setup token as a lowercase hex string (16 chars).
+    /// Return the setup token as a lowercase hex string.
     pub fn token_hex(&self) -> String {
         claim::hex_encode(&self.setup_token)
     }
@@ -56,11 +210,65 @@ impl SetupState {
     /// Validate a provided token string against the stored token.
     /// Uses constant-time comparison to prevent timing side-channels.
     fn validate_token(&self, provided: &str) -> bool {
-        let expected = self.token_hex();
-        if provided.len() != expected.len() {
-            return false;
+        constant_time_eq_str(provided, &claim::hex_encode(&self.setup_token))
+    }
+
+    /// `true` when the setup window has closed.
+    ///
+    /// Only gates the *claim secret*: the status endpoint and the claimed
+    /// page keep working, so an operator who claimed just before expiry can
+    /// still collect their recovery key.
+    pub fn window_expired(&self) -> bool {
+        self.window
+            .is_some_and(|window| self.opened_at.elapsed() >= window)
+    }
+
+    /// Decide whether a request may see the setup surface.
+    fn authorize(&self, client: IpAddr, headers: &HeaderMap, token: Option<&str>) -> Access {
+        if self.has_session_cookie(headers) {
+            return Access::Session;
         }
-        bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
+        // Check the lockout before looking at the token, so a locked-out
+        // address gains nothing by continuing to guess.
+        if self.throttle.is_locked(client) {
+            return Access::LockedOut;
+        }
+        match token {
+            Some(t) if self.validate_token(t) => {
+                self.throttle.reset(client);
+                Access::Token
+            }
+            Some(_) => {
+                self.throttle.record_failure(client);
+                Access::Denied
+            }
+            None => Access::Denied,
+        }
+    }
+
+    /// `true` when the request carries this process's session cookie.
+    fn has_session_cookie(&self, headers: &HeaderMap) -> bool {
+        let expected = claim::hex_encode(&self.session_token);
+        headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|raw| raw.split(';'))
+            .filter_map(|pair| pair.split_once('='))
+            .any(|(name, value)| {
+                name.trim() == SESSION_COOKIE && constant_time_eq_str(value.trim(), &expected)
+            })
+    }
+
+    /// `Set-Cookie` value that opens a setup session.
+    fn session_cookie_header(&self) -> String {
+        // Session-scoped: no Max-Age, so it dies with the browser session.
+        // `Secure` is deliberately omitted -- the page is served over plain
+        // HTTP on loopback or through an operator's own tunnel.
+        format!(
+            "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict",
+            claim::hex_encode(&self.session_token)
+        )
     }
 
     /// Returns the 32-byte claim secret if the server is unclaimed.
@@ -99,6 +307,71 @@ impl SetupState {
     }
 }
 
+/// Length-checked constant-time string comparison.
+///
+/// The length check leaks only the length, which for both the token and the
+/// cookie is a compile-time constant.
+fn constant_time_eq_str(provided: &str, expected: &str) -> bool {
+    if provided.len() != expected.len() {
+        return false;
+    }
+    bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+/// Peer address of the request, if the listener attached connection info.
+///
+/// Its own extractor rather than a bare `ConnectInfo` so a router driven
+/// without connection info -- which is how the tests exercise it -- degrades
+/// to "unknown client" instead of rejecting the request.
+struct PeerAddr(Option<SocketAddr>);
+
+impl PeerAddr {
+    /// Address to key the lockout on. Requests with no connection info share
+    /// one bucket, which is the conservative choice: they throttle together.
+    const fn ip(&self) -> IpAddr {
+        match self.0 {
+            Some(addr) => addr.ip(),
+            None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for PeerAddr {
+    type Rejection = std::convert::Infallible;
+
+    // Written as a plain fn returning a ready future: nothing here awaits.
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        std::future::ready(Ok(Self(peer)))
+    }
+}
+
+/// Wrap a rendered page in the headers every setup response needs.
+fn page(status: StatusCode, html: String) -> Response {
+    let mut response = (status, Html(html)).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if let Ok(csp) = HeaderValue::from_str(CSP) {
+        headers.insert(header::CONTENT_SECURITY_POLICY, csp);
+    }
+    response
+}
+
 /// Query parameters for the setup endpoint.
 #[derive(Deserialize)]
 struct SetupQuery {
@@ -118,67 +391,109 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
 }
 
 /// GET / — shows guide when claimed, info page when unclaimed.
-async fn root_handler(State(state): State<Arc<SetupState>>) -> impl IntoResponse {
+async fn root_handler(State(state): State<Arc<SetupState>>) -> Response {
     if state.is_claimed() {
-        (StatusCode::OK, Html(claimed_page(state.version)))
+        page(StatusCode::OK, claimed_page(state.version))
     } else {
-        (StatusCode::OK, Html(unclaimed_root_page()))
+        page(StatusCode::OK, unclaimed_root_page())
     }
 }
 
 /// GET /setup?token=<TOKEN>
 ///
 /// Security layers:
-/// 1. The setup token must match (constant-time comparison)
-/// 2. The claim secret is only served while the server is unclaimed
-/// 3. After claiming, the page returns a benign "Server Claimed" message
+/// 1. A valid setup token (constant-time compare) or an established session
+///    cookie is required; repeated bad tokens lock the source address out.
+/// 2. A token presented in the query string is swapped for a session cookie
+///    and the caller is redirected to a token-free URL.
+/// 3. The claim secret is only served while the server is unclaimed and
+///    inside the setup window.
+/// 4. After claiming, the page returns a benign "Server Claimed" message.
 async fn setup_handler(
     State(state): State<Arc<SetupState>>,
+    peer: PeerAddr,
+    headers: HeaderMap,
     Query(params): Query<SetupQuery>,
-) -> impl IntoResponse {
+) -> Response {
     // Always return the claimed page if already claimed -- regardless of token.
     if state.is_claimed() {
-        return (StatusCode::OK, Html(claimed_page(state.version)));
+        return page(StatusCode::OK, claimed_page(state.version));
     }
 
-    // Require and validate the setup token.
-    let Some(token) = params.token.as_deref() else {
-        return (StatusCode::FORBIDDEN, Html(forbidden_page()));
-    };
+    let client = peer.ip();
+    match state.authorize(client, &headers, params.token.as_deref()) {
+        Access::Session => {}
+        Access::Token => return redirect_to_session(&state),
+        Access::LockedOut => return page(StatusCode::TOO_MANY_REQUESTS, locked_out_page()),
+        Access::Denied => return page(StatusCode::FORBIDDEN, forbidden_page()),
+    }
 
-    if !state.validate_token(token) {
-        return (StatusCode::FORBIDDEN, Html(forbidden_page()));
+    // The window closes on the claim secret only; everything above still
+    // answers so a claim in flight can finish.
+    if state.window_expired() {
+        return page(StatusCode::GONE, expired_page());
     }
 
     // Serve the setup page with the claim QR code.
     let Some(secret) = state.claim_secret() else {
         // Race: server was claimed between the check above and here.
-        return (StatusCode::OK, Html(claimed_page(state.version)));
+        return page(StatusCode::OK, claimed_page(state.version));
     };
 
-    (StatusCode::OK, Html(render_setup_page(&secret)))
+    page(StatusCode::OK, render_setup_page(&secret))
+}
+
+/// Swap a valid token for a session cookie and bounce to a token-free URL.
+///
+/// Keeps the claim-secret-equivalent token out of browser history, out of
+/// `Referer` headers on any link the page carries, and out of the access logs
+/// of anything between the operator and the server.
+fn redirect_to_session(state: &SetupState) -> Response {
+    let mut response = (StatusCode::SEE_OTHER, ()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, HeaderValue::from_static("/setup"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    if let Ok(cookie) = HeaderValue::from_str(&state.session_cookie_header()) {
+        headers.insert(header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// GET /setup/status — JSON endpoint polled by the setup page JS.
 ///
 /// Returns claim status and, once after claiming, the recovery key.
 /// The recovery key is cleared after the first read (one-time).
-/// Protected by the same setup token as `/setup`.
+/// Protected by the same session or token as `/setup`.
 async fn status_handler(
     State(state): State<Arc<SetupState>>,
+    peer: PeerAddr,
+    headers: HeaderMap,
     Query(params): Query<SetupQuery>,
-) -> impl IntoResponse {
-    // Require token for status too — prevents unauthenticated polling.
-    let token_valid = params
-        .token
-        .as_deref()
-        .is_some_and(|t| state.validate_token(t));
-
-    if !token_valid {
-        return (
-            StatusCode::FORBIDDEN,
+) -> Response {
+    let client = peer.ip();
+    let access = state.authorize(client, &headers, params.token.as_deref());
+    let status = match access {
+        Access::Session | Access::Token => StatusCode::OK,
+        Access::LockedOut => StatusCode::TOO_MANY_REQUESTS,
+        Access::Denied => StatusCode::FORBIDDEN,
+    };
+    if status != StatusCode::OK {
+        let mut response = (
+            status,
             axum::Json(serde_json::json!({"error": "forbidden"})),
-        );
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return response;
     }
 
     let claimed = state.is_claimed();
@@ -188,13 +503,27 @@ async fn status_handler(
         None
     };
 
-    (
-        StatusCode::OK,
+    let mut response = (
+        status,
         axum::Json(serde_json::json!({
             "claimed": claimed,
             "recovery_key": recovery_key,
         })),
     )
+        .into_response();
+    let out = response.headers_mut();
+    out.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+    // A poll that arrived with the token still in the query gets a cookie too,
+    // so subsequent polls need not carry it.
+    if access == Access::Token
+        && let Ok(cookie) = HeaderValue::from_str(&state.session_cookie_header())
+    {
+        out.insert(header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 // ── HTML page rendering ──────────────────────────────────────────────────
@@ -386,7 +715,6 @@ align-items:center;text-align:center;">
 <script>
 (function() {{
   var claimCode = '{full_hex}';
-  var token = new URLSearchParams(window.location.search).get('token');
 
   // Copy claim code button
   document.getElementById('copy-btn').addEventListener('click', function() {{
@@ -424,28 +752,27 @@ align-items:center;text-align:center;">
     }}
   }}
 
-  // Poll for claim status
-  if (token) {{
-    var pollInterval = setInterval(function() {{
-      fetch('/setup/status?token=' + encodeURIComponent(token))
-        .then(function(r) {{
-          if (!r.ok) return null;
-          return r.json();
-        }})
-        .then(function(data) {{
-          if (!data) return;
-          if (data.claimed) {{
-            clearInterval(pollInterval);
-            if (data.recovery_key) {{
-              showRecoveryKey(data.recovery_key);
-            }} else {{
-              window.location.href = '/';
-            }}
+  // Poll for claim status. The session cookie set when this page was opened
+  // authenticates the poll, so the token never has to appear in a URL again.
+  var pollInterval = setInterval(function() {{
+    fetch('/setup/status', {{ credentials: 'same-origin' }})
+      .then(function(r) {{
+        if (!r.ok) return null;
+        return r.json();
+      }})
+      .then(function(data) {{
+        if (!data) return;
+        if (data.claimed) {{
+          clearInterval(pollInterval);
+          if (data.recovery_key) {{
+            showRecoveryKey(data.recovery_key);
+          }} else {{
+            window.location.href = '/';
           }}
-        }})
-        .catch(function() {{}});
-    }}, 2000);
-  }}
+        }}
+      }})
+      .catch(function() {{}});
+  }}, 2000);
 
   function showRecoveryKey(key) {{
     window._rkRaw = key;
@@ -1051,17 +1378,18 @@ curl -i --http1.1 \
 </body>
 </html>"#;
 
-/// HTML page shown when the token is missing or invalid.
-fn forbidden_page() -> String {
-    String::from(
+/// Minimal styled page for the non-secret outcomes: denied, locked out,
+/// window closed. Kept to one template so the three read alike.
+fn notice_page(icon: &str, title: &str, body: &str) -> String {
+    format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay - Access Denied</title>
+<title>StealthOS Relay - {title}</title>
 <style>
-  body {
+  body {{
     margin: 0; padding: 0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #0f0f1a;
@@ -1071,30 +1399,60 @@ fn forbidden_page() -> String {
     justify-content: center;
     align-items: center;
     text-align: center;
-  }
-  .container { max-width: 420px; padding: 32px 24px; }
-  .lock { font-size: 3em; margin-bottom: 16px; }
-  h1 { font-size: 1.4em; color: #fff; margin: 0 0 12px 0; }
-  p { color: #9999bb; line-height: 1.6; }
-  code {
+  }}
+  .container {{ max-width: 420px; padding: 32px 24px; }}
+  .icon {{ font-size: 3em; margin-bottom: 16px; }}
+  h1 {{ font-size: 1.4em; color: #fff; margin: 0 0 12px 0; }}
+  p {{ color: #9999bb; line-height: 1.6; }}
+  code {{
     background: #1a1a2e;
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 0.9em;
-  }
+  }}
 </style>
 </head>
 <body>
 <div class="container">
-  <div class="lock">&#x1F512;</div>
-  <h1>Access Denied</h1>
-  <p>
-    A valid setup token is required to access this page.
-    Check the server logs for the setup URL with the token.
-  </p>
+  <div class="icon">{icon}</div>
+  <h1>{title}</h1>
+  <p>{body}</p>
 </div>
 </body>
-</html>"#,
+</html>"#
+    )
+}
+
+/// HTML page shown when the token is missing or invalid.
+fn forbidden_page() -> String {
+    notice_page(
+        "&#x1F512;",
+        "Access Denied",
+        "A valid setup token is required to access this page. \
+         The setup URL, with its token, is printed to the server console \
+         at startup.",
+    )
+}
+
+/// HTML page shown after too many bad tokens from one address.
+fn locked_out_page() -> String {
+    notice_page(
+        "&#x23F3;",
+        "Too Many Attempts",
+        "Too many invalid setup tokens came from this address. \
+         Try again in a few minutes.",
+    )
+}
+
+/// HTML page shown once the setup window has closed.
+fn expired_page() -> String {
+    notice_page(
+        "&#x23F0;",
+        "Setup Window Closed",
+        "This server stopped handing out its claim code a while after \
+         starting up, so that a setup link cannot be used long after it was \
+         issued. Restart the relay to open a new setup window, or claim the \
+         server with the code from the startup console.",
     )
 }
 
@@ -1102,12 +1460,30 @@ fn forbidden_page() -> String {
 mod tests {
     use super::*;
 
+    /// Cookie header value a browser would send back after a redirect.
+    fn session_cookie_of(setup: &SetupState) -> String {
+        format!(
+            "{SESSION_COOKIE}={}",
+            claim::hex_encode(&setup.session_token)
+        )
+    }
+
     fn make_unclaimed_state() -> (Arc<SetupState>, Arc<Mutex<ClaimState>>) {
+        make_unclaimed_state_with_window(0)
+    }
+
+    fn make_unclaimed_state_with_window(
+        window_secs: u64,
+    ) -> (Arc<SetupState>, Arc<Mutex<ClaimState>>) {
         let dir = tempfile::tempdir().unwrap();
         let claim = ClaimState::load_or_create(dir.path());
         assert!(!claim.is_claimed());
         let shared = Arc::new(Mutex::new(claim));
-        let setup = Arc::new(SetupState::new(Arc::clone(&shared), "0.0.0-test"));
+        let setup = Arc::new(SetupState::new(
+            Arc::clone(&shared),
+            "0.0.0-test",
+            window_secs,
+        ));
         (setup, shared)
     }
 
@@ -1119,7 +1495,30 @@ mod tests {
             .try_claim(&secret, &[42u8; 32], dir.path(), "fp")
             .unwrap();
         let shared = Arc::new(Mutex::new(claim));
-        Arc::new(SetupState::new(shared, "0.0.0-test"))
+        Arc::new(SetupState::new(shared, "0.0.0-test", 0))
+    }
+
+    /// Issue a GET against a fresh router built over `setup`.
+    async fn get(
+        setup: &Arc<SetupState>,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> axum::http::Response<axum::body::Body> {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        if let Some(c) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, c);
+        }
+        let req = builder.body(axum::body::Body::empty()).unwrap();
+        tower::ServiceExt::oneshot(setup_router(Arc::clone(setup)), req)
+            .await
+            .unwrap()
+    }
+
+    async fn body_string(resp: axum::http::Response<axum::body::Body>) -> String {
+        let body = axum::body::to_bytes(resp.into_body(), 262_144)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
     }
 
     #[test]
@@ -1130,9 +1529,19 @@ mod tests {
     }
 
     #[test]
+    fn token_is_256_bits() {
+        let (setup, _) = make_unclaimed_state();
+        assert_eq!(SETUP_TOKEN_LEN, 32);
+        assert_eq!(setup.token_hex().len(), 64);
+        // Two states must not share a token.
+        let (other, _) = make_unclaimed_state();
+        assert_ne!(setup.token_hex(), other.token_hex());
+    }
+
+    #[test]
     fn token_validation_wrong() {
         let (setup, _) = make_unclaimed_state();
-        assert!(!setup.validate_token("0000000000000000"));
+        assert!(!setup.validate_token(&"0".repeat(64)));
         assert!(!setup.validate_token("short"));
         assert!(!setup.validate_token(""));
     }
@@ -1172,64 +1581,121 @@ mod tests {
     #[tokio::test]
     async fn setup_handler_requires_token() {
         let (setup, _) = make_unclaimed_state();
-        let app = setup_router(setup);
-
-        // No token -> 403
-        let req = axum::http::Request::builder()
-            .uri("/setup")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        let resp = get(&setup, "/setup", None).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!body_string(resp).await.contains("Claim Your Server"));
     }
 
     #[tokio::test]
     async fn setup_handler_wrong_token() {
         let (setup, _) = make_unclaimed_state();
-        let app = setup_router(setup);
-
-        let req = axum::http::Request::builder()
-            .uri("/setup?token=0000000000000000")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        let resp = get(&setup, &format!("/setup?token={}", "0".repeat(64)), None).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    /// A valid token buys a session cookie and a redirect; the claim secret
+    /// is served to the follow-up request, not to the URL that carried the
+    /// token. That keeps the token out of history, `Referer` and proxy logs.
     #[tokio::test]
-    async fn setup_handler_correct_token() {
+    async fn valid_token_redirects_and_sets_session_cookie() {
         let (setup, _) = make_unclaimed_state();
         let token = setup.token_hex();
-        let app = setup_router(setup);
 
-        let req = axum::http::Request::builder()
-            .uri(&format!("/setup?token={token}"))
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        let resp = get(&setup, &format!("/setup?token={token}"), None).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers().get(axum::http::header::LOCATION).unwrap(),
+            "/setup"
+        );
+        let cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.starts_with(SESSION_COOKIE));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        // The redirect body carries no secret.
+        assert!(!body_string(resp).await.contains("Claim Your Server"));
+
+        // Following the redirect with the cookie yields the page.
+        let jar = cookie.split(';').next().unwrap().to_owned();
+        let resp = get(&setup, "/setup", Some(&jar)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("Claim Your Server"));
+    }
 
-        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Claim Your Server"));
-        assert!(html.contains("<svg"));
+    #[tokio::test]
+    async fn wrong_session_cookie_is_rejected() {
+        let (setup, _) = make_unclaimed_state();
+        let forged = format!("{SESSION_COOKIE}={}", "0".repeat(64));
+        let resp = get(&setup, "/setup", Some(&forged)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Repeated bad tokens lock the source address out, and the lockout
+    /// applies even once a correct token is presented.
+    #[tokio::test]
+    async fn repeated_bad_tokens_lock_the_client_out() {
+        let (setup, _) = make_unclaimed_state();
+        let bad = format!("/setup?token={}", "0".repeat(64));
+        for _ in 0..MAX_TOKEN_ATTEMPTS {
+            let resp = get(&setup, &bad, None).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+        let resp = get(&setup, &bad, None).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Even the real token is refused while the lockout stands.
+        let resp = get(&setup, &format!("/setup?token={}", setup.token_hex()), None).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // An established session is unaffected -- the lockout targets guessing.
+        let resp = get(&setup, "/setup", Some(&session_cookie_of(&setup))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Once the setup window closes the claim secret is gone until restart,
+    /// so a setup URL scraped out of a log archive later is inert.
+    #[tokio::test]
+    async fn expired_window_withholds_the_claim_secret() {
+        let (setup, _) = make_unclaimed_state_with_window(1);
+        assert!(!setup.window_expired());
+
+        // Reach into the state rather than sleeping: the window is a
+        // wall-clock offset from startup.
+        let expired = Arc::new(SetupState {
+            opened_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("test clock is far enough from the epoch"),
+            window: Some(Duration::from_secs(1)),
+            ..SetupState::new(Arc::clone(&setup.claim_state), "0.0.0-test", 1)
+        });
+        assert!(expired.window_expired());
+
+        let resp = get(&expired, "/setup", Some(&session_cookie_of(&expired))).await;
+        assert_eq!(resp.status(), StatusCode::GONE);
+        let html = body_string(resp).await;
+        assert!(html.contains("Setup Window Closed"));
+        assert!(!html.contains("Claim Your Server"));
+    }
+
+    #[tokio::test]
+    async fn window_of_zero_never_expires() {
+        let (setup, _) = make_unclaimed_state_with_window(0);
+        assert!(setup.window.is_none());
+        assert!(!setup.window_expired());
     }
 
     #[tokio::test]
     async fn setup_handler_claimed_returns_claimed_page() {
         let setup = make_claimed_state();
         let token = setup.token_hex();
-        let app = setup_router(setup);
-
-        let req = axum::http::Request::builder()
-            .uri(&format!("/setup?token={token}"))
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        let resp = get(&setup, &format!("/setup?token={token}"), None).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
+        let html = body_string(resp).await;
         assert!(html.contains("Server Claimed"));
         assert!(!html.contains("Claim Your Server"));
     }
@@ -1238,17 +1704,60 @@ mod tests {
     async fn setup_handler_claimed_no_token_still_ok() {
         // Even without a token, claimed state returns the claimed page (200, not 403).
         let setup = make_claimed_state();
-        let app = setup_router(setup);
-
-        let req = axum::http::Request::builder()
-            .uri("/setup")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        let resp = get(&setup, "/setup", None).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("Server Claimed"));
+    }
 
-        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Server Claimed"));
+    #[tokio::test]
+    async fn status_requires_credentials() {
+        let (setup, _) = make_unclaimed_state();
+        let resp = get(&setup, "/setup/status", None).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = get(&setup, "/setup/status", Some(&session_cookie_of(&setup))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("\"claimed\":false"));
+    }
+
+    /// Pages that can carry the claim secret must not be cached, framed, or
+    /// leak their own URL through a `Referer`.
+    #[tokio::test]
+    async fn setup_pages_carry_hardening_headers() {
+        let (setup, _) = make_unclaimed_state();
+        let resp = get(&setup, "/setup", Some(&session_cookie_of(&setup))).await;
+        let headers = resp.headers();
+        assert!(
+            headers
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("no-store")
+        );
+        assert_eq!(
+            headers.get(axum::http::header::REFERRER_POLICY).unwrap(),
+            "no-referrer"
+        );
+        assert_eq!(
+            headers.get(axum::http::header::X_FRAME_OPTIONS).unwrap(),
+            "DENY"
+        );
+        assert!(
+            headers
+                .get(axum::http::header::CONTENT_SECURITY_POLICY)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn throttle_evicts_when_full() {
+        let throttle = TokenThrottle::default();
+        for i in 0..(MAX_TRACKED_CLIENTS + 16) {
+            let ip = IpAddr::V4(Ipv4Addr::from(u32::try_from(i).unwrap()));
+            throttle.record_failure(ip);
+        }
+        let clients = throttle.clients.lock().unwrap();
+        assert!(clients.len() <= MAX_TRACKED_CLIENTS);
     }
 }

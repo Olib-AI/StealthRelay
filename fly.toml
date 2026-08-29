@@ -7,6 +7,12 @@ primary_region = "iad"
 [env]
   STEALTH_SERVER__WS_BIND = "0.0.0.0:9090"
   STEALTH_SERVER__METRICS_BIND = "0.0.0.0:9091"
+  # The setup/claim page stays on loopback inside the machine. Reach it with
+  # `fly proxy 9092 -a stealth-relay`, which authenticates you against Fly,
+  # then open the setup URL from `fly logs` against 127.0.0.1:9092.
+  # The claim code itself is kept out of the logs; read it with
+  # `fly ssh console -C "stealth-relay claim-code"`.
+  STEALTH_SERVER__SETUP_BIND = "127.0.0.1:9092"
   STEALTH_LOGGING__LEVEL = "info"
   STEALTH_LOGGING__FORMAT = "json"
 
@@ -22,21 +28,18 @@ primary_region = "iad"
     hard_limit = 500
     soft_limit = 400
 
-[[services]]
-  protocol = "tcp"
-  internal_port = 9091
-
-  [[services.ports]]
+# Health check against the metrics port from inside Fly's network. Declared as
+# a top-level check rather than a published service: /health and /metrics
+# describe the server, and there is no reason for the internet to read them.
+[checks]
+  [checks.health]
+    type = "http"
     port = 9091
-    handlers = ["http"]
-
-  [[services.http_checks]]
-    interval = 30000
-    grace_period = "10s"
     method = "get"
     path = "/health"
-    protocol = "http"
-    timeout = 5000
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
 
 [mounts]
   source = "stealth_keys"

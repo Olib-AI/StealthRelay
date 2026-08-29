@@ -10,6 +10,11 @@ services:
         value: "0.0.0.0:9090"
       - key: STEALTH_SERVER__METRICS_BIND
         value: "0.0.0.0:9091"
+      # The setup/claim page keeps its own listener on loopback. Claim the
+      # server with the code from the deploy logs, or reach the page over
+      # `render ssh` with a forwarded port.
+      - key: STEALTH_SERVER__SETUP_BIND
+        value: "127.0.0.1:9092"
       - key: STEALTH_LOGGING__LEVEL
         value: info
       - key: STEALTH_LOGGING__FORMAT

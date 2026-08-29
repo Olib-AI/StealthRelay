@@ -291,8 +291,12 @@ impl TunnelGateway {
                 }
             };
 
+        // Canonicalize before filtering so the socket that gets dialled is the
+        // exact address the policy check passed -- no room for the check and
+        // the connect to disagree about what `::ffff:a.b.c.d` means.
         let allowed_resolved: Vec<std::net::SocketAddr> = resolved
             .into_iter()
+            .map(canonical_socket_addr)
             .filter(|addr| self.is_address_allowed(addr.ip()))
             .collect();
         if allowed_resolved.is_empty() {
@@ -416,6 +420,20 @@ impl TunnelGateway {
 
         match dns::resolve_query(&data, self.config.connect_timeout).await {
             Ok(answers) => {
+                // Drop answers pointing at addresses the policy would refuse
+                // to dial. Otherwise the resolver doubles as an internal
+                // address scanner: the stream open fails, but the reply has
+                // already told the member what lives behind the relay.
+                let answers = self.filter_dns_answers(answers);
+                if answers.is_empty() {
+                    self.send_dns_error(
+                        connection_id,
+                        data.query_id,
+                        DnsErrorCode::PolicyDenied,
+                        "destination denied by policy",
+                    );
+                    return;
+                }
                 self.send_dns_response(connection_id, data.query_id, Some(answers), None);
             }
             Err(dns::ResolveError::Timeout) => {
@@ -735,17 +753,40 @@ impl TunnelGateway {
     ///
     /// - If `allowed_destination_cidrs` is non-empty, only addresses in the
     ///   allowlist pass.
-    /// - Otherwise, addresses in `denied_destination_cidrs` are blocked.
+    /// - Addresses in `denied_destination_cidrs` are blocked, in every
+    ///   spelling that reaches the same host.
+    ///
+    /// The address is canonicalized first, so the IPv6 spellings of an IPv4
+    /// host (`::ffff:10.0.0.1` and friends) are judged as that IPv4 host
+    /// rather than sliding past an IPv4-only deny list on a family mismatch.
     pub fn is_address_allowed(&self, addr: std::net::IpAddr) -> bool {
+        let addr = cidr::canonicalize(addr);
         if !self.config.allowed_destination_cidrs.is_empty()
             && !self.config.allowed_destination_cidrs.contains(addr)
         {
             return false;
         }
-        if self.config.denied_destination_cidrs.contains(addr) {
+        if self.config.denied_destination_cidrs.contains_any_form(addr) {
             return false;
         }
         true
+    }
+
+    /// Keep only the answers whose address passes [`Self::is_address_allowed`].
+    ///
+    /// An answer whose value does not parse as an IP is dropped: the client
+    /// cannot act on it and it is not something the OS resolver should have
+    /// produced for an A/AAAA query.
+    fn filter_dns_answers(&self, answers: Vec<DnsAnswer>) -> Vec<DnsAnswer> {
+        answers
+            .into_iter()
+            .filter(|answer| {
+                answer
+                    .value
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| self.is_address_allowed(ip))
+            })
+            .collect()
     }
 
     fn dec_per_conn(&self, connection_id: ConnectionId) {
@@ -770,6 +811,12 @@ pub enum BinaryDispatch {
     Reject,
     /// Frame arrived on a connection that has not authenticated.
     Unauthenticated,
+}
+
+/// Rewrite a resolved destination into the canonical form the policy check
+/// and the outbound socket both agree on. See [`cidr::canonicalize`].
+fn canonical_socket_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    std::net::SocketAddr::new(cidr::canonicalize(addr.ip()), addr.port())
 }
 
 /// Build a binary `TUNNEL_DATA` frame for emission.
@@ -897,6 +944,24 @@ mod tests {
         guest_rx: mpsc::Receiver<OutboundMessage>,
     }
 
+    /// Permissive baseline config: every gate the tests care about is opened
+    /// so each test can close exactly the one it exercises.
+    fn base_config() -> TunnelConfig {
+        TunnelConfig {
+            enabled: true,
+            max_streams_per_connection: 64,
+            max_streams_global: 4096,
+            connect_timeout: TokioDuration::from_secs(2),
+            idle_stream_timeout: TokioDuration::from_secs(60),
+            max_payload_bytes: 32_768,
+            initial_receive_window: 65_536,
+            window_update_threshold: 16_384,
+            denied_destination_ports: vec![25],
+            allowed_destination_cidrs: cidr::CidrSet::default(),
+            denied_destination_cidrs: cidr::CidrSet::default(),
+        }
+    }
+
     fn build_gw(custom_config: impl FnOnce(&mut TunnelConfig)) -> GwHarness {
         let pool_registry = Arc::new(PoolRegistry::new(8));
         let connection_registry = Arc::new(ConnectionRegistry::new(16));
@@ -948,19 +1013,7 @@ mod tests {
         // Default to per-pool tunnel approval ON.
         pool.set_tunnel_exit_enabled(true);
 
-        let mut cfg = TunnelConfig {
-            enabled: true,
-            max_streams_per_connection: 64,
-            max_streams_global: 4096,
-            connect_timeout: TokioDuration::from_secs(2),
-            idle_stream_timeout: TokioDuration::from_secs(60),
-            max_payload_bytes: 32_768,
-            initial_receive_window: 65_536,
-            window_update_threshold: 16_384,
-            denied_destination_ports: vec![25],
-            allowed_destination_cidrs: cidr::CidrSet::default(),
-            denied_destination_cidrs: cidr::CidrSet::default(),
-        };
+        let mut cfg = base_config();
         custom_config(&mut cfg);
         let gateway = Arc::new(TunnelGateway::new(
             cfg,
@@ -1093,6 +1146,123 @@ mod tests {
         h.gateway.handle_open(h.guest_conn, data).await;
         let frames = drain(&mut h.guest_rx);
         assert_eq!(expect_close(&frames, 11), CloseReason::PolicyDenied);
+    }
+
+    /// Regression test: an IPv4 deny entry must also stop the IPv6 spellings
+    /// of the same host. Before the fix the CIDR check compared within an
+    /// address family, so an authenticated member reached any internal host
+    /// by asking for `::ffff:<internal v4>` instead of the v4 literal.
+    #[tokio::test]
+    async fn tunnel_open_rejected_for_ipv4_mapped_ipv6_of_denied_cidr() {
+        let spellings = [
+            "::ffff:192.168.1.1",       // IPv4-mapped
+            "::ffff:169.254.169.254",   // cloud metadata, via mapped form
+            "::192.168.1.1",            // IPv4-compatible (deprecated)
+            "2002:c0a8:0101::",         // 6to4
+            "64:ff9b::192.168.1.1",     // NAT64 well-known prefix
+        ];
+        for (i, address) in spellings.iter().enumerate() {
+            let mut h = build_gw(|c| {
+                let mut warns = Vec::new();
+                c.denied_destination_cidrs = cidr::CidrSet::from_strings(
+                    &["192.168.0.0/16".to_owned(), "169.254.0.0/16".to_owned()],
+                    &mut warns,
+                );
+            });
+            let stream_id = 900 + u32::try_from(i).unwrap();
+            let data = TunnelOpenData {
+                stream_id,
+                destination: TunnelDestination::Ipv6 {
+                    address: (*address).into(),
+                    port: 80,
+                },
+                network: TunnelNetwork::Tcp,
+                initial_window: 1024,
+            };
+            h.gateway.handle_open(h.guest_conn, data).await;
+            let frames = drain(&mut h.guest_rx);
+            assert_eq!(
+                expect_close(&frames, stream_id),
+                CloseReason::PolicyDenied,
+                "{address} must be denied"
+            );
+        }
+    }
+
+    /// The mirror of the above: an allowlist must not be widened by an
+    /// alternate spelling, and the mapped form of an allowed host still works.
+    #[tokio::test]
+    async fn allowlist_judges_the_canonical_address() {
+        let make = || {
+            build_gw(|c| {
+                let mut warns = Vec::new();
+                c.allowed_destination_cidrs =
+                    cidr::CidrSet::from_strings(&["203.0.113.0/24".to_owned()], &mut warns);
+                c.denied_destination_cidrs = cidr::CidrSet::default();
+            })
+        };
+
+        // 6to4 wrapping an allowed IPv4 is a different host (a relay): denied.
+        let mut h = make();
+        h.gateway
+            .handle_open(
+                h.guest_conn,
+                TunnelOpenData {
+                    stream_id: 921,
+                    destination: TunnelDestination::Ipv6 {
+                        address: "2002:cb00:7101::".into(),
+                        port: 80,
+                    },
+                    network: TunnelNetwork::Tcp,
+                    initial_window: 1024,
+                },
+            )
+            .await;
+        let frames = drain(&mut h.guest_rx);
+        assert_eq!(expect_close(&frames, 921), CloseReason::PolicyDenied);
+
+        // An address outside the allowlist is denied in either spelling.
+        let mut h = make();
+        h.gateway
+            .handle_open(
+                h.guest_conn,
+                TunnelOpenData {
+                    stream_id: 922,
+                    destination: TunnelDestination::Ipv6 {
+                        address: "::ffff:198.51.100.7".into(),
+                        port: 80,
+                    },
+                    network: TunnelNetwork::Tcp,
+                    initial_window: 1024,
+                },
+            )
+            .await;
+        let frames = drain(&mut h.guest_rx);
+        assert_eq!(expect_close(&frames, 922), CloseReason::PolicyDenied);
+    }
+
+    /// `is_address_allowed` is the shared predicate; check it directly for the
+    /// spellings the open-path tests exercise end to end.
+    #[test]
+    fn is_address_allowed_canonicalizes_before_matching() {
+        let mut warns = Vec::new();
+        let cfg = TunnelConfig {
+            denied_destination_cidrs: cidr::CidrSet::from_strings(
+                &["10.0.0.0/8".to_owned()],
+                &mut warns,
+            ),
+            ..base_config()
+        };
+        let gw = TunnelGateway::new(
+            cfg,
+            Arc::new(ConnectionRegistry::new(8)),
+            Arc::new(PoolRegistry::new(4)),
+        );
+        assert!(!gw.is_address_allowed("10.0.0.1".parse().unwrap()));
+        assert!(!gw.is_address_allowed("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(gw.is_address_allowed("203.0.113.1".parse().unwrap()));
+        assert!(gw.is_address_allowed("::ffff:203.0.113.1".parse().unwrap()));
+        assert!(gw.is_address_allowed("2001:db8::1".parse().unwrap()));
     }
 
     #[tokio::test]

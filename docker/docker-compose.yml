@@ -23,6 +23,10 @@ services:
       - "${STEALTH_WS_PORT:-9090}:9090"
       # Metrics port exposed only on localhost by default.
       - "127.0.0.1:${STEALTH_METRICS_PORT:-9091}:9091"
+      # Setup/claim page, also localhost-only. This page hands out server
+      # ownership: publish it beyond 127.0.0.1 only if you understand that
+      # anyone who reaches it and obtains the setup token can claim the server.
+      - "127.0.0.1:${STEALTH_SETUP_PORT:-9092}:9092"
 
     volumes:
       # Persistent host identity keys.
@@ -40,6 +44,11 @@ services:
       # ports section above. If this service runs on a shared Docker network,
       # consider adding network isolation or a dedicated metrics network.
       - STEALTH_SERVER__METRICS_BIND=0.0.0.0:9091
+      # Setup/claim page on its own listener, so publishing metrics to a
+      # monitoring network never publishes the claim page with it. Same
+      # 0.0.0.0-inside-the-container reasoning as the metrics bind above; the
+      # host-side mapping keeps it on 127.0.0.1.
+      - STEALTH_SERVER__SETUP_BIND=0.0.0.0:9092
       - STEALTH_LOGGING__LEVEL=${STEALTH_LOG_LEVEL:-info}
       - STEALTH_LOGGING__FORMAT=${STEALTH_LOG_FORMAT:-json}
 

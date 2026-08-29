@@ -46,20 +46,20 @@ The installer downloads a pre-built binary, verifies its SHA256 checksum, create
 After installation, a **setup page** opens automatically in your browser:
 
 <p align="center">
-  <code>http://localhost:9091/setup?token=&lt;TOKEN&gt;</code>
+  <code>http://localhost:9092/setup?token=&lt;TOKEN&gt;</code>
 </p>
 
 The setup page displays a **QR code** - scan it with the StealthOS app to claim ownership. You can also copy the manual code from the page.
 
-> **Security:** The setup URL includes a one-time token that is only printed to the server console. Without this token, the page returns 403 Forbidden - even if someone can reach port 9091.
+> **Security:** The setup page has its own listener (`server.setup_bind`, port 9092) and never shares the health/metrics port, which operators routinely publish. Reaching it needs a 256-bit token printed to the server console; the token buys a session cookie once and is then dropped from the URL. Five bad tokens lock the source address out for five minutes, and one hour after startup the page stops handing out the claim code entirely - restart the relay to open a new setup window.
 
-> **Headless / Raspberry Pi?** Open the setup URL from any device on your local network. The installer prints the LAN-accessible URL to the terminal.
+> **Headless / Raspberry Pi?** The installer binds the setup page to all interfaces (`0.0.0.0:9092`) and prints the LAN-accessible URL, so you can claim from a laptop. Set `setup_bind = "127.0.0.1:9092"` if that network is not one you trust.
 
-> **Remote server (SSH)?** The setup page binds to `127.0.0.1:9091` and isn't accessible remotely. Use SSH port forwarding to access it from your local browser:
+> **Remote server (SSH)?** With the default `127.0.0.1:9092` bind the page is not reachable remotely. Forward the port instead:
 > ```bash
-> ssh -L 9091:localhost:9091 user@your-server
+> ssh -L 9092:localhost:9092 user@your-server
 > ```
-> Then open `http://localhost:9091/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs - check with `sudo journalctl -u stealth-relay | grep setup`.
+> Then open `http://localhost:9092/setup?token=<TOKEN>` in your local browser. The token is printed in the server logs - check with `sudo journalctl -u stealth-relay | grep setup`. You can also skip the page entirely: the claim code itself is in the startup banner, and the app accepts it under **Enter Code Manually**.
 
 Open **StealthOS** → **Connection Pool** → **Host Remote Pool**:
 - Enter your server URL (`ws://your-ip:9090`)
@@ -113,7 +113,8 @@ sequenceDiagram
 - **ChaCha20-Poly1305 session cipher** - Authenticated encryption for all application data with automatic symmetric ratchet at 2^20 messages
 - **Ed25519 host authentication** - Domain-separated timestamp signatures verified by the relay before pool creation
 - **HMAC invitation tokens** - 256-bit tokens with HKDF derivation and constant-time comparison; one-time use, time-limited, host approval required
-- **Server claiming** - One-time 256-bit QR code visible only in Docker logs; per-IP rate-limited with progressive blocking and recovery key fallback
+- **Server claiming** - One-time 256-bit QR code visible only in the server console; per-IP rate-limited with progressive blocking and recovery key fallback
+- **Isolated setup surface** - The claim page runs on its own listener (loopback by default), never on the health/metrics port. A 256-bit token is exchanged once for an `HttpOnly` session cookie and dropped from the URL, bad tokens lock the source address out, and the page stops serving the claim code an hour after startup
 - **Host key integrity** - Identity key files use a v2 format with 4-byte magic (`STKY`), 32-byte seed, and 32-byte BLAKE2b-256 MAC; corruption or tampering is detected on load
 - **Session tokens** - 32-byte server-issued tokens required for all privileged host operations and guest `Forward` frames (constant-time comparison)
 - **Display name sanitization** - Control characters, newlines, and excessive length (>64 chars) stripped before logging or storage
@@ -376,6 +377,8 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 |---------|---------|-------------|
 | `server.ws_bind` | `0.0.0.0:9090` | Address the WebSocket listener binds to |
 | `server.metrics_bind` | `127.0.0.1:9091` | Address for the internal health/metrics HTTP endpoint |
+| `server.setup_bind` | `127.0.0.1:9092` | Address for the setup/claim page. Kept off the metrics listener because this page hands out server ownership. Setting it equal to `metrics_bind` merges the two |
+| `server.setup_window_secs` | `3600` | Seconds after startup during which the setup page serves the claim code. `0` disables the expiry |
 | `server.max_connections` | `500` | Maximum number of concurrent WebSocket connections |
 | `server.max_message_size` | `65536` | Maximum size of a single WebSocket message in bytes (64 KiB) |
 | `server.idle_timeout` | `600` | Seconds of inactivity before a connection is closed (10 min) |
@@ -428,7 +431,9 @@ Off by default. When enabled, the relay opens TCP/UDP sockets to internet destin
 | `tunnel.window_update_threshold` | `65536` | Bytes consumed before emitting an upstream `tunnel_window_update` |
 | `tunnel.denied_destination_ports` | `[25, 465, 587, 6667]` | Hard-blocked ports (SMTP / IRC by default) |
 | `tunnel.allowed_destination_cidrs` | `[]` | If non-empty, only resolved IPs in this set are allowed |
-| `tunnel.denied_destination_cidrs` | `[10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10]` | Default-deny on RFC1918 / loopback / link-local / ULA so the relay can't be turned into an SSRF gadget |
+| `tunnel.denied_destination_cidrs` | RFC1918, loopback, link-local, CGNAT, multicast/reserved, IPv6 ULA/link-local, and the IPv4-in-IPv6 transition prefixes - see `config/default.toml` | Default-deny on special-use space so the relay can't be turned into an SSRF gadget |
+
+**Destination policy:** the CIDR check runs on the *resolved* IP, not the hostname, so DNS rebinding buys nothing. Addresses are canonicalized before the check and dialled in the canonicalized form, and deny entries are matched against every spelling that reaches the same host - an IPv4 entry such as `10.0.0.0/8` also blocks `::ffff:10.0.0.1`, `::10.0.0.1`, `2002:0a00:0001::` and `64:ff9b::10.0.0.1`. Allowlist entries match exact identities only, so an unrecognised spelling fails closed rather than inheriting an allowance. DNS answers are filtered by the same policy, so the resolver cannot be used to map the network behind the relay.
 
 **Authorization gates (in order):**
 
@@ -524,6 +529,8 @@ All frames are JSON-encoded with an internally-tagged `frame_type` discriminator
 | `ws://host:9090/` | 9090 | WebSocket relay (client connections) |
 | `GET /health` | 9091 | JSON health status |
 | `GET /metrics` | 9091 | Prometheus metrics |
+| `GET /setup` | 9092 | Claim page (token or session required, time-boxed) |
+| `GET /setup/status` | 9092 | Claim status poll (same credential as `/setup`) |
 
 ## Project Structure
 
@@ -703,3 +710,9 @@ Contributions are welcome! Please ensure:
 ## Security
 
 If you discover a security vulnerability, please report it privately to [security@olib.ai](mailto:security@olib.ai) rather than opening a public issue.
+
+### Acknowledgements
+
+Thanks to the researchers who have reported issues in StealthRelay:
+
+- **Eduardo Camarillo, Security Researcher** - IPv4-mapped IPv6 bypass of the tunnel-exit CIDR policy, and exposure of the claim page on the health/metrics listener. Both fixed in 0.5.3.

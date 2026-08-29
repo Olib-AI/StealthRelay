@@ -180,7 +180,14 @@ function Initialize-Config {
 
 [server]
 ws_bind = "0.0.0.0:9090"
-metrics_bind = "0.0.0.0:9091"
+# Health and metrics describe this server, so they stay on loopback.
+metrics_bind = "127.0.0.1:9091"
+# The setup/claim page has its own listener, bound to all interfaces so you
+# can claim from another device on your network. It is protected by a 256-bit
+# token and stops serving the claim code an hour after startup. Change this to
+# 127.0.0.1:9092 if the machine sits on a network you do not trust.
+setup_bind = "0.0.0.0:9092"
+setup_window_secs = 3600
 max_connections = 500
 max_message_size = 65536
 idle_timeout = 600
@@ -329,6 +336,8 @@ function Show-SetupUrl {
     Write-Host ""
     Write-Host "  WebSocket relay:  ws://127.0.0.1:9090" -ForegroundColor White
     Write-Host "  Health check:     http://127.0.0.1:9091/health" -ForegroundColor White
+    Write-Host "  Setup page:       http://127.0.0.1:9092/setup (token required," -ForegroundColor White
+    Write-Host "                    stops serving the claim code 1h after startup)" -ForegroundColor White
     Write-Host "================================================================" -ForegroundColor White
     Write-Host ""
 

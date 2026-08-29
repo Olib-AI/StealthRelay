@@ -132,6 +132,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             Arc::new(setup::SetupState::new(
                 Arc::clone(&shared_claim),
                 env!("CARGO_PKG_VERSION"),
+                config.server.setup_window_secs,
             )),
             shared_claim,
         ))
@@ -144,17 +145,25 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         let ss = Arc::new(setup::SetupState::new(
             Arc::clone(&shared_claim),
             env!("CARGO_PKG_VERSION"),
+            config.server.setup_window_secs,
         ));
-        let token = ss.token_hex();
-        let metrics_addr = &config.server.metrics_bind;
+        let url = setup_page_url(&config.server.setup_bind, &ss.token_hex());
+        let window = config.server.setup_window_secs;
         eprintln!();
         eprintln!("  ┌─────────────────────────────────────────────────────────┐");
         eprintln!("  │  Open this URL in your browser to claim the server:     │");
         eprintln!("  │                                                         │");
-        eprintln!("  │  http://{metrics_addr}/setup?token={token}");
+        eprintln!("  │  {url}");
         eprintln!("  │                                                         │");
         eprintln!("  │  (The token protects this page from unauthorized access)│");
         eprintln!("  └─────────────────────────────────────────────────────────┘");
+        if window > 0 {
+            eprintln!(
+                "     The claim code stops being served {} minutes after startup;",
+                window / 60
+            );
+            eprintln!("     restart the relay to open a new setup window.");
+        }
         eprintln!();
         Some((ss, shared_claim))
     };
@@ -207,6 +216,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid metrics_bind address: {e}"))?;
 
+    // The setup page hands out server ownership, so it gets its own listener
+    // rather than riding along with health and metrics, which operators
+    // routinely publish to a load balancer. Pointing both at the same address
+    // is still supported; it merges them onto one listener.
+    let setup_bind: SocketAddr = config
+        .server
+        .setup_bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid setup_bind address: {e}"))?;
+    let merge_setup = setup_bind == metrics_bind;
+
     // Capture the setup URL before moving setup_state_arc into the spawned task.
     let setup_url = {
         let is_unclaimed = !shared_claim
@@ -214,10 +234,17 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_claimed();
         if is_unclaimed {
-            Some(format!(
-                "http://{}/setup?token={}",
-                metrics_bind,
-                setup_state_arc.token_hex()
+            if !setup_bind.ip().is_loopback() {
+                warn!(
+                    bind = %setup_bind,
+                    "setup page is bound to a non-loopback address: anyone who can \
+                     reach it and obtain the setup token can claim this server. \
+                     Prefer a loopback bind reached over `ssh -L` or `fly proxy`."
+                );
+            }
+            Some(setup_page_url(
+                &config.server.setup_bind,
+                &setup_state_arc.token_hex(),
             ))
         } else {
             None
@@ -226,11 +253,13 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // Keep a clone for the message handler so it can pass the recovery key.
     let setup_state_for_handler = Arc::clone(&setup_state_arc);
+    let setup_state_for_listener = Arc::clone(&setup_state_arc);
 
     let health_handle = tokio::spawn(async move {
-        let health_app = health_router(health_state);
-        let setup_app = setup::setup_router(setup_state_arc);
-        let app = health_app.merge(setup_app);
+        let mut app = health_router(health_state);
+        if merge_setup {
+            app = app.merge(setup::setup_router(setup_state_arc));
+        }
         let listener = match TcpListener::bind(metrics_bind).await {
             Ok(l) => l,
             Err(e) => {
@@ -238,12 +267,50 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 return;
             }
         };
-        info!(bind = %metrics_bind, "health/metrics/setup endpoint listening");
+        if merge_setup {
+            warn!(
+                bind = %metrics_bind,
+                "setup_bind equals metrics_bind: the claim page is served on the \
+                 health/metrics listener. Split them if that listener is published."
+            );
+        }
+        info!(bind = %metrics_bind, merged_setup = merge_setup, "health/metrics endpoint listening");
 
-        if let Err(e) = axum::serve(listener, app).await {
+        // Connection info is what the setup routes throttle bad tokens on.
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             error!("health server error: {e}");
         }
     });
+
+    let setup_handle = if merge_setup {
+        None
+    } else {
+        Some(tokio::spawn(async move {
+            let app = setup::setup_router(setup_state_for_listener);
+            let listener = match TcpListener::bind(setup_bind).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(bind = %setup_bind, "failed to bind setup listener: {e}");
+                    return;
+                }
+            };
+            info!(bind = %setup_bind, "setup endpoint listening");
+
+            if let Err(e) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
+                error!("setup server error: {e}");
+            }
+        }))
+    };
 
     // Auto-open browser for the setup page (non-Docker native installs only).
     if let Some(ref url) = setup_url {
@@ -549,6 +616,9 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     health_handle.abort();
+    if let Some(handle) = setup_handle {
+        handle.abort();
+    }
     housekeeping_handle.abort();
     eviction_handle.abort();
 
@@ -559,6 +629,25 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 /// Format the first 8 bytes of a fingerprint as hex.
 ///
 /// Uses a stack-allocated buffer to avoid per-byte `format!` allocations.
+/// Build the URL an operator opens to claim the server.
+///
+/// A wildcard bind (`0.0.0.0` / `::`) is rewritten to loopback: the operator
+/// is being told where to point *their* browser, and loopback is the address
+/// that works whether they are on the box or forwarding a port to it.
+fn setup_page_url(setup_bind: &str, token: &str) -> String {
+    let host = match setup_bind.parse::<SocketAddr>() {
+        Ok(addr) if addr.ip().is_unspecified() => {
+            if addr.is_ipv6() {
+                format!("[::1]:{}", addr.port())
+            } else {
+                format!("127.0.0.1:{}", addr.port())
+            }
+        }
+        _ => setup_bind.to_owned(),
+    };
+    format!("http://{host}/setup?token={token}")
+}
+
 fn hex_short(bytes: &[u8; 32]) -> String {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
     let mut buf = [0u8; 16];

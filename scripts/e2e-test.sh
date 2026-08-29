@@ -324,7 +324,31 @@ else
     pass "unknown endpoints return $HTTP_CODE (not 200)"
 fi
 
-# T4.4: Metrics port not on public interface
+# T4.4: Setup/claim page must not be served on the metrics port.
+# The claim page reveals the claim secret; the metrics port is the one
+# operators publish to load balancers and monitoring networks.
+SETUP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${HEALTH_URL%/health}/setup" 2>/dev/null || echo "000")
+if [[ "$SETUP_CODE" == "404" ]]; then
+    pass "setup page not served on the metrics port"
+elif [[ "$SETUP_CODE" == "000" ]]; then
+    skip "setup page separation test" "connection failed"
+else
+    fail "setup page must not share the metrics listener" "got HTTP $SETUP_CODE"
+fi
+
+# T4.5: Setup page requires a token even where it is served.
+SETUP_URL_BASE="${SETUP_URL_BASE:-http://127.0.0.1:9092}"
+SETUP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${SETUP_URL_BASE}/setup" 2>/dev/null || echo "000")
+if [[ "$SETUP_CODE" == "403" || "$SETUP_CODE" == "410" || "$SETUP_CODE" == "200" ]]; then
+    # 200 only happens once the server is claimed (benign "Server Claimed" page).
+    pass "setup page refuses unauthenticated access (HTTP $SETUP_CODE)"
+elif [[ "$SETUP_CODE" == "000" ]]; then
+    skip "setup page auth test" "setup listener not reachable"
+else
+    fail "setup page should refuse unauthenticated access" "got HTTP $SETUP_CODE"
+fi
+
+# T4.6: Metrics port not on public interface
 if [[ "$METRICS_URL" == *"127.0.0.1"* || "$METRICS_URL" == *"localhost"* ]]; then
     pass "metrics bound to localhost"
 else

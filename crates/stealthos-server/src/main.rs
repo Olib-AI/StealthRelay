@@ -10,7 +10,11 @@
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::missing_errors_doc,
+    // The frame handlers share one signature so the dispatcher can treat them
+    // alike, whether or not a given handler has anything to await. Rust 1.98
+    // split the second name out of the first; both are needed to keep that.
     clippy::unused_async,
+    clippy::unused_async_trait_impl,
     clippy::too_many_lines,
     clippy::significant_drop_tightening
 )]

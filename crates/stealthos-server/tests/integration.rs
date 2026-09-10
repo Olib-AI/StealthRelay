@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use rand_core::Rng as _;
+
 use stealthos_core::PoolRegistry;
 use stealthos_core::pool::PoolPeer;
 use stealthos_core::ratelimit::{ConnectionThrottler, IpRateLimiter, RateLimitConfig};

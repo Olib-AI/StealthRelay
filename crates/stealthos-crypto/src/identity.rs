@@ -21,8 +21,7 @@ use std::path::Path;
 
 use ed25519_dalek::{Signer, Verifier};
 use hkdf::Hkdf;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::Rng;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -164,7 +163,7 @@ impl HostIdentity {
     /// - The seed is the single secret from which all keys are derived.
     pub fn generate() -> Self {
         let mut seed_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut seed_bytes);
+        rand::rng().fill_bytes(&mut seed_bytes);
         let identity = Self::from_seed(seed_bytes);
         seed_bytes.zeroize();
         identity
@@ -313,9 +312,9 @@ impl HostIdentity {
         use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        rand::rng().fill_bytes(&mut salt);
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
 
         let key = pbkdf2_derive(passphrase, &salt, Self::PBKDF2_ITERATIONS);
         let cipher = ChaCha20Poly1305::new((&key).into());

@@ -30,7 +30,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::{Router, routing::get};
-use rand::RngCore;
+use rand_core::Rng;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
@@ -187,9 +187,9 @@ impl SetupState {
         window_secs: u64,
     ) -> Self {
         let mut setup_token = [0u8; SETUP_TOKEN_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut setup_token);
+        rand::rng().fill_bytes(&mut setup_token);
         let mut session_token = [0u8; SETUP_TOKEN_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut session_token);
+        rand::rng().fill_bytes(&mut session_token);
         Self {
             setup_token,
             session_token,

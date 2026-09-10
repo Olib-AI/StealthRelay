@@ -31,6 +31,7 @@ axum.workspace = true
 dashmap.workspace = true
 bytes.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 base64ct.workspace = true
 subtle.workspace = true
 zeroize.workspace = true

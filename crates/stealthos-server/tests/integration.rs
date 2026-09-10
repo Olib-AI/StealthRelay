@@ -273,7 +273,7 @@ async fn invitation_full_flow() {
 
     // Create a join proof.
     let mut nonce = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
 
     let proof = token.create_join_proof(&pool_id, &nonce);
 

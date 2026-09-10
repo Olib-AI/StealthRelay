@@ -32,7 +32,6 @@ use std::fmt;
 
 use ed25519_dalek::Verifier;
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
 use sha2::Sha256;
 use zeroize::Zeroize;
 
@@ -255,7 +254,7 @@ impl HandshakeInitiator {
     /// - Uses `StaticSecret` to enable both `es` and `ee` DH operations.
     pub fn new(peer_identity: PeerIdentity, server_static_pk: [u8; 32], pool_id: Vec<u8>) -> Self {
         let server_static_pk = x25519_dalek::PublicKey::from(server_static_pk);
-        let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+        let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rand::rng());
         let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
         Self {
             peer_identity,
@@ -499,7 +498,7 @@ impl<'a> HandshakeResponder<'a> {
             .map_err(|_| CryptoError::handshake("client signature verification failed"))?;
 
         // Generate server ephemeral keypair using StaticSecret for two DH operations.
-        let server_eph_secret = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+        let server_eph_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rand::rng());
         let server_eph_public = x25519_dalek::PublicKey::from(&server_eph_secret);
 
         // Compute shared_es = X25519(server_static_sk, client_ephemeral_pk)

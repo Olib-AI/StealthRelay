@@ -7,8 +7,7 @@
 use std::fmt;
 
 use ed25519_dalek::{Signer, Verifier};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::Rng;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -82,7 +81,7 @@ impl PeerIdentity {
     /// - Uses `OsRng` for key generation.
     pub fn generate() -> Self {
         let mut seed = [0u8; 32];
-        OsRng.fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
         let identity = Self {
             _seed: PeerSeed(seed),

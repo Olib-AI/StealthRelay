@@ -25,8 +25,7 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use blake2::digest::FixedOutput;
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::Rng;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -247,10 +246,10 @@ impl InvitationToken {
         max_uses: u8,
     ) -> Self {
         let mut token_id = [0u8; 16];
-        OsRng.fill_bytes(&mut token_id);
+        rand::rng().fill_bytes(&mut token_id);
 
         let mut token_secret_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut token_secret_bytes);
+        rand::rng().fill_bytes(&mut token_secret_bytes);
 
         let expires_at = chrono::Utc::now().timestamp() + ttl_secs;
 
@@ -554,7 +553,7 @@ mod tests {
         );
 
         let mut nonce = [0u8; 32];
-        OsRng.fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
 
         let proof = token.create_join_proof(&pool_id, &nonce);
         let vk = token.verification_key();
@@ -574,7 +573,7 @@ mod tests {
         );
 
         let mut nonce = [0u8; 32];
-        OsRng.fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
 
         let proof = token.create_join_proof(&pool_id, &nonce);
         let wrong_vk = [0xFFu8; 32];
@@ -692,7 +691,7 @@ mod tests {
         );
 
         let mut nonce = [0u8; 32];
-        OsRng.fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
 
         let proof = token.create_join_proof(&pool_id, &nonce);
         let vk = token.verification_key();

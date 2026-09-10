@@ -19,8 +19,7 @@
 //! - The `PoW` is memory-hard in the sense that `BLAKE2b` uses 1KB state,
 //!   but is primarily CPU-bound.
 
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand_core::Rng;
 
 use crate::error::{CryptoError, Result};
 
@@ -90,7 +89,7 @@ impl PowChallenge {
     /// - Timestamp is included for freshness verification.
     pub fn generate(difficulty: u8) -> Self {
         let mut challenge = [0u8; 32];
-        OsRng.fill_bytes(&mut challenge);
+        rand::rng().fill_bytes(&mut challenge);
 
         Self {
             challenge,

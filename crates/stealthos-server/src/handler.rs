@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use base64ct::{Base64, Encoding as _};
 use dashmap::DashMap;
-use rand::RngCore;
+use rand_core::Rng;
 use stealthos_core::pool::PoolPeer;
 use stealthos_core::ratelimit::{ConnectionThrottler, IpRateLimiter};
 use stealthos_core::router::Router;
@@ -965,7 +965,7 @@ impl MessageHandler {
             // operator chose to keep it, reusing it across sessions would
             // break the per-connection scoping guarantee.
             let mut token_bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+            rand::rng().fill_bytes(&mut token_bytes);
             let new_session_token = Base64::encode_string(&token_bytes);
             self.host_session_tokens
                 .insert(core_pool_id, new_session_token.clone());
@@ -1083,7 +1083,7 @@ impl MessageHandler {
 
         // Generate a random 32-byte session token, base64-encoded.
         let mut token_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+        rand::rng().fill_bytes(&mut token_bytes);
         let session_token = Base64::encode_string(&token_bytes);
 
         // Store the session token so it can be validated on subsequent
@@ -1935,7 +1935,7 @@ impl MessageHandler {
         //     added to pool, connection registered, peer_joined
         //     broadcast.
         let mut token_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+        rand::rng().fill_bytes(&mut token_bytes);
         let peer_session_token = Base64::encode_string(&token_bytes);
 
         let pool_peer = PoolPeer {
@@ -2078,7 +2078,7 @@ impl MessageHandler {
             // Generate peer_id and session token for the new peer.
             let peer_id = PeerId(client_public_key.clone());
             let mut token_bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut token_bytes);
+            rand::rng().fill_bytes(&mut token_bytes);
             let peer_session_token = Base64::encode_string(&token_bytes);
 
             // SECURITY: Decode client public key for storage. If the key is
@@ -2912,7 +2912,7 @@ impl MessageHandler {
     /// frames on a different WebSocket within the timestamp window.
     pub fn handle_new_connection(&self, connection_id: ConnectionId) {
         let mut nonce_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Base64::encode_string(&nonce_bytes);
 
         self.connection_nonces.insert(connection_id, nonce.clone());
@@ -4272,7 +4272,7 @@ mod tests {
 
         // Fresh 32-byte nonce, ASCII-base64-encoded for the wire form.
         let mut nonce_raw = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_raw);
+        rand::rng().fill_bytes(&mut nonce_raw);
         let nonce_b64 = Base64::encode_string(&nonce_raw);
 
         // Build the transcript and sign it.
@@ -4582,7 +4582,7 @@ mod tests {
 
         // Build a transcript with the real pubkey + real pool ID, signed by decoy.
         let mut nonce_raw = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_raw);
+        rand::rng().fill_bytes(&mut nonce_raw);
         let nonce_b64 = Base64::encode_string(&nonce_raw);
         let mut transcript = Vec::new();
         transcript.extend_from_slice(MEMBER_REJOIN_PREFIX);

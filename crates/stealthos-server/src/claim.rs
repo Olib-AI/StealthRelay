@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rand::RngCore;
+use rand_core::Rng;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::warn;
@@ -166,7 +166,7 @@ impl ClaimState {
         }
 
         let mut claim_secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut claim_secret);
+        rand::rng().fill_bytes(&mut claim_secret);
 
         Self::Unclaimed {
             claim_secret,
@@ -215,7 +215,7 @@ impl ClaimState {
 
                 // Generate a recovery key for the owner (shown ONCE, never stored raw).
                 let mut recovery_key = [0u8; 32];
-                rand::rngs::OsRng.fill_bytes(&mut recovery_key);
+                rand::rng().fill_bytes(&mut recovery_key);
                 let recovery_key_hash = hash_recovery_key(&recovery_key);
 
                 let binding = HostBinding {
@@ -281,7 +281,7 @@ impl ClaimState {
 
                 // Generate a NEW recovery key (old one is now invalid).
                 let mut new_recovery_key = [0u8; 32];
-                rand::rngs::OsRng.fill_bytes(&mut new_recovery_key);
+                rand::rng().fill_bytes(&mut new_recovery_key);
                 let new_recovery_hash = hash_recovery_key(&new_recovery_key);
 
                 let new_binding = HostBinding {

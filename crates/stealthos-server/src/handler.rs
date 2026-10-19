@@ -4063,7 +4063,7 @@ mod tests {
 
         h.handler.evict_host_offline_pools(
             std::time::Duration::from_millis(1),    // ttl
-            std::time::Duration::from_secs(86_400), // empty grace large -> ttl path
+            std::time::Duration::from_hours(24), // empty grace large -> ttl path
         );
 
         assert!(
@@ -4106,7 +4106,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         h.handler.evict_host_offline_pools(
-            std::time::Duration::from_secs(86_400), // host_offline_ttl large
+            std::time::Duration::from_hours(24), // host_offline_ttl large
             std::time::Duration::from_millis(1),    // empty_grace tiny -> empty path
         );
 

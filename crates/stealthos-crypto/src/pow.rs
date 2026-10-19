@@ -1,8 +1,10 @@
 //! Proof-of-work challenge system for rate limiting.
 //!
-//! Uses BLAKE2b-256 hashcash: find a `solution` such that
-//! `BLAKE2b-256("STEALTH_POW" || challenge || solution)` has at least
-//! `difficulty` leading zero bits.
+//! Uses SHA-256 hashcash: find an 8-byte `solution` such that
+//! `SHA-256("STEALTH_POW" || challenge || solution)` has at least
+//! `difficulty` leading zero bits. The client solver (`ProofOfWork` in the
+//! iOS `ConnectionPool` package) uses the same hash, prefix and big-endian
+//! counter encoding, and searches counters upward from 0.
 //!
 //! # Difficulty Levels
 //!
@@ -12,12 +14,16 @@
 //! | 22 bits    | ~4M             | ~800ms              |
 //! | 26 bits    | ~67M            | ~13s                |
 //!
+//! [`MAX_DIFFICULTY`] (26) is part of the wire contract: `StealthOS` 1.5.0+
+//! clients refuse any challenge above it (and any challenge that is not
+//! exactly 32 bytes), and give up after a 90 second budget, so a server
+//! must never issue a harder challenge.
+//!
 //! # Security Properties
 //!
 //! - The challenge includes a timestamp to prevent pre-computation.
 //! - Challenges should be verified within a time window.
-//! - The `PoW` is memory-hard in the sense that `BLAKE2b` uses 1KB state,
-//!   but is primarily CPU-bound.
+//! - The `PoW` is CPU-bound only; SHA-256 is not memory-hard.
 
 use rand_core::Rng;
 
@@ -43,6 +49,10 @@ pub struct PowSolution {
 
 /// Domain separator for `PoW` hashing.
 const POW_PREFIX: &[u8] = b"STEALTH_POW";
+
+/// Highest difficulty a server may issue. Clients (`StealthOS` 1.5.0+) refuse
+/// challenges above this, so raising it is a breaking wire change.
+pub const MAX_DIFFICULTY: u8 = 26;
 
 /// Compute the `PoW` hash: `SHA-256(POW_PREFIX || challenge || solution)`.
 ///
@@ -81,7 +91,8 @@ impl PowChallenge {
     ///
     /// # Arguments
     ///
-    /// - `difficulty`: Number of leading zero bits required (typically 18-26).
+    /// - `difficulty`: Number of leading zero bits required (typically 18-26),
+    ///   clamped to [`MAX_DIFFICULTY`].
     ///
     /// # Security Properties
     ///
@@ -93,7 +104,8 @@ impl PowChallenge {
 
         Self {
             challenge,
-            difficulty,
+            // Clients refuse anything harder; never issue an unsolvable challenge.
+            difficulty: difficulty.min(MAX_DIFFICULTY),
             timestamp: chrono::Utc::now().timestamp(),
         }
     }
@@ -215,6 +227,32 @@ mod tests {
         if result.is_err() {
             assert!(matches!(result, Err(CryptoError::PowFailed)));
         }
+    }
+
+    #[test]
+    fn generate_clamps_to_max_difficulty() {
+        assert_eq!(PowChallenge::generate(255).difficulty, MAX_DIFFICULTY);
+        assert_eq!(PowChallenge::generate(MAX_DIFFICULTY).difficulty, MAX_DIFFICULTY);
+        assert_eq!(PowChallenge::generate(8).difficulty, 8);
+    }
+
+    #[test]
+    fn recommended_difficulty_never_exceeds_client_cap() {
+        for rpm in [0, 1, 50, 51, 200, 201, 1_000, u32::MAX] {
+            assert!(recommended_difficulty(rpm) <= MAX_DIFFICULTY);
+        }
+    }
+
+    #[test]
+    fn pow_hash_is_sha256_of_prefix_challenge_solution() {
+        use sha2::{Digest, Sha256};
+        let challenge = [0x42u8; 32];
+        let solution = 516u64.to_be_bytes();
+        let mut expected = Sha256::new();
+        expected.update(b"STEALTH_POW");
+        expected.update(challenge);
+        expected.update(solution);
+        assert_eq!(pow_hash(&challenge, solution).as_slice(), expected.finalize().as_slice());
     }
 
     #[test]

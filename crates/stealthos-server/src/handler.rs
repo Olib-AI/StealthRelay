@@ -75,6 +75,7 @@ const PENDING_JOIN_TTL_SECS: u64 = 60;
 /// Default `PoW` difficulty (leading zero bits). ~50ms on a single core.
 /// See `stealthos_crypto::pow::recommended_difficulty` for adaptive tiers.
 const POW_DEFAULT_DIFFICULTY: u8 = 18;
+const _: () = assert!(POW_DEFAULT_DIFFICULTY <= stealthos_crypto::pow::MAX_DIFFICULTY);
 
 /// Maximum age of a `PoW` challenge before it is considered stale (120 seconds).
 const POW_CHALLENGE_MAX_AGE_SECS: i64 = 120;

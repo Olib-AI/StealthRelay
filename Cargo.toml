@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
@@ -23,7 +23,6 @@ tokio = { version = "1.52", features = ["full"] }
 # TLS
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
-rustls-pemfile = "2"
 
 # WebSocket
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

@@ -232,7 +232,10 @@ mod tests {
     #[test]
     fn generate_clamps_to_max_difficulty() {
         assert_eq!(PowChallenge::generate(255).difficulty, MAX_DIFFICULTY);
-        assert_eq!(PowChallenge::generate(MAX_DIFFICULTY).difficulty, MAX_DIFFICULTY);
+        assert_eq!(
+            PowChallenge::generate(MAX_DIFFICULTY).difficulty,
+            MAX_DIFFICULTY
+        );
         assert_eq!(PowChallenge::generate(8).difficulty, 8);
     }
 
@@ -252,7 +255,10 @@ mod tests {
         expected.update(b"STEALTH_POW");
         expected.update(challenge);
         expected.update(solution);
-        assert_eq!(pow_hash(&challenge, solution).as_slice(), expected.finalize().as_slice());
+        assert_eq!(
+            pow_hash(&challenge, solution).as_slice(),
+            expected.finalize().as_slice()
+        );
     }
 
     #[test]

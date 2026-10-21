@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustls::ServerConfig;
+use rustls::pki_types::pem::{Error as PemError, PemObject};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -96,14 +98,15 @@ impl WebSocketListener {
             return Ok(None);
         };
 
-        // Read and parse certificate chain (PEM).
-        let cert_file = std::fs::File::open(cert_path).map_err(|e| {
-            TransportError::Tls(format!(
-                "cannot open cert file {}: {e}",
-                cert_path.display()
-            ))
-        })?;
-        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        // Read and parse certificate chain (PEM), via rustls-pki-types (rustls-pemfile is
+        // unmaintained, RUSTSEC-2025-0134).
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+            .map_err(|e| {
+                TransportError::Tls(format!(
+                    "cannot open cert file {}: {e}",
+                    cert_path.display()
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| {
                 TransportError::Tls(format!(
@@ -119,20 +122,16 @@ impl WebSocketListener {
             )));
         }
 
-        // Read and parse private key (PEM). Accept PKCS#8 or RSA.
-        let key_file = std::fs::File::open(key_path).map_err(|e| {
-            TransportError::Tls(format!("cannot open key file {}: {e}", key_path.display()))
-        })?;
-        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
-            .map_err(|e| {
-                TransportError::Tls(format!(
-                    "cannot parse PEM key from {}: {e}",
-                    key_path.display()
-                ))
-            })?
-            .ok_or_else(|| {
+        // Read and parse private key (PEM). Accepts PKCS#8, PKCS#1 (RSA) or SEC1.
+        let key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| match e {
+            PemError::NoItemsFound => {
                 TransportError::Tls(format!("no private key found in {}", key_path.display()))
-            })?;
+            }
+            e => TransportError::Tls(format!(
+                "cannot parse PEM key from {}: {e}",
+                key_path.display()
+            )),
+        })?;
 
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
@@ -442,4 +441,80 @@ async fn run_actor<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         heartbeat_timeout: config.heartbeat_timeout,
     });
     actor.run(ws_stream).await;
+}
+
+#[cfg(test)]
+mod tls_loading_tests {
+    use std::path::PathBuf;
+
+    use super::WebSocketListener;
+    use crate::config::TransportConfig;
+
+    /// Throwaway self-signed certificates and keys (CN=relay.test), test only.
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls")
+            .join(name)
+    }
+
+    fn config(cert: Option<&str>, key: Option<&str>) -> TransportConfig {
+        TransportConfig {
+            tls_cert_path: cert.map(fixture),
+            tls_key_path: key.map(fixture),
+            ..TransportConfig::default()
+        }
+    }
+
+    #[test]
+    fn loads_pkcs8_sec1_and_pkcs1_keys() {
+        for (cert, key) in [
+            ("ec-cert.pem", "ec-pkcs8.pem"),
+            ("ec-cert.pem", "ec-sec1.pem"),
+            ("rsa-cert.pem", "rsa-pkcs1.pem"),
+        ] {
+            let acceptor = WebSocketListener::build_tls_acceptor(&config(Some(cert), Some(key)));
+            assert!(matches!(acceptor, Ok(Some(_))), "{cert} + {key}");
+        }
+    }
+
+    #[test]
+    fn no_paths_means_plain_websocket() {
+        assert!(matches!(
+            WebSocketListener::build_tls_acceptor(&config(None, None)),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn errors_are_reported() {
+        let cases = [
+            (config(Some("ec-cert.pem"), None), "both tls_cert_path"),
+            (
+                config(Some("missing.pem"), Some("ec-pkcs8.pem")),
+                "cannot open cert file",
+            ),
+            (
+                config(Some("ec-pkcs8.pem"), Some("ec-pkcs8.pem")),
+                "no certificates found",
+            ),
+            (
+                config(Some("ec-cert.pem"), Some("ec-cert.pem")),
+                "no private key found",
+            ),
+            (
+                config(Some("ec-cert.pem"), Some("rsa-pkcs1.pem")),
+                "rustls config error",
+            ),
+        ];
+        for (config, expected) in cases {
+            let message = match WebSocketListener::build_tls_acceptor(&config) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected an error containing {expected:?}"),
+            };
+            assert!(
+                message.contains(expected),
+                "{message:?} should contain {expected:?}"
+            );
+        }
+    }
 }

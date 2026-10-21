@@ -12,7 +12,6 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 futures-util = "0.3"
 tracing.workspace = true
 serde.workspace = true

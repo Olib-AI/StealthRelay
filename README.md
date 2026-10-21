@@ -426,11 +426,11 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 
 ### Tunnel Exit (VPN-like)
 
-Off by default. When enabled, the relay opens TCP/UDP sockets to internet destinations on behalf of authenticated pool members and bridges bytes back over their existing WebSocket. Permission is two-level: server admin enables the gateway here, then each pool host opts in for *their* members via the in-app `Allow Members to Use Relay Exit` toggle (the pool host themselves can always use the relay once `enabled = true` - they don't need to grant themselves permission).
+On by default. The relay opens TCP/UDP sockets to internet destinations on behalf of authenticated pool members and bridges bytes back over their existing WebSocket. Permission is two-level: the gateway switch here (on unless the admin turns it off), then each pool host opts in for *their* members via the in-app `Allow Members to Use Relay Exit` toggle (the pool host themselves can always use the relay once `enabled = true` - they don't need to grant themselves permission).
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `tunnel.enabled` | `false` | Master switch. When `false`, every `tunnel_*` frame is rejected with `policy_denied`. Toggle via TOML or `STEALTH_TUNNEL__ENABLED=true` |
+| `tunnel.enabled` | `true` | Master switch. When `false`, every `tunnel_*` frame is rejected with `policy_denied`. Toggle via TOML or `STEALTH_TUNNEL__ENABLED=false` |
 | `tunnel.max_streams_per_connection` | `64` | Per-WebSocket cap on concurrent tunnel streams |
 | `tunnel.max_streams_global` | `4096` | Server-wide cap |
 | `tunnel.connect_timeout_secs` | `15` | Per-stream upstream connect timeout |

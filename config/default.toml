@@ -145,9 +145,10 @@ block_duration_secs = 600
 #   2. `Pool.tunnel_exit_enabled`                — per-pool host approval.
 #   3. Connection authenticated to that pool      — host_auth or join_accepted.
 #
-# All three must hold before a `tunnel_open` is accepted. Default off.
+# All three must hold before a `tunnel_open` is accepted. Default on: only the
+# claimed host and members the host allows can use it. Set false to disable.
 [tunnel]
-enabled = false
+enabled = true
 
 # Maximum simultaneously-open tunnel streams per WebSocket connection.
 max_streams_per_connection = 64

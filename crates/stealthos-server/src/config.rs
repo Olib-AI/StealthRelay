@@ -146,11 +146,13 @@ pub struct LogSection {
 /// 2. Per-pool host approval: `Pool::tunnel_exit_enabled()`.
 /// 3. The connection has completed `host_auth` or `join_accepted`.
 ///
-/// The default configuration has `enabled = false` so the feature is opt-in.
+/// The gateway is on by default: only the claimed host, and members the host
+/// explicitly allows, can use it. Set `enabled = false` to turn it off.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelSection {
-    /// Server-wide kill switch. Defaults to `false` so the feature is opt-in.
-    #[serde(default)]
+    /// Server-wide kill switch. Defaults to `true`; the per-pool host approval
+    /// and connection authentication still gate every stream.
+    #[serde(default = "default_tunnel_enabled")]
     pub enabled: bool,
     /// Maximum number of simultaneously-open tunnel streams per WebSocket
     /// connection.
@@ -269,7 +271,11 @@ const fn default_connections_per_minute() -> u32 {
     30
 }
 const fn default_messages_per_second() -> u32 {
-    60
+    // Real-time call media rides the relay; 60 throttled calls (see default.toml).
+    500
+}
+const fn default_tunnel_enabled() -> bool {
+    true
 }
 const fn default_max_failed_auth() -> u32 {
     5
@@ -400,7 +406,7 @@ impl Default for RateLimitSection {
 impl Default for TunnelSection {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_tunnel_enabled(),
             max_streams_per_connection: default_tunnel_max_streams_per_connection(),
             max_streams_global: default_tunnel_max_streams_global(),
             connect_timeout_secs: default_tunnel_connect_timeout_secs(),
@@ -687,6 +693,22 @@ mod tests {
         // Other fields should be defaults.
         assert_eq!(cfg.server.max_connections, 500);
         assert_eq!(cfg.pool.max_pools, 100);
+    }
+
+    #[test]
+    fn tunnel_exit_on_by_default_and_can_be_turned_off() {
+        // No [tunnel] section (configs written by older installers): on.
+        let cfg: ServerConfig = toml::from_str("[server]\nws_bind = \"0.0.0.0:443\"\n").unwrap();
+        assert!(cfg.tunnel.enabled);
+        // A [tunnel] section without `enabled`: on.
+        let cfg: ServerConfig = toml::from_str("[tunnel]\nmax_streams_global = 8\n").unwrap();
+        assert!(cfg.tunnel.enabled);
+        assert!(TunnelSection::default().enabled);
+        // Explicitly off.
+        let cfg: ServerConfig = toml::from_str("[tunnel]\nenabled = false\n").unwrap();
+        assert!(!cfg.tunnel.enabled);
+        // Call media needs the higher message rate.
+        assert_eq!(RateLimitSection::default().messages_per_second, 500);
     }
 
     #[test]

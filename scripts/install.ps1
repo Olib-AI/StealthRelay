@@ -30,6 +30,9 @@
 .PARAMETER SetupBind
     Bind the claim page to a specific address (default "127.0.0.1:9092").
 
+.PARAMETER NoTunnel
+    Turn the relay tunnel exit off (on by default).
+
 .EXAMPLE
     # Install latest version
     .\install.ps1
@@ -51,7 +54,8 @@ param(
     [switch]$NoService,
     [switch]$NoBrowser,
     [switch]$SetupLan,
-    [string]$SetupBind = ""
+    [string]$SetupBind = "",
+    [switch]$NoTunnel
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,6 +108,8 @@ function Resolve-Version {
             Write-Fatal "Failed to fetch latest version: $_"
         }
     }
+    # Release tags are vX.Y.Z; accept 0.5.5 as well as v0.5.5.
+    if (-not $Version.StartsWith("v")) { $script:Version = "v$Version" }
     Write-Success "Version: $Version"
 }
 
@@ -255,9 +261,15 @@ format = "pretty"
 
 [rate_limit]
 connections_per_minute = 30
-messages_per_second = 60
+messages_per_second = 500
 max_failed_auth = 5
 block_duration_secs = 600
+
+# Relay tunnel exit ("VPN-like"): the claimed host, and members the host allows
+# in the app, can route traffic through this server. Never to private networks,
+# loopback or mail ports (see the README). -NoTunnel at install turns it off.
+[tunnel]
+enabled = $(if ($NoTunnel) { "false" } else { "true" })
 "@
 
     Set-Content -Path $ConfigPath -Value $configContent -Encoding UTF8

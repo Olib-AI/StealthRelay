@@ -16,6 +16,7 @@
 #   --update             Update binary only, preserve keys and config
 #   --no-service         Don't create or enable a system service
 #   --no-browser         Don't auto-open browser after install
+#   --no-tunnel          Turn the relay tunnel exit off (on by default)
 #   --help               Show this help message
 
 set -euo pipefail
@@ -49,6 +50,7 @@ UNINSTALL=false
 UPDATE=false
 NO_SERVICE=false
 NO_BROWSER=false
+TUNNEL_ENABLED=true
 # Empty means "not chosen yet" -- choose_setup_bind() asks, or defaults to
 # loopback. The claim page hands out ownership of this server.
 SETUP_BIND=""
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --update)    UPDATE=true; shift ;;
         --no-service) NO_SERVICE=true; shift ;;
         --no-browser) NO_BROWSER=true; shift ;;
+        --no-tunnel)  TUNNEL_ENABLED=false; shift ;;
         --setup-lan)   SETUP_BIND="0.0.0.0:9092"; shift ;;
         --setup-local) SETUP_BIND="127.0.0.1:9092"; shift ;;
         --setup-bind)  SETUP_BIND="$2"; shift 2 ;;
@@ -74,6 +77,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --update             Update binary, preserve keys and config"
             echo "  --no-service         Don't create/enable system service"
             echo "  --no-browser         Don't auto-open browser after install"
+            echo "  --no-tunnel          Turn the relay tunnel exit off (on by default)"
             echo "  --setup-lan          Serve the claim page to your local network"
             echo "                       (0.0.0.0:9092). Trusted networks only: whoever"
             echo "                       reaches the page and gets the token can claim"
@@ -157,6 +161,11 @@ resolve_version() {
             || fatal "Failed to fetch latest version. Check your internet connection."
         [ -n "$VERSION" ] || fatal "Could not determine latest version."
     fi
+    # Release tags are vX.Y.Z; accept 0.5.5 as well as v0.5.5.
+    case "$VERSION" in
+        v*) ;;
+        *)  VERSION="v${VERSION}" ;;
+    esac
     success "Version: $VERSION"
 }
 
@@ -321,9 +330,15 @@ format = "pretty"
 
 [rate_limit]
 connections_per_minute = 30
-messages_per_second = 60
+messages_per_second = 500
 max_failed_auth = 5
 block_duration_secs = 600
+
+# Relay tunnel exit ("VPN-like"): the claimed host, and members the host allows
+# in the app, can route traffic through this server. Never to private networks,
+# loopback or mail ports (see the README). --no-tunnel at install turns it off.
+[tunnel]
+enabled = ${TUNNEL_ENABLED}
 TOML
 
     $SUDO_CMD chmod 644 "$CONFIG_PATH"

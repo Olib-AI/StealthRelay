@@ -14,7 +14,8 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build the release binary
 # ---------------------------------------------------------------------------
-FROM rust:1.99-bookworm AS builder
+# Base images pinned by tag and digest; refresh both together.
+FROM rust:1.99-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS builder
 
 # Install build dependencies for aws-lc-rs (used by rustls).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,7 +43,7 @@ RUN if [ -n "$STEALTH_VERSION" ]; then \
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal Debian runtime
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 LABEL org.opencontainers.image.source="https://github.com/Olib-AI/StealthRelay"
 LABEL org.opencontainers.image.description="Zero-knowledge WebSocket relay server for E2E encrypted peer connections"

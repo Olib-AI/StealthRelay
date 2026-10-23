@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "stealthos-core"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "base64ct",
  "bytes",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "stealthos-crypto"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "aes-gcm",
  "base64ct",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "stealthos-observability"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "axum",
  "serde",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "stealthos-server"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "stealthos-transport"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "bytes",
  "chrono",

@@ -176,20 +176,25 @@ impl PoolRegistry {
             .collect()
     }
 
-    /// Remove pools that have had no guest peers for longer than `max_idle`.
+    /// Remove pools nobody is in and nobody can come back to.
     ///
-    /// A pool is considered idle if it has zero guest peers and has existed
-    /// for longer than `max_idle`. The host connection is cleaned up as well.
+    /// A pool is considered idle if its host is online, it has zero guest peers and has
+    /// existed for longer than `max_idle`. The host connection is cleaned up as well.
     /// One with a live invitation stays: whoever holds that link would be told it is
     /// not valid while it says it has minutes left, and neither they nor the host would
-    /// know why.
+    /// know why. So does one with an approved member: they rejoin on that approval, which
+    /// ends with the pool. A pool whose host is offline is not for this sweep:
+    /// `evict_host_offline_pools` gives it its own grace, so that a network blip that takes
+    /// everyone down at once leaves the pool for them to return to.
     pub fn cleanup_idle_pools(&self, max_idle: Duration) {
         let now = tokio::time::Instant::now();
         let mut to_remove = Vec::new();
 
         for entry in &self.pools {
             let pool = entry.value();
-            if pool.peer_count() == 0
+            if pool.is_host_online()
+                && pool.peer_count() == 0
+                && pool.approved_peer_count() <= 1 // the host's own key is always in the set
                 && now.duration_since(pool.created_at) > max_idle
                 && !pool.has_live_invitation()
             {
@@ -207,6 +212,59 @@ impl PoolRegistry {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    fn test_pool(registry: &PoolRegistry, id: u128) -> (PoolId, std::sync::Arc<crate::pool::Pool>) {
+        let pool_id = PoolId(Uuid::from_u128(id));
+        let pool = registry
+            .create_pool(
+                pool_id,
+                "test".into(),
+                ConnectionId(1),
+                PeerId("host".into()),
+                [0u8; 32],
+                "TestHost".into(),
+                8,
+            )
+            .unwrap();
+        (pool_id, pool)
+    }
+
+    /// A network blip takes the host and its members down together. The host's own
+    /// sweep (`evict_host_offline_pools`) gives such a pool its grace. This one used to
+    /// remove it within 30 s, and everyone's approval went with it.
+    #[tokio::test]
+    async fn idle_cleanup_leaves_a_pool_whose_host_is_offline() {
+        let registry = PoolRegistry::new(10);
+        let (pool_id, pool) = test_pool(&registry, 8);
+        pool.mark_host_offline();
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        registry.cleanup_idle_pools(Duration::ZERO);
+        assert!(registry.get_pool(pool_id).is_some(), "the host may be back");
+    }
+
+    /// Members can lose Wi-Fi for an hour and pick up where they left off. An old pool
+    /// whose only member stepped out is not idle: they hold an approval to come back on.
+    #[tokio::test]
+    async fn idle_cleanup_keeps_a_pool_someone_is_approved_to_return_to() {
+        let registry = PoolRegistry::new(10);
+        let (pool_id, pool) = test_pool(&registry, 9);
+        pool.approve_peer([9u8; 32]);
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        registry.cleanup_idle_pools(Duration::ZERO);
+        assert!(
+            registry.get_pool(pool_id).is_some(),
+            "a member is coming back"
+        );
+
+        assert!(pool.revoke_peer_approval(&[9u8; 32]));
+        registry.cleanup_idle_pools(Duration::ZERO);
+        assert!(
+            registry.get_pool(pool_id).is_none(),
+            "nobody is left to come back"
+        );
+    }
 
     #[tokio::test]
     async fn idle_cleanup_keeps_a_pool_with_a_live_invitation() {

@@ -22,6 +22,7 @@
 mod app;
 mod claim;
 mod config;
+mod dispatch;
 mod handler;
 mod setup;
 mod tunnel;
@@ -42,6 +43,7 @@ use tracing::{error, info, warn};
 
 use crate::app::AppState;
 use crate::config::ServerConfig;
+use crate::dispatch::{ConnectionDispatcher, Frame};
 
 /// `StealthOS` Relay Server -- zero-knowledge WebSocket relay.
 #[derive(Parser)]
@@ -498,6 +500,23 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     // 8. Main event loop.
     let mut shutdown_rx = state.shutdown_rx.clone();
+    let mut dispatcher = {
+        let handler = Arc::clone(&handler);
+        ConnectionDispatcher::new(move |frame: Frame| {
+            let handler = Arc::clone(&handler);
+            async move {
+                if let Err(e) = handler
+                    .handle_message(frame.connection_id, frame.remote_addr, &frame.message)
+                    .await
+                {
+                    warn!(
+                        connection = %frame.connection_id,
+                        "message handling error: {e}"
+                    );
+                }
+            }
+        })
+    };
 
     loop {
         tokio::select! {
@@ -535,18 +554,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                         message,
                         remote_addr,
                     }) => {
-                        let handler = Arc::clone(&handler);
-                        tokio::spawn(async move {
-                            if let Err(e) = handler
-                                .handle_message(connection_id, remote_addr, &message)
-                                .await
-                            {
-                                warn!(
-                                    connection = %connection_id,
-                                    "message handling error: {e}"
-                                );
-                            }
-                        });
+                        dispatcher.dispatch(Frame { connection_id, remote_addr, message });
                     }
                     Some(ConnectionEvent::BinaryReceived {
                         connection_id,
@@ -576,6 +584,7 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                             "connection disconnected"
                         );
                         event_loop_registry.unregister(connection_id);
+                        dispatcher.forget(connection_id);
                         handler.handle_disconnect(connection_id);
                     }
                     None => {

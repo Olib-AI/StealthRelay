@@ -466,6 +466,18 @@ impl Pool {
         })
     }
 
+    /// Whether this invitation exists here, has not expired and has a use left.
+    #[must_use]
+    pub fn invitation_is_usable(&self, token_id: &[u8; 16]) -> bool {
+        let now_unix = chrono::Utc::now().timestamp();
+        self.invitation_commitments
+            .get(token_id)
+            .is_some_and(|entry| {
+                entry.expires_at > now_unix
+                    && entry.use_count.load(Ordering::Acquire) < entry.max_uses
+            })
+    }
+
     /// Remove all expired invitation commitments.
     pub fn cleanup_expired_invitations(&self) {
         let now_unix = chrono::Utc::now().timestamp();

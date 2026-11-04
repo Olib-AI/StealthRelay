@@ -99,6 +99,8 @@ struct PendingJoin {
     display_name: String,
     /// The pool this join request is targeting.
     pool_id: PoolId,
+    /// The invitation it came through. An approval uses it up.
+    token_id: [u8; 16],
     /// When this pending join was created, for TTL enforcement.
     created_at: Instant,
 }
@@ -228,6 +230,7 @@ impl MessageHandler {
     pub fn periodic_cleanup(&self) {
         self.purge_expired_pending_joins();
         self.purge_expired_pow_challenges();
+        self.purge_dead_tokens();
         self.rate_limiter.cleanup();
         self.throttler.cleanup();
     }
@@ -1514,27 +1517,22 @@ impl MessageHandler {
             "join request received, forwarding to host"
         );
 
-        self.metrics
-            .invitations_consumed
-            .fetch_add(1, Ordering::Relaxed);
-
         // Look up which pool this token belongs to by scanning all pools.
         // The token_id is base64-encoded; decode to the 16-byte form.
         let token_id_bytes = Base64::decode_vec(&token_id).ok();
-        let target_pool: Option<(Arc<Pool>, PoolId)> = if let Some(ref id_bytes) = token_id_bytes
+        let target: Option<([u8; 16], Arc<Pool>, PoolId)> = if let Some(ref id_bytes) =
+            token_id_bytes
             && id_bytes.len() == 16
         {
             let mut tid = [0u8; 16];
             tid.copy_from_slice(id_bytes);
-            // Try to consume the invitation in each pool.
-            // This is a scan, but pool counts are small (max ~100).
-            // A production optimization would be a token_id -> pool_id index.
             self.find_pool_for_token(&tid)
+                .map(|(pool, pool_id)| (tid, pool, pool_id))
         } else {
             None
         };
 
-        let Some((pool, pool_id)) = target_pool else {
+        let Some((token_id_raw, pool, pool_id)) = target else {
             warn!(
                 connection = %connection_id,
                 token = %token_id,
@@ -1599,6 +1597,7 @@ impl MessageHandler {
                 connection_id,
                 display_name: display_name.clone(),
                 pool_id,
+                token_id: token_id_raw,
                 created_at: Instant::now(),
             },
         );
@@ -2116,6 +2115,24 @@ impl MessageHandler {
             let mut pk_arr = [0u8; 32];
             pk_arr.copy_from_slice(&pk_bytes);
 
+            // A request can wait on a link while it is revoked, expires or goes to someone else.
+            // Only a yes uses a link up: asking again costs nothing, and neither does a refusal.
+            if let Err(e) = pool.try_consume_invitation(&pending.token_id) {
+                info!(
+                    connection = %connection_id,
+                    client_pk = %client_public_key,
+                    "join approval refused, the invitation can no longer be used: {e}"
+                );
+                let reject_frame = ServerFrame::JoinRejected {
+                    reason: "invitation_ended".to_owned(),
+                };
+                self.send_to_connection(pending.connection_id, &reject_frame)?;
+                return Ok(());
+            }
+            self.metrics
+                .invitations_consumed
+                .fetch_add(1, Ordering::Relaxed);
+
             // Record the host's approval of this Ed25519 public key in the
             // pool's persistent approved-peers set BEFORE we mutate the
             // active peer list or hand out a session token. Doing it
@@ -2465,9 +2482,16 @@ impl MessageHandler {
                 &[connection_id, removed_peer.connection_id],
             );
         } else {
+            // Not connected right now, but a member's ID is their key, and an approval left in
+            // place would let them `member_rejoin` straight past the host's decision.
+            let revoked = Base64::decode_vec(&target_peer_id.0)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .is_some_and(|key| pool.revoke_peer_approval(&key));
             warn!(
                 connection = %connection_id,
                 peer = %target_peer_id,
+                approval_revoked = revoked,
                 "peer not found in pool"
             );
         }
@@ -3238,12 +3262,30 @@ impl MessageHandler {
         self.send_to_connection(connection_id, &error_frame)
     }
 
-    /// Find which pool a token belongs to using the token->pool index.
+    /// Find the pool a token still lets someone ask to join.
+    ///
+    /// The index only says where a token was made. A pool created later under the same ID knows
+    /// nothing of it, and an invitation can have expired, been used up or been revoked, so the
+    /// pool's own record decides.
     fn find_pool_for_token(&self, token_id: &[u8; 16]) -> Option<(Arc<Pool>, PoolId)> {
         let pool_id = self.token_to_pool.get(token_id)?;
         let pool_id = *pool_id.value();
         let pool = self.pool_registry.get_pool(pool_id)?;
-        Some((pool, pool_id))
+        pool.invitation_is_usable(token_id)
+            .then_some((pool, pool_id))
+    }
+
+    /// Forget the tokens nobody can use any more. A pool dropped as idle leaves its tokens behind,
+    /// as the registry does not know this index.
+    fn purge_dead_tokens(&self) {
+        for pool in self.pool_registry.snapshot_pools() {
+            pool.cleanup_expired_invitations();
+        }
+        self.token_to_pool.retain(|token_id, pool_id| {
+            self.pool_registry
+                .get_pool(*pool_id)
+                .is_some_and(|pool| pool.invitation_is_usable(token_id))
+        });
     }
 
     /// Validate a session token for a privileged host operation.
@@ -4347,12 +4389,19 @@ mod tests {
                 connection_id: new_conn,
                 display_name: "Newcomer".to_owned(),
                 pool_id: h.pool_id,
+                token_id: [0x11; 16],
                 created_at: tokio::time::Instant::now(),
             },
         );
 
         // Sanity: pubkey is not in the set yet.
         let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        pool.add_invitation_commitment(
+            [0x11; 16],
+            [0u8; 32],
+            chrono::Utc::now().timestamp() + 300,
+            1,
+        );
         assert!(!pool.is_approved_peer(&pk));
 
         // Host approves.
@@ -4377,6 +4426,204 @@ mod tests {
         // Drain test-side noise.
         let _ = drain_frames(&mut h.host_rx);
         let _ = drain_frames(&mut h.guest_rx);
+    }
+
+    // ── What a link is worth ───────────────────────────────────────────
+
+    fn seed_invitation(h: &Harness, token_id: [u8; 16], expires_in: i64, max_uses: u8) {
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        pool.add_invitation_commitment(
+            token_id,
+            [0u8; 32],
+            chrono::Utc::now().timestamp() + expires_in,
+            max_uses,
+        );
+        h.handler.token_to_pool.insert(token_id, h.pool_id);
+    }
+
+    async fn host_answers(h: &Harness, client_public_key: &str, approved: bool) {
+        let frame = ServerFrame::JoinApproval {
+            client_public_key: client_public_key.to_owned(),
+            approved,
+            reason: None,
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&frame).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+    }
+
+    fn waiting_join(
+        h: &Harness,
+        conn: u64,
+        token_id: [u8; 16],
+    ) -> (
+        String,
+        [u8; 32],
+        ConnectionId,
+        mpsc::Receiver<OutboundMessage>,
+    ) {
+        let (_id, pk, pk_b64) = fresh_identity();
+        let conn = ConnectionId(conn);
+        let rx = register_connection(&h.handler, conn);
+        h.handler.pending_joins.insert(
+            pk_b64.clone(),
+            PendingJoin {
+                connection_id: conn,
+                display_name: "Newcomer".to_owned(),
+                pool_id: h.pool_id,
+                token_id,
+                created_at: tokio::time::Instant::now(),
+            },
+        );
+        (pk_b64, pk, conn, rx)
+    }
+
+    /// A link from a pool that was dropped says nothing about the pool made later under its ID.
+    #[tokio::test]
+    async fn an_old_link_does_not_reach_a_pool_recreated_under_the_same_id() {
+        let h = setup_harness();
+        let token_id = [0x21_u8; 16];
+        seed_invitation(&h, token_id, 300, 1);
+        assert!(h.handler.find_pool_for_token(&token_id).is_some());
+
+        h.pool_registry.remove_pool(h.pool_id);
+        h.pool_registry
+            .create_pool(
+                h.pool_id,
+                "again".to_owned(),
+                h.host_conn,
+                PeerId("host-pk".to_owned()),
+                [0xAA_u8; 32],
+                "TestHost".to_owned(),
+                8,
+            )
+            .expect("create_pool");
+
+        assert!(h.handler.find_pool_for_token(&token_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_expired_link_reaches_nobody() {
+        let h = setup_harness();
+        let token_id = [0x22_u8; 16];
+        seed_invitation(&h, token_id, -1, 1);
+        assert!(h.handler.find_pool_for_token(&token_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_used_up_link_reaches_nobody() {
+        let h = setup_harness();
+        let token_id = [0x23_u8; 16];
+        seed_invitation(&h, token_id, 300, 1);
+        let (pk_b64, _pk, _conn, _rx) = waiting_join(&h, 200, token_id);
+        host_answers(&h, &pk_b64, true).await;
+        assert!(h.handler.find_pool_for_token(&token_id).is_none());
+    }
+
+    /// Two people waiting on one single-use link: the second approval admits nobody.
+    #[tokio::test]
+    async fn a_second_approval_on_a_single_use_link_admits_nobody() {
+        let h = setup_harness();
+        let token_id = [0x24_u8; 16];
+        seed_invitation(&h, token_id, 300, 1);
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+
+        let (first, first_pk, _c1, _r1) = waiting_join(&h, 201, token_id);
+        let (second, second_pk, _c2, mut second_rx) = waiting_join(&h, 202, token_id);
+        host_answers(&h, &first, true).await;
+        host_answers(&h, &second, true).await;
+
+        assert!(pool.is_approved_peer(&first_pk));
+        assert!(!pool.is_approved_peer(&second_pk));
+        let answers = drain_frames(&mut second_rx);
+        assert!(
+            matches!(answers.as_slice(), [Some(ServerFrame::JoinRejected { reason })] if reason == "invitation_ended"),
+            "got {answers:?}"
+        );
+    }
+
+    /// A link revoked while someone waits on it: the host's late yes admits nobody.
+    #[tokio::test]
+    async fn an_approval_after_a_revocation_admits_nobody() {
+        let h = setup_harness();
+        let token_id = [0x25_u8; 16];
+        seed_invitation(&h, token_id, 300, 5);
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        let (who, pk, _c, mut rx) = waiting_join(&h, 203, token_id);
+
+        let revoke = ServerFrame::RevokeInvitation {
+            token_id: Base64::encode_string(&token_id),
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&revoke).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+        assert!(h.handler.find_pool_for_token(&token_id).is_none());
+
+        host_answers(&h, &who, true).await;
+        assert!(!pool.is_approved_peer(&pk));
+        assert!(matches!(
+            drain_frames(&mut rx).as_slice(),
+            [Some(ServerFrame::JoinRejected { .. })]
+        ));
+    }
+
+    /// A multi-use link goes on working until it has been used up, and a refused request uses nothing.
+    #[tokio::test]
+    async fn a_refusal_does_not_use_up_a_link() {
+        let h = setup_harness();
+        let token_id = [0x26_u8; 16];
+        seed_invitation(&h, token_id, 300, 1);
+        let (who, _pk, _c, _rx) = waiting_join(&h, 204, token_id);
+        host_answers(&h, &who, false).await;
+        assert!(h.handler.find_pool_for_token(&token_id).is_some());
+    }
+
+    /// Housekeeping forgets a mapping once its pool or its invitation is gone.
+    #[tokio::test]
+    async fn housekeeping_clears_dead_token_mappings() {
+        let h = setup_harness();
+        let live = [0x27_u8; 16];
+        let expired = [0x28_u8; 16];
+        let orphan = [0x29_u8; 16];
+        seed_invitation(&h, live, 300, 1);
+        seed_invitation(&h, expired, -1, 1);
+        h.handler
+            .token_to_pool
+            .insert(orphan, PoolId(Uuid::now_v7()));
+
+        h.handler.periodic_cleanup();
+
+        assert!(h.handler.token_to_pool.contains_key(&live));
+        assert!(!h.handler.token_to_pool.contains_key(&expired));
+        assert!(!h.handler.token_to_pool.contains_key(&orphan));
+    }
+
+    /// A host removes someone whose socket has just dropped: their approval ends too.
+    #[tokio::test]
+    async fn a_kick_revokes_the_approval_of_someone_offline() {
+        let h = setup_harness();
+        let (_id, pk, pk_b64) = fresh_identity();
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        pool.approve_peer(pk);
+
+        let kick = ServerFrame::KickPeer {
+            peer_id: pk_b64,
+            reason: "Removed by host".to_owned(),
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&kick).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+
+        assert!(!pool.is_approved_peer(&pk));
     }
 
     /// Helper: mark a pubkey as previously approved by the host and leave

@@ -528,6 +528,673 @@ async fn status_handler(
 
 // ── HTML page rendering ──────────────────────────────────────────────────
 
+/// Stylesheet shared by every setup page.
+///
+/// System fonts only: the CSP allows no font source and these pages make no
+/// outside request for their looks. The plate (`.plate`) keeps its white
+/// background in dark mode too, because a QR code has to stay dark on light
+/// to scan, and it reads as one object wherever it appears.
+const PAGE_CSS: &str = r#"
+:root {
+  color-scheme: light dark;
+  --page: #edf0f0;
+  --ink: #172124;
+  --soft: #46555a;
+  --rule: #c2cccd;
+  --well: #dde3e3;
+  --accent: #1b6b62;
+  --accent-hover: #14544d;
+  --on-accent: #ffffff;
+  --warn: #7a4a00;
+  --mark-body: #2d3436;
+  --sans: "Avenir Next", Avenir, "Segoe UI Variable Text", "Segoe UI", Ubuntu, Cantarell, "Noto Sans", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #11171a;
+    --ink: #e8eeee;
+    --soft: #a7b4b8;
+    --rule: #303c40;
+    --well: #1c2528;
+    --accent: #7fd0c7;
+    --accent-hover: #a3e0d9;
+    --on-accent: #0c1f1d;
+    --warn: #f0b66b;
+    --mark-body: #e8eeee;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 1.5rem; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 400 1.0625rem/1.55 var(--sans);
+  overflow-wrap: break-word;
+}
+.shell {
+  max-width: 70rem;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 4vw, 3rem) clamp(1.25rem, 4vw, 3rem) 4rem;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: clamp(2.25rem, 7vw, 4.5rem);
+  font-weight: 600;
+}
+.brand svg { display: block; width: 2.125rem; height: 2.125rem; flex: none; }
+.mark-body { fill: var(--mark-body); }
+h1 {
+  margin: 0 0 0.9rem;
+  font-size: clamp(2.25rem, 6.5vw, 3.5rem);
+  font-weight: 600;
+  line-height: 1.04;
+  letter-spacing: -0.02em;
+}
+h1:focus { outline: none; }
+h2 {
+  margin: 3.25rem 0 0.6rem;
+  font-size: 1.625rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+h3 { margin: 0 0 0.4rem; font-size: 1.3125rem; font-weight: 600; line-height: 1.25; }
+p { margin: 0 0 0.8rem; }
+.prose { max-width: 38rem; }
+.lede { font-size: 1.1875rem; line-height: 1.45; color: var(--soft); max-width: 34rem; }
+.small { font-size: 0.9375rem; color: var(--soft); }
+.warn { color: var(--warn); }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.16em; }
+a:hover { color: var(--accent-hover); text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+code { font-family: var(--mono); font-size: 0.875em; font-variant-ligatures: none; overflow-wrap: anywhere; }
+button { font: inherit; font-family: var(--sans); cursor: pointer; }
+
+/* Numbered instructions: the numbers hang in their own column. */
+.steps { list-style: none; margin: 1.25rem 0 0; padding: 0; counter-reset: step; }
+.steps > li { counter-increment: step; position: relative; padding-left: 2rem; margin-top: 1.15rem; }
+.steps > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: lining-nums tabular-nums;
+}
+.steps p { margin: 0.35rem 0 0.6rem; }
+@media (max-width: 30rem) {
+  .steps > li { padding-left: 1.4rem; }
+}
+.steps .small { margin-top: 0.5rem; }
+
+/* A command: wraps instead of scrolling, so all of it can be read before it is run. */
+.cmd {
+  display: flow-root;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--well);
+  border-radius: 6px;
+}
+.cmd pre {
+  margin: 0;
+  font: 0.875rem/1.55 var(--mono);
+  font-variant-ligatures: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cmd code { font-size: inherit; }
+.cmd button {
+  float: right;
+  margin: -0.15rem -0.25rem 0.15rem 0.75rem;
+  padding: 0.1rem 0.5rem;
+  min-height: 1.75rem;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+.cmd button:hover { color: var(--accent-hover); }
+.os { margin: 0.75rem 0 0; font-size: 0.9375rem; font-weight: 600; }
+.os + .cmd { margin-top: 0.25rem; }
+.subhead { margin: 1.75rem 0 0.25rem; font-weight: 600; }
+.claim-window { margin-top: 1.5rem; }
+@media (pointer: coarse) {
+  .cmd button { min-height: 2.5rem; padding-inline: 0.75rem; }
+}
+
+/* The plate: the one object on these pages, a printed label with the code on it. */
+.plate {
+  width: max-content;
+  max-width: 100%;
+  padding: 1.5rem;
+  color: #11191c;
+  background: #ffffff;
+  border: 1.5px solid #11191c;
+  border-radius: 14px;
+  font-size: 1.25rem;
+}
+@media (max-width: 22rem) {
+  .plate { padding: 1rem; }
+}
+.plate :focus-visible { outline-color: #1b6b62; }
+.plate-qr { width: 20.2ch; max-width: 100%; margin: -0.35rem -0.1rem 1rem; font-family: var(--mono); }
+.plate-qr svg { display: block; width: 100%; height: auto; shape-rendering: crispEdges; }
+.plate-label { margin: 0 0 0.3rem; font-size: 0.9375rem; font-weight: 600; line-height: 1.3; }
+/* 20 characters to a line is exactly four groups, so the code sets as a 4 by 4 block. */
+.plate-code {
+  width: 20.2ch;
+  max-width: 100%;
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  word-break: break-all;
+  -webkit-user-select: all;
+  user-select: all;
+}
+.plate-note {
+  width: 0;
+  min-width: 100%;
+  margin: 0.9rem 0 0;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: #3d4b50;
+}
+.plate-copy {
+  display: block;
+  width: 100%;
+  min-height: 2.75rem;
+  margin-top: 1rem;
+  padding: 0.45rem 1rem;
+  color: #ffffff;
+  background: #1b6b62;
+  border: 0;
+  border-radius: 7px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.plate-copy:hover { background: #14544d; }
+.action {
+  min-height: 2.75rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 1.15rem;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: 0;
+  border-radius: 7px;
+  font-weight: 600;
+}
+.action:hover { background: var(--accent-hover); }
+
+/* Claim page: words on the left, plate on the right; on a phone the plate comes second. */
+.claim {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "intro" "plate" "rest";
+  gap: 1.75rem;
+}
+.claim-intro { grid-area: intro; }
+.claim-plate { grid-area: plate; }
+.claim-rest { grid-area: rest; min-width: 0; }
+.claim-intro > :last-child, .claim-rest > :last-child { margin-bottom: 0; }
+.claim-rest .steps { margin-top: 0; }
+.claim-rest .steps > li:first-child { margin-top: 0; }
+@media (min-width: 60rem) {
+  .claim {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-rows: auto 1fr;
+    grid-template-areas: "intro plate" "rest plate";
+    column-gap: clamp(3rem, 7vw, 6rem);
+    row-gap: 2rem;
+  }
+  .claim-plate { position: sticky; top: 1.5rem; align-self: start; }
+}
+.status {
+  width: 0;
+  min-width: 100%;
+  margin: 0.9rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  color: var(--soft);
+}
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 0.08em;
+}
+.status.is-stuck { color: var(--warn); }
+.status.is-stuck::before { background: var(--warn); }
+@media (prefers-reduced-motion: no-preference) {
+  .status:not(.is-stuck)::before { animation: waiting 2s ease-in-out infinite; }
+  @keyframes waiting { 50% { opacity: 0.25; } }
+}
+details.guide { margin-top: 0.75rem; }
+details.guide > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+details.guide > summary:hover { color: var(--accent-hover); }
+details.guide > summary::-webkit-details-marker { display: none; }
+/* A drawn chevron that turns when the guide opens. */
+details.guide > summary::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+}
+details.guide[open] > summary::before { transform: translateY(-0.1rem) rotate(45deg); }
+details.guide[open] { margin-bottom: 2rem; }
+.guide-body { margin-top: 1rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); }
+
+/* Ready page: a contents column on wide screens, then one reading column. */
+.manual { display: grid; grid-template-columns: minmax(0, 1fr); }
+.manual-main { min-width: 0; max-width: 44rem; }
+.contents { display: none; }
+@media (min-width: 60rem) {
+  .manual { grid-template-columns: 11rem minmax(0, 1fr); column-gap: clamp(2.5rem, 6vw, 5rem); }
+  .contents { display: block; position: sticky; top: 1.5rem; align-self: start; padding-top: 0.75rem; }
+}
+.contents p { margin: 0 0 0.4rem; font-size: 0.9375rem; color: var(--soft); }
+.contents ul { margin: 0; padding: 0; list-style: none; font-size: 0.9375rem; line-height: 1.35; }
+.contents li { margin-bottom: 0.55rem; }
+
+/* The route a connection takes: three stops, read left to right or top to bottom. */
+.route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 1.5rem 0 1.75rem;
+  padding: 0;
+  list-style: none;
+}
+.stop { padding: 0.7rem 0.9rem; border: 1px solid var(--rule); border-radius: 8px; line-height: 1.3; }
+.stop strong { display: block; font-weight: 600; }
+.stop span { font-size: 0.875rem; color: var(--soft); }
+.stop.is-relay { color: #11191c; background: #ffffff; border: 1.5px solid #11191c; }
+.stop.is-relay span { color: #3d4b50; }
+.hop {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 2.25rem;
+  margin-left: 1.25rem;
+  padding-left: 0.75rem;
+  border-left: 1.5px solid var(--soft);
+  font: 0.8125rem/1.3 var(--mono);
+  color: var(--soft);
+}
+@media (min-width: 40rem) {
+  .route { grid-template-columns: minmax(0, 1fr) 6rem minmax(0, 1fr) 6rem minmax(0, 1fr); align-items: center; }
+  .hop {
+    display: block;
+    min-height: 0;
+    margin: 0;
+    padding: 0 0.25rem 0.2rem;
+    border-left: 0;
+    border-bottom: 1.5px solid var(--soft);
+    text-align: center;
+  }
+}
+
+/* Options under the guide are separated by a heavy rule, not boxed. */
+.option { margin-top: 2.5rem; padding-top: 1.25rem; border-top: 2px solid var(--ink); }
+.update { margin: 1.5rem 0 0; display: none; }
+.update.visible { display: block; }
+.update-title { margin-bottom: 0.25rem; font-weight: 600; }
+
+.compare { width: 100%; margin: 1.25rem 0 0.75rem; border-collapse: collapse; font-size: 0.9375rem; line-height: 1.35; }
+.compare th, .compare td { padding: 0.55rem 0.75rem 0.55rem 0; text-align: left; vertical-align: top; }
+.compare thead th { font-weight: 600; border-bottom: 2px solid var(--ink); }
+.compare tbody th { font-weight: 400; color: var(--soft); }
+.compare tbody tr { border-bottom: 1px solid var(--rule); }
+.compare th:last-child, .compare td:last-child { padding-right: 0; }
+@media (max-width: 39.99rem) {
+  .compare thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .compare tbody tr { display: block; padding: 0.75rem 0; }
+  .compare tbody th, .compare tbody td { display: block; padding: 0.1rem 0; }
+  .compare tbody th { margin-bottom: 0.15rem; font-weight: 600; color: var(--ink); }
+  .compare tbody td::before { content: attr(data-label) ": "; color: var(--soft); }
+}
+
+.foot { margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--rule); font-size: 0.9375rem; color: var(--soft); }
+.foot p:last-child { margin-bottom: 0; }
+
+/* Notice pages. */
+.notice { max-width: 38rem; }
+.notice h1 { font-size: clamp(2rem, 5.5vw, 2.75rem); }
+.notice ul { margin: 0 0 0.8rem; padding-left: 1.15rem; }
+.notice li { margin-bottom: 0.5rem; }
+"#;
+
+/// Name and mark at the top of every page, drawn from the `StealthOS` logo.
+const BRAND: &str = r##"<header class="brand"><svg viewBox="0 0 100 100" aria-hidden="true" focusable="false"><path class="mark-body" fill-rule="evenodd" d="{{MARK_BODY}}"/><path fill="#8fa894" fill-rule="evenodd" d="{{MARK_SAGE}}"/><circle cx="42.5" cy="29" r="3" fill="#4db6ac"/><circle cx="58" cy="29" r="3" fill="#4db6ac"/></svg><span>StealthOS Relay</span></header>"##;
+
+/// Copy helper shared by every page, and the Copy button on each command.
+///
+/// Presentation only. `navigator.clipboard` needs a secure context, which
+/// loopback is and a LAN address is not, so the older path stays as a fallback.
+const COPY_SCRIPT: &str = r"
+function copyText(text, btn, label) {
+  function done(ok) {
+    btn.textContent = ok ? 'Copied' : 'Could not copy';
+    setTimeout(function() { btn.textContent = label; }, 2000);
+  }
+  function fallback() {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    btn.focus();
+    done(ok);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() { done(true); }, fallback);
+  } else {
+    fallback();
+  }
+}
+document.querySelectorAll('.cmd').forEach(function(block) {
+  var code = block.querySelector('code');
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Copy';
+  btn.setAttribute('aria-label', 'Copy command');
+  btn.addEventListener('click', function() { copyText(code.textContent, btn, 'Copy'); });
+  block.insertBefore(btn, block.firstChild);
+});
+";
+
+/// Wrap a page body in the document every setup page shares.
+fn html_document(title: &str, body: &str, script: &str) -> String {
+    let brand = BRAND
+        .replace("{{MARK_BODY}}", MARK_BODY)
+        .replace("{{MARK_SAGE}}", MARK_SAGE);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{title}</title>
+<style>{PAGE_CSS}</style>
+</head>
+<body>
+<div class="shell">
+{brand}
+{body}
+</div>
+<script>{COPY_SCRIPT}{script}</script>
+</body>
+</html>"#
+    )
+}
+
+/// Outline of the logo's body.
+const MARK_BODY: &str = "M64 62L63 62L56 70L56 78L57 78L58 74L63 66ZM67 7L66 8L56 16L52 15L45 16L35 8L34 8L39 19L33 24L30 34L42 42L42 43L38 42L35 56L22 65L18 77L18 78L19 83L23 87L23 88L9 90L7 90L7 91L11 92L21 93L45 94L78 93L90 92L94 91L94 90L90 89L82 88L80 89L77 86L73 85L66 84L65 83L67 82L67 81L36 79L36 78L42 78L42 75L41 71L39 68L35 65L36 64L40 66L43 69L45 73L46 78L54 78L54 69L60 62L62 55L63 42L58 43L58 42L71 34L68 24L62 19ZM58 27L59 27L61 29L60 31L59 32L57 32L56 30L56 28ZM42 27L44 27L45 29L45 31L43 32L41 32L40 30L40 28Z";
+/// Outline of the logo's lighter shading.
+const MARK_SAGE: &str = "M64 39L60 42L60 42L63 42L62 56L60 62L54 69L54 78L46 78L45 75L43 69L40 66L36 65L36 66L40 70L42 75L42 78L40 78L40 79L68 81L68 82L66 83L66 84L73 84L80 87L78 84L73 80L68 78L61 78L62 68L62 69L58 74L57 78L56 78L56 70L64 60L67 56L64 39ZM42 42L37 39L34 46L27 51L22 56L19 64L18 70L18 75L18 75L22 65L35 55L38 42L39 42L42 43ZM67 8L62 19L67 23L68 23L68 8ZM33 7L33 23L34 23L39 19L39 18L34 7Z";
+
+/// How to get an address the app can use. Shown before claiming, because the
+/// app needs that address to reach the relay at all, and again after it.
+const TUNNEL_GUIDE: &str = r##"
+<table class="compare">
+  <thead>
+    <tr><td></td><th scope="col"><a href="#ngrok">ngrok</a></th><th scope="col"><a href="#cloudflare">Cloudflare Tunnel</a></th><th scope="col"><a href="#tailscale">Tailscale Funnel</a></th></tr>
+  </thead>
+  <tbody>
+    <tr><th scope="row">Setup time</th><td data-label="ngrok">About 2 minutes</td><td data-label="Cloudflare Tunnel">About 10 minutes</td><td data-label="Tailscale Funnel">About 5 minutes</td></tr>
+    <tr><th scope="row">Needs a domain</th><td data-label="ngrok">No</td><td data-label="Cloudflare Tunnel">Yes, or use a quick tunnel for testing</td><td data-label="Tailscale Funnel">No</td></tr>
+    <tr><th scope="row">Address</th><td data-label="ngrok">Assigned by ngrok, stays the same</td><td data-label="Cloudflare Tunnel">Your own domain</td><td data-label="Tailscale Funnel">A ts.net name, stays the same</td></tr>
+    <tr><th scope="row">Data on the free plan</th><td data-label="ngrok">1 GB a month</td><td data-label="Cloudflare Tunnel">No published limit</td><td data-label="Tailscale Funnel">Limited, no published figure</td></tr>
+    <tr><th scope="row">Good for</th><td data-label="ngrok">Trying it out</td><td data-label="Cloudflare Tunnel">A relay you keep running</td><td data-label="Tailscale Funnel">Personal use</td></tr>
+  </tbody>
+</table>
+<p class="small">Free-plan limits were last checked in November 2026 and can change. Voice and video calls go through the relay, so they use data quickly.</p>
+<p class="small">The commands use the relay's default port, 9090. If you changed <code>server.ws_bind</code>, use your port instead.</p>
+
+<section class="option" id="ngrok">
+  <h3>ngrok</h3>
+  <p>The quickest way to get an address, and it stays the same when you restart the tunnel. Needs a free ngrok account.</p>
+  <ol class="steps" role="list">
+    <li>Create an account at <a href="https://ngrok.com/signup" target="_blank" rel="noopener">ngrok.com/signup</a>.</li>
+    <li>Install ngrok.
+      <p class="os">macOS</p>
+      <div class="cmd"><pre><code>brew install ngrok</code></pre></div>
+      <p class="os">Linux, with snap</p>
+      <div class="cmd"><pre><code>sudo snap install ngrok</code></pre></div>
+      <p class="small">Anything else: <a href="https://ngrok.com/download" target="_blank" rel="noopener">ngrok.com/download</a>.</p>
+    </li>
+    <li>Add your auth token, which is on the ngrok dashboard.
+      <div class="cmd"><pre><code>ngrok config add-authtoken YOUR_TOKEN</code></pre></div>
+    </li>
+    <li>Start the tunnel and leave it running.
+      <div class="cmd"><pre><code>ngrok http 9090</code></pre></div>
+      <p>ngrok prints a forwarding address like <code>https://your-assigned-name.ngrok-free.app</code>. In StealthOS, use it with <code>wss://</code>: <code>wss://your-assigned-name.ngrok-free.app</code>.</p>
+    </li>
+  </ol>
+</section>
+
+<section class="option" id="cloudflare">
+  <h3>Cloudflare Tunnel</h3>
+  <p>A lasting address on your own domain. Needs a free Cloudflare account and a domain on Cloudflare. You can move a domain you already own or buy one, from about $10 a year.</p>
+  <ol class="steps" role="list">
+    <li>Create an account at <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">dash.cloudflare.com</a>.</li>
+    <li>Install cloudflared.
+      <p class="os">macOS</p>
+      <div class="cmd"><pre><code>brew install cloudflared</code></pre></div>
+      <p class="os">Ubuntu or Debian</p>
+      <div class="cmd"><pre><code>curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+  | sudo tee /usr/share/keyrings/cloudflare-main.gpg &gt; /dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+  | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update &amp;&amp; sudo apt install cloudflared</code></pre></div>
+      <p class="small">Anything else: <a href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/" target="_blank" rel="noopener">Cloudflare's downloads page</a>.</p>
+    </li>
+    <li>Log in to Cloudflare. This opens a browser window where you authorize your account.
+      <div class="cmd"><pre><code>cloudflared tunnel login</code></pre></div>
+    </li>
+    <li>Create the tunnel.
+      <div class="cmd"><pre><code>cloudflared tunnel create stealth-relay</code></pre></div>
+    </li>
+    <li>Point a name on your domain at it.
+      <div class="cmd"><pre><code>cloudflared tunnel route dns stealth-relay relay.yourdomain.com</code></pre></div>
+    </li>
+    <li>Start the tunnel and leave it running.
+      <div class="cmd"><pre><code>cloudflared tunnel --url http://localhost:9090 run stealth-relay</code></pre></div>
+    </li>
+    <li>In StealthOS, use <code>wss://relay.yourdomain.com</code>.</li>
+  </ol>
+  <p class="subhead">No domain, or just testing?</p>
+  <p>A quick tunnel needs no domain and no account:</p>
+  <div class="cmd"><pre><code>cloudflared tunnel --url http://localhost:9090</code></pre></div>
+  <p>It prints a temporary address like <code>https://xxxx-xxxx.trycloudflare.com</code>, which you use with <code>wss://</code>. The address changes every time the tunnel restarts, so it is for testing only.</p>
+</section>
+
+<section class="option" id="tailscale">
+  <h3>Tailscale Funnel</h3>
+  <p>A lasting address on a ts.net name, with no domain to buy. Needs a free Tailscale account. Funnel is in beta, and Tailscale limits its bandwidth without publishing a figure.</p>
+  <ol class="steps" role="list">
+    <li>Create an account at <a href="https://login.tailscale.com/start" target="_blank" rel="noopener">login.tailscale.com</a> and install Tailscale on this machine.
+      <p class="os">macOS</p>
+      <div class="cmd"><pre><code>brew install tailscale
+sudo brew services start tailscale</code></pre></div>
+      <p class="small">Not every Tailscale app for macOS can share a port with Funnel. <a href="https://tailscale.com/kb/1223/funnel" target="_blank" rel="noopener">Tailscale's Funnel guide</a> lists which can.</p>
+      <p class="os">Ubuntu or Debian</p>
+      <div class="cmd"><pre><code>curl -fsSL https://tailscale.com/install.sh | sh</code></pre></div>
+      <p class="small">Anything else: <a href="https://tailscale.com/download" target="_blank" rel="noopener">tailscale.com/download</a>.</p>
+    </li>
+    <li>Connect to your Tailscale network.
+      <div class="cmd"><pre><code>sudo tailscale up</code></pre></div>
+    </li>
+    <li>Turn on Funnel for port 9090 and leave it running. The first time, Tailscale gives you a page where you approve Funnel for your network.
+      <div class="cmd"><pre><code>sudo tailscale funnel 9090</code></pre></div>
+    </li>
+    <li>Tailscale prints your public address, something like <code>https://your-machine.tailnet-name.ts.net</code>. In StealthOS, use it with <code>wss://</code>: <code>wss://your-machine.tailnet-name.ts.net</code>.</li>
+  </ol>
+</section>
+
+<section class="option">
+  <h3>What a tunnel provider can see</h3>
+  <p>A tunnel ends TLS on the provider's servers. The provider can see which addresses connect to your relay, when, how much they send, and relay details such as pool IDs. StealthOS encrypts chats and calls between pool members before they leave the device.</p>
+  <p>To leave the provider out, give the relay its own certificate with <code>tls_cert_path</code> and <code>tls_key_path</code> under <code>[transport]</code> in its config, and open its port to the internet.</p>
+</section>
+"##;
+
+/// Body of the claim page. `{{QR}}`, `{{CODE}}` and `{{GUIDE}}` are filled in
+/// by [`render_setup_page`].
+const CLAIM_BODY: &str = r#"
+<main class="claim" id="claim-view">
+  <div class="claim-intro">
+    <h1>Claim Your Server</h1>
+    <p class="lede">The device that claims this relay becomes its owner. After that, only that device can host pools here.</p>
+  </div>
+
+  <div class="claim-plate">
+    <div class="plate">
+      <div class="plate-qr" role="img" aria-label="QR code that claims this server in the StealthOS app">{{QR}}</div>
+      <p class="plate-label" id="claim-label">Claim code</p>
+      <p class="plate-code" id="claim-code" aria-labelledby="claim-label">{{CODE}}</p>
+      <button class="plate-copy" id="copy-btn" type="button">Copy code</button>
+      <p class="plate-note">Anyone who has this code can claim this server, so keep this page to yourself. The code stops working once the server is claimed.</p>
+    </div>
+    <p class="status" id="claim-status" role="status">Waiting for the app. This page updates by itself.</p>
+  </div>
+
+  <div class="claim-rest">
+    <ol class="steps" role="list">
+      <li><strong>Give the relay a <code>wss://</code> address.</strong>
+        <p>StealthOS connects to relays only over TLS, so it cannot use <code>ws://localhost:9090</code>. A tunnel gives the relay an HTTPS address, which the app uses as <code>wss://</code>.</p>
+        <p>If you deployed to Fly.io, Railway, Render or DigitalOcean, the provider has already given you an HTTPS address. Use that.</p>
+        <details class="guide">
+          <summary>How to set up a tunnel</summary>
+          <div class="guide-body">{{GUIDE}}</div>
+        </details>
+      </li>
+      <li><strong>Connect from the app.</strong>
+        <p>In StealthOS, open Connection Pool and choose Host Remote Pool. Enter the address as the Server URL, then choose Create Remote Pool.</p>
+      </li>
+      <li><strong>Claim the server.</strong>
+        <p>When the app asks you to claim the server, choose Scan QR Code and point the camera at this page, or enter the code by hand.</p>
+      </li>
+      <li><strong>Save your recovery key.</strong>
+        <p>The app shows it after the claim. Keep this page open and it appears here too.</p>
+      </li>
+    </ol>
+    <p class="small claim-window">By default the relay stops showing this code one hour after it starts. Restarting it starts the hour again and prints a new setup link.</p>
+  </div>
+</main>
+
+<main class="claim" id="recovery-page" hidden>
+  <div class="claim-intro">
+    <p class="small">Server claimed.</p>
+    <h1 id="recovery-title" tabindex="-1">Save Your Recovery Key</h1>
+    <p class="lede">This key is the only way to claim the relay again if you lose the device that owns it.</p>
+  </div>
+
+  <div class="claim-plate">
+    <div class="plate">
+      <p class="plate-label" id="rk-label">Recovery key</p>
+      <p class="plate-code" id="rk-display" aria-labelledby="rk-label"></p>
+      <button class="plate-copy" id="rk-copy" type="button">Copy recovery key</button>
+    </div>
+  </div>
+
+  <div class="claim-rest">
+    <div class="prose">
+      <p>The relay stores only a hash of this key, so it cannot show the key to you again after you leave this page.</p>
+      <p>Save it in a password manager or write it down. If you lose both the device and this key, you have to redeploy the relay with a fresh key volume.</p>
+      <button class="action" id="rk-continue" type="button">I've saved it, continue</button>
+    </div>
+  </div>
+</main>
+"#;
+
+/// Script for the claim page. `{{CLAIM_HEX}}` is filled in by
+/// [`render_setup_page`].
+const CLAIM_SCRIPT: &str = r"
+(function() {
+  var claimCode = '{{CLAIM_HEX}}';
+  var recoveryKey = '';
+  var status = document.getElementById('claim-status');
+  var waitingText = status.textContent;
+
+  document.getElementById('copy-btn').addEventListener('click', function() {
+    copyText(claimCode, this, 'Copy code');
+  });
+  document.getElementById('rk-copy').addEventListener('click', function() {
+    copyText(recoveryKey, this, 'Copy recovery key');
+  });
+  document.getElementById('rk-continue').addEventListener('click', function() {
+    window.location.href = '/';
+  });
+
+  function showStuck(stuck) {
+    status.classList.toggle('is-stuck', stuck);
+    var text = stuck ? 'No answer from the relay. If it restarted, open the new setup link from its console.' : waitingText;
+    if (status.textContent !== text) status.textContent = text;
+  }
+
+  // Poll for claim status. The session cookie set when this page was opened
+  // authenticates the poll, so the token never has to appear in a URL again.
+  var pollInterval = setInterval(function() {
+    fetch('/setup/status', { credentials: 'same-origin' })
+      .then(function(r) {
+        showStuck(!r.ok);
+        if (!r.ok) return null;
+        return r.json();
+      })
+      .then(function(data) {
+        if (!data) return;
+        if (data.claimed) {
+          clearInterval(pollInterval);
+          if (data.recovery_key) {
+            showRecoveryKey(data.recovery_key);
+          } else {
+            window.location.href = '/';
+          }
+        }
+      })
+      .catch(function() { showStuck(true); });
+  }, 2000);
+
+  function showRecoveryKey(key) {
+    recoveryKey = key;
+    document.getElementById('rk-display').textContent = key.match(/.{1,4}/g).join('-');
+    document.getElementById('claim-view').hidden = true;
+    document.getElementById('recovery-page').hidden = false;
+    document.title = 'StealthOS Relay: Save Your Recovery Key';
+    window.scrollTo(0, 0);
+    document.getElementById('recovery-title').focus();
+  }
+})();
+";
+
 /// Render the setup page with inline SVG QR code and manual code.
 fn render_setup_page(claim_secret: &[u8; 32]) -> String {
     let full_hex = claim::hex_encode(claim_secret);
@@ -543,249 +1210,12 @@ fn render_setup_page(claim_secret: &[u8; 32]) -> String {
 
     let svg = render_qr_to_svg(&url);
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay - Claim Server</title>
-<style>
-  *, *::before, *::after {{ box-sizing: border-box; }}
-  body {{
-    margin: 0; padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0e6;
-    min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-  }}
-  .container {{
-    max-width: 480px;
-    width: 100%;
-    padding: 32px 24px;
-    text-align: center;
-  }}
-  .logo {{
-    font-size: 1.1em;
-    letter-spacing: 0.05em;
-    color: #8888aa;
-    margin-bottom: 8px;
-  }}
-  h1 {{
-    font-size: 1.6em;
-    font-weight: 600;
-    margin: 0 0 8px 0;
-    color: #fff;
-  }}
-  .subtitle {{
-    color: #9999bb;
-    font-size: 0.95em;
-    margin-bottom: 28px;
-    line-height: 1.5;
-  }}
-  .qr-container {{
-    background: #ffffff;
-    padding: 20px;
-    border-radius: 12px;
-    display: inline-block;
-    margin-bottom: 24px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
-  }}
-  .qr-container svg {{
-    display: block;
-    width: 240px;
-    height: 240px;
-  }}
-  .manual-section {{
-    background: #1a1a2e;
-    border: 1px solid #2a2a44;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-bottom: 20px;
-  }}
-  .manual-label {{
-    font-size: 0.8em;
-    color: #7777aa;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 8px;
-  }}
-  .manual-code {{
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 0.85em;
-    color: #ccccee;
-    word-break: break-all;
-    line-height: 1.7;
-    user-select: all;
-  }}
-  .copy-btn {{
-    display: inline-block;
-    margin-top: 12px;
-    padding: 8px 20px;
-    background: #2a2a44;
-    color: #ccccee;
-    border: 1px solid #3a3a55;
-    border-radius: 6px;
-    font-size: 0.85em;
-    cursor: pointer;
-    transition: background 0.15s;
-  }}
-  .copy-btn:hover {{
-    background: #3a3a55;
-  }}
-  .copy-btn:active {{
-    background: #4a4a66;
-  }}
-  .warning {{
-    margin-top: 24px;
-    padding: 12px 16px;
-    background: rgba(255, 180, 50, 0.08);
-    border: 1px solid rgba(255, 180, 50, 0.2);
-    border-radius: 8px;
-    color: #ddaa44;
-    font-size: 0.85em;
-    line-height: 1.5;
-  }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="logo">STEALTHOS RELAY</div>
-  <h1>Claim Your Server</h1>
-  <p class="subtitle">
-    Scan the QR code with the StealthOS app to claim ownership of this server,
-    or copy the manual code below.
-  </p>
-
-  <div class="qr-container">
-    {svg}
-  </div>
-
-  <div class="manual-section">
-    <div class="manual-label">Manual Code</div>
-    <div class="manual-code" id="claim-code">{formatted}</div>
-    <button class="copy-btn" id="copy-btn">Copy Code</button>
-  </div>
-
-  <div class="warning">
-    This code is <strong>one-time use</strong> and will be destroyed after claiming.
-    Only the server operator should see this page.
-  </div>
-</div>
-
-<!-- Hidden recovery key page — shown by JS after successful claim -->
-<div id="recovery-page" style="display:none;">
-<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-background:#0f0f1a;color:#e0e0e6;min-height:100vh;display:flex;justify-content:center;
-align-items:center;text-align:center;">
-<div style="max-width:520px;padding:32px 24px;">
-  <div style="font-size:3em;margin-bottom:16px;">&#x2705;</div>
-  <h1 style="font-size:1.5em;color:#fff;margin:0 0 12px;">Server Claimed Successfully</h1>
-  <p style="color:#9999bb;line-height:1.6;margin-bottom:24px;">
-    Save your <strong style="color:#fff;">recovery key</strong> below. It is the
-    <strong style="color:#ffaa44;">only way</strong> to reclaim your server if you lose your device.
-    This key is shown <strong style="color:#ffaa44;">once</strong> and never stored on the server.
-  </p>
-  <div style="background:#1a1a2e;border:1px solid #2a2a44;border-radius:10px;
-  padding:20px;margin-bottom:16px;">
-    <div style="font-size:0.75em;color:#7777aa;text-transform:uppercase;
-    letter-spacing:0.08em;margin-bottom:10px;">Recovery Key</div>
-    <div id="rk-display" style="font-family:'SF Mono','Fira Code',Consolas,monospace;
-    font-size:0.9em;color:#88cc88;word-break:break-all;line-height:1.8;
-    user-select:all;"></div>
-    <button id="rk-copy" style="margin-top:12px;padding:8px 20px;
-    background:#2a2a44;color:#ccccee;border:1px solid #3a3a55;border-radius:6px;
-    font-size:0.85em;cursor:pointer;">Copy Recovery Key</button>
-  </div>
-  <div style="background:rgba(255,180,50,0.08);border:1px solid rgba(255,180,50,0.2);
-  border-radius:8px;padding:12px 16px;font-size:0.85em;color:#ddaa44;margin-bottom:20px;">
-    <strong>Write this down or save it in a password manager.</strong><br>
-    If you lose your device AND this key, you must redeploy with a fresh key volume.
-  </div>
-  <button id="rk-continue" style="padding:10px 28px;background:#2a4a2a;
-  color:#88cc88;border:1px solid #3a6a3a;border-radius:6px;font-size:0.95em;
-  cursor:pointer;">I've Saved It — Continue to Setup</button>
-</div>
-</div>
-</div>
-
-<script>
-(function() {{
-  var claimCode = '{full_hex}';
-
-  // Copy claim code button
-  document.getElementById('copy-btn').addEventListener('click', function() {{
-    copyToClipboard(claimCode, 'copy-btn', 'Copy Code');
-  }});
-
-  // Copy recovery key button
-  document.getElementById('rk-copy').addEventListener('click', function() {{
-    copyToClipboard(window._rkRaw || '', 'rk-copy', 'Copy Recovery Key');
-  }});
-
-  // Continue button on recovery key page
-  document.getElementById('rk-continue').addEventListener('click', function() {{
-    window.location.href = '/';
-  }});
-
-  function copyToClipboard(text, btnId, resetLabel) {{
-    var btn = document.getElementById(btnId);
-    if (navigator.clipboard && navigator.clipboard.writeText) {{
-      navigator.clipboard.writeText(text).then(function() {{
-        btn.textContent = 'Copied!';
-        setTimeout(function() {{ btn.textContent = resetLabel; }}, 2000);
-      }});
-    }} else {{
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      btn.textContent = 'Copied!';
-      setTimeout(function() {{ btn.textContent = resetLabel; }}, 2000);
-    }}
-  }}
-
-  // Poll for claim status. The session cookie set when this page was opened
-  // authenticates the poll, so the token never has to appear in a URL again.
-  var pollInterval = setInterval(function() {{
-    fetch('/setup/status', {{ credentials: 'same-origin' }})
-      .then(function(r) {{
-        if (!r.ok) return null;
-        return r.json();
-      }})
-      .then(function(data) {{
-        if (!data) return;
-        if (data.claimed) {{
-          clearInterval(pollInterval);
-          if (data.recovery_key) {{
-            showRecoveryKey(data.recovery_key);
-          }} else {{
-            window.location.href = '/';
-          }}
-        }}
-      }})
-      .catch(function() {{}});
-  }}, 2000);
-
-  function showRecoveryKey(key) {{
-    window._rkRaw = key;
-    var formatted = key.match(/.{{1,4}}/g).join('-');
-    document.getElementById('rk-display').textContent = formatted;
-    document.querySelector('.container').style.display = 'none';
-    document.getElementById('recovery-page').style.display = 'block';
-  }}
-}})();
-</script>
-</body>
-</html>"#
-    )
+    let body = CLAIM_BODY
+        .replace("{{GUIDE}}", TUNNEL_GUIDE)
+        .replace("{{QR}}", &svg)
+        .replace("{{CODE}}", &formatted);
+    let script = CLAIM_SCRIPT.replace("{{CLAIM_HEX}}", &full_hex);
+    html_document("StealthOS Relay: Claim Server", &body, &script)
 }
 
 /// Render a QR code as inline SVG from the module grid.
@@ -799,7 +1229,9 @@ fn render_qr_to_svg(data: &str) -> String {
     use qrcode::{EcLevel, QrCode};
 
     let Ok(code) = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L) else {
-        return String::from("<p>QR generation failed</p>");
+        return String::from(
+            "<p>The QR code could not be drawn. Enter the code below by hand.</p>",
+        );
     };
 
     let width = code.width();
@@ -830,44 +1262,26 @@ fn render_qr_to_svg(data: &str) -> String {
     svg
 }
 
+/// Where to find the setup link, used on the pages that ask for it.
+const FIND_SETUP_LINK: &str = r#"
+<p>If the console has scrolled away, search the relay's logs for the link.</p>
+<p class="os">Installed as a service on Linux</p>
+<div class="cmd"><pre><code>sudo journalctl -u stealth-relay | grep setup</code></pre></div>
+<p class="os">Docker</p>
+<div class="cmd"><pre><code>docker logs stealth-relay 2&gt;&amp;1 | grep setup</code></pre></div>
+"#;
+
 /// HTML page shown when visiting `/` before claiming.
 fn unclaimed_root_page() -> String {
-    String::from(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay</title>
-<style>
-  body {
-    margin: 0; padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0e6;
-    min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }
-  .container { max-width: 420px; padding: 32px 24px; }
-  h1 { font-size: 1.4em; color: #fff; margin: 0 0 12px 0; }
-  p { color: #9999bb; line-height: 1.6; }
-  code { background: #1a1a2e; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>StealthOS Relay</h1>
-  <p>
-    This server is waiting to be claimed.<br>
-    Check the server logs for the setup URL with the security token.
-  </p>
-</div>
-</body>
-</html>"#,
-    )
+    let body = format!(
+        r#"<main class="notice">
+<h1>Waiting to Be Claimed</h1>
+<p class="lede">To claim this relay, open its setup link.</p>
+<p>The relay printed the link to its console when it started. The link carries a token that protects the setup page.</p>
+{FIND_SETUP_LINK}
+</main>"#
+    );
+    html_document("StealthOS Relay", &body, "")
 }
 
 /// HTML page shown after the server has been claimed.
@@ -875,480 +1289,82 @@ fn unclaimed_root_page() -> String {
 /// and a client-side update check (browser fetches GitHub API, not the server).
 fn claimed_page(version: &str) -> String {
     // Use string replacement instead of format! to avoid escaping all CSS/JS braces.
-    CLAIMED_PAGE_TEMPLATE.replace("{{VERSION}}", version)
+    let body = READY_BODY
+        .replace("{{GUIDE}}", TUNNEL_GUIDE)
+        .replace("{{VERSION}}", version);
+    html_document("StealthOS Relay: Server Ready", &body, READY_SCRIPT)
 }
 
-const CLAIMED_PAGE_TEMPLATE: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay - Server Ready</title>
-<style>
-  *, *::before, *::after { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0e6;
-    line-height: 1.6;
-  }
-  .page { max-width: 720px; margin: 0 auto; padding: 32px 24px 64px; }
-  .hero {
-    text-align: center;
-    padding: 40px 0 32px;
-    border-bottom: 1px solid #1e1e36;
-    margin-bottom: 32px;
-  }
-  .hero .icon { font-size: 3em; margin-bottom: 12px; }
-  .hero h1 { font-size: 1.6em; color: #fff; margin: 0 0 8px; }
-  .hero p { color: #9999bb; margin: 0; font-size: 0.95em; }
-  .status-bar {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-    justify-content: center;
-    margin-top: 16px;
-  }
-  .status-item {
-    background: #1a1a2e;
-    border: 1px solid #2a2a44;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 0.85em;
-  }
-  .status-item .label { color: #7777aa; }
-  .status-item .value { color: #88cc88; font-family: monospace; }
-  .update-banner {
-    display: none;
-    background: rgba(100, 200, 100, 0.08);
-    border: 1px solid rgba(100, 200, 100, 0.25);
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin: 20px 0;
-    text-align: center;
-  }
-  .update-banner.visible { display: block; }
-  .update-banner .new-ver { color: #88cc88; font-weight: 600; }
-  .update-banner code { font-size: 0.85em; }
-  h2 {
-    font-size: 1.25em;
-    color: #fff;
-    margin: 36px 0 8px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid #1e1e36;
-  }
-  h3 { font-size: 1.05em; color: #ccccee; margin: 24px 0 8px; }
-  p, li { color: #b0b0cc; font-size: 0.92em; }
-  a { color: #6699ff; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .next-step {
-    background: #1a1a2e;
-    border: 1px solid #2a2a44;
-    border-radius: 10px;
-    padding: 20px 24px;
-    margin: 20px 0;
-  }
-  .next-step h3 { margin-top: 0; color: #fff; }
-  .tunnel-option {
-    background: #12121f;
-    border: 1px solid #22223a;
-    border-radius: 10px;
-    padding: 20px 24px;
-    margin: 16px 0;
-  }
-  .tunnel-option h3 {
-    margin: 0 0 4px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .tunnel-option .badge {
-    font-size: 0.7em;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-weight: normal;
-  }
-  .badge-easy { background: #1a3a2a; color: #66cc88; }
-  .badge-rec  { background: #1a2a3a; color: #66aaff; }
-  .tunnel-option .tagline {
-    color: #7777aa;
-    font-size: 0.85em;
-    margin: 0 0 12px;
-  }
-  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
-  .steps li {
-    counter-increment: step;
-    position: relative;
-    padding-left: 32px;
-    margin-bottom: 10px;
-  }
-  .steps li::before {
-    content: counter(step);
-    position: absolute;
-    left: 0;
-    width: 22px; height: 22px;
-    background: #2a2a44;
-    border-radius: 50%;
-    text-align: center;
-    line-height: 22px;
-    font-size: 0.75em;
-    color: #8888bb;
-  }
-  code {
-    background: #1a1a2e;
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-size: 0.88em;
-    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
-    color: #ccccee;
-  }
-  pre {
-    background: #0d0d18;
-    border: 1px solid #22223a;
-    border-radius: 8px;
-    padding: 14px 18px;
-    overflow-x: auto;
-    font-size: 0.85em;
-    line-height: 1.5;
-    margin: 10px 0;
-  }
-  pre code { background: none; padding: 0; color: #ccddee; }
-  .copy-wrap { position: relative; }
-  .copy-wrap button {
-    position: absolute;
-    top: 8px; right: 8px;
-    background: #2a2a44;
-    border: 1px solid #3a3a55;
-    color: #aaaacc;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 0.75em;
-    cursor: pointer;
-  }
-  .copy-wrap button:hover { background: #3a3a55; }
-  .note {
-    background: rgba(100, 150, 255, 0.06);
-    border: 1px solid rgba(100, 150, 255, 0.15);
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-size: 0.85em;
-    color: #99aacc;
-    margin: 12px 0;
-  }
-  .warn {
-    background: rgba(255, 180, 50, 0.06);
-    border: 1px solid rgba(255, 180, 50, 0.15);
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-size: 0.85em;
-    color: #ccaa66;
-    margin: 12px 0;
-  }
-  .footer {
-    text-align: center;
-    margin-top: 48px;
-    padding-top: 24px;
-    border-top: 1px solid #1e1e36;
-    color: #555577;
-    font-size: 0.8em;
-  }
-  .footer a { color: #6677aa; }
-</style>
-</head>
-<body>
-<div class="page">
+/// Body of the page shown once the server is claimed.
+const READY_BODY: &str = r##"
+<div class="manual">
+  <nav class="contents" aria-label="On this page">
+    <p>On this page</p>
+    <ul>
+      <li><a href="#address">Public address</a></li>
+      <li><a href="#ngrok">ngrok</a></li>
+      <li><a href="#cloudflare">Cloudflare Tunnel</a></li>
+      <li><a href="#tailscale">Tailscale Funnel</a></li>
+      <li><a href="#check">Check it works</a></li>
+      <li><a href="#in-app">Use it in StealthOS</a></li>
+    </ul>
+  </nav>
 
-  <div class="hero">
-    <div class="icon">&#x2705;</div>
-    <h1>Server Claimed &amp; Running</h1>
-    <p>Your StealthOS Relay is ready. Now let's make it reachable from the internet.</p>
-    <div class="status-bar">
-      <div class="status-item">
-        <span class="label">WebSocket</span>
-        <span class="value">ws://localhost:9090</span>
-      </div>
-      <div class="status-item">
-        <span class="label">Status</span>
-        <span class="value">Online</span>
-      </div>
-      <div class="status-item">
-        <span class="label">Version</span>
-        <span class="value" id="current-version">{{VERSION}}</span>
-      </div>
+  <main class="manual-main">
+    <h1>Server Claimed</h1>
+    <p class="lede">This relay is running and belongs to the device that claimed it. Only that device can host pools here.</p>
+    <p class="small">Relay version <span id="current-version">{{VERSION}}</span></p>
+
+    <div class="update" id="update-banner">
+      <p class="update-title">A new version is available: <span id="new-version"></span></p>
+      <p>To update a native install, run this on the server. Your keys and config are kept.</p>
+      <div class="cmd"><pre><code>curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash -s -- --update</code></pre></div>
+      <p class="small"><a href="https://github.com/Olib-AI/StealthRelay/releases" target="_blank" rel="noopener">Read the release notes</a></p>
     </div>
-  </div>
 
-  <div class="update-banner" id="update-banner">
-    <p>
-      A new version is available: <span class="new-ver" id="new-version"></span>
-    </p>
-    <p>Update with: <code>curl -fsSL https://raw.githubusercontent.com/Olib-AI/StealthRelay/main/scripts/install.sh | bash -s -- --update</code></p>
-    <p style="font-size:0.8em; color:#7777aa; margin-top:8px;">
-      <a href="https://github.com/Olib-AI/StealthRelay/releases" target="_blank" rel="noopener">View release notes</a>
-    </p>
-  </div>
+    <h2 id="address">Give it a public address</h2>
+    <div class="prose">
+      <p>People you invite connect through the address in their invitation. StealthOS accepts only <code>wss://</code> addresses, so that address has to be HTTPS. A tunnel gives the relay one without opening a port or managing a certificate.</p>
+    </div>
 
-  <div class="next-step">
-    <h3>What's next?</h3>
-    <p>
-      Your relay is running on your local network, but your friends can't reach it from the
-      internet yet. You need a <strong>secure tunnel</strong> that gives your server a public
-      HTTPS address &mdash; no port forwarding, no domain purchase, completely free.
-    </p>
-    <p>Pick one of the options below. We recommend starting with <strong>ngrok</strong> if
-    you want the fastest setup, or <strong>Cloudflare Tunnel</strong> for a permanent solution.</p>
-  </div>
-
-  <!-- ── Option 1: ngrok ────────────────────────────────────── -->
-  <div class="tunnel-option">
-    <h3>
-      ngrok
-      <span class="badge badge-easy">Easiest</span>
-    </h3>
-    <p class="tagline">One command, instant HTTPS. Free tier includes 1 static domain.</p>
-
-    <ol class="steps">
-      <li>
-        Create a free account at
-        <a href="https://ngrok.com/signup" target="_blank" rel="noopener">ngrok.com/signup</a>
-      </li>
-      <li>
-        Install ngrok:
-        <div class="copy-wrap">
-          <pre><code># macOS
-brew install ngrok
-
-# Linux (snap)
-sudo snap install ngrok
-
-# Or download from https://ngrok.com/download</code></pre>
-        </div>
-      </li>
-      <li>
-        Add your auth token (from the ngrok dashboard):
-        <div class="copy-wrap">
-          <pre><code>ngrok config add-authtoken YOUR_TOKEN</code></pre>
-        </div>
-      </li>
-      <li>
-        Start the tunnel:
-        <div class="copy-wrap">
-          <pre><code>ngrok tcp 9090</code></pre>
-        </div>
-        <div class="note">
-          ngrok will display a forwarding address like <code>tcp://0.tcp.ngrok.io:12345</code>.
-          Use this as your server URL in the StealthOS app.
-        </div>
-      </li>
-      <li>
-        <strong>For a permanent address</strong>, claim your free static domain in the
-        <a href="https://dashboard.ngrok.com/domains" target="_blank" rel="noopener">ngrok dashboard</a>, then:
-        <div class="copy-wrap">
-          <pre><code>ngrok tcp --domain=your-name.ngrok-free.app 9090</code></pre>
-        </div>
-      </li>
+    <ol class="route" aria-label="How a connection reaches this relay">
+      <li class="stop"><strong>StealthOS</strong><span>on each device</span></li>
+      <li class="hop" aria-label="over">wss://</li>
+      <li class="stop"><strong>Tunnel</strong><span>TLS ends here</span></li>
+      <li class="hop" aria-label="over">http://</li>
+      <li class="stop is-relay"><strong>This relay</strong><span>port 9090</span></li>
     </ol>
-    <div class="note">
-      <strong>Free tier:</strong> 1 static domain, 1 online ngrok process, 20,000 connections/month.
-      Plenty for personal use.
+
+    <div class="prose">
+      <p>If you claimed over an address that lasts, you already have what you need: go to <a href="#check">Check it works</a>. If you deployed to Fly.io, Railway, Render or DigitalOcean, the provider's HTTPS address is yours to use.</p>
     </div>
-  </div>
 
-  <!-- ── Option 2: Cloudflare Tunnel ────────────────────────── -->
-  <div class="tunnel-option">
-    <h3>
-      Cloudflare Tunnel
-      <span class="badge badge-rec">Recommended for permanent setup</span>
-    </h3>
-    <p class="tagline">Unlimited bandwidth, no port forwarding, keeps your IP hidden. Requires a free Cloudflare account.</p>
+    {{GUIDE}}
 
-    <ol class="steps">
-      <li>
-        Create a free account at
-        <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">dash.cloudflare.com</a>
-      </li>
-      <li>
-        Install cloudflared:
-        <div class="copy-wrap">
-          <pre><code># macOS
-brew install cloudflared
-
-# Ubuntu / Debian
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-  | sudo tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
-  | sudo tee /etc/apt/sources.list.d/cloudflared.list
-sudo apt update && sudo apt install cloudflared
-
-# Or download from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/</code></pre>
-        </div>
-      </li>
-      <li>
-        Log in to Cloudflare:
-        <div class="copy-wrap">
-          <pre><code>cloudflared tunnel login</code></pre>
-        </div>
-        <p>This opens a browser window to authorize your account.</p>
-      </li>
-      <li>
-        Create a tunnel:
-        <div class="copy-wrap">
-          <pre><code>cloudflared tunnel create stealth-relay</code></pre>
-        </div>
-      </li>
-      <li>
-        Route traffic to your relay:
-        <div class="copy-wrap">
-          <pre><code>cloudflared tunnel route dns stealth-relay relay.yourdomain.com</code></pre>
-        </div>
-      </li>
-      <li>
-        Start the tunnel:
-        <div class="copy-wrap">
-          <pre><code>cloudflared tunnel --url http://localhost:9090 run stealth-relay</code></pre>
-        </div>
-      </li>
-      <li>
-        Use <code>wss://relay.yourdomain.com</code> as your server URL in the StealthOS app.
-      </li>
-    </ol>
-    <div class="note">
-      <strong>Free tier:</strong> Unlimited bandwidth, unlimited tunnels.
-      You need a domain on Cloudflare (can transfer an existing one, or buy one from ~$10/year).
-    </div>
-    <div class="note">
-      <strong>Don't have a domain?</strong> Use the quick tunnel instead &mdash; no domain needed:
-      <pre><code>cloudflared tunnel --url http://localhost:9090</code></pre>
-      This gives you a temporary <code>https://xxxx-xxxx.trycloudflare.com</code> address.
-      It changes every time you restart, but it's great for testing.
-    </div>
-  </div>
-
-  <!-- ── Option 3: Tailscale Funnel ─────────────────────────── -->
-  <div class="tunnel-option">
-    <h3>
-      Tailscale Funnel
-      <span class="badge badge-easy">No domain needed</span>
-    </h3>
-    <p class="tagline">Expose your relay over HTTPS using your Tailscale network. Free for personal use.</p>
-
-    <ol class="steps">
-      <li>
-        Create a free account at
-        <a href="https://tailscale.com/signup" target="_blank" rel="noopener">tailscale.com</a>
-        and install Tailscale on this machine.
-        <div class="copy-wrap">
-          <pre><code># macOS
-brew install tailscale
-
-# Ubuntu / Debian
-curl -fsSL https://tailscale.com/install.sh | sh
-
-# Or see https://tailscale.com/download</code></pre>
-        </div>
-      </li>
-      <li>
-        Connect to your Tailscale network:
-        <div class="copy-wrap">
-          <pre><code>sudo tailscale up</code></pre>
-        </div>
-      </li>
-      <li>
-        Enable Funnel for port 9090:
-        <div class="copy-wrap">
-          <pre><code>sudo tailscale funnel 9090</code></pre>
-        </div>
-      </li>
-      <li>
-        Tailscale will show you your public URL, something like:
-        <code>https://your-machine.tailnet-name.ts.net</code>
-        <p>Use this as your server URL in the StealthOS app (it supports WebSocket over HTTPS).</p>
-      </li>
-    </ol>
-    <div class="note">
-      <strong>Free tier:</strong> Up to 3 users, HTTPS included, no domain needed.
-      Your URL is based on your machine name and Tailscale account.
-    </div>
-  </div>
-
-  <!-- ── Comparison ──────────────────────────────────────────── -->
-  <h2>Which one should I pick?</h2>
-  <table style="width:100%; border-collapse:collapse; font-size:0.88em; margin-top:12px;">
-    <thead>
-      <tr style="border-bottom:1px solid #2a2a44; text-align:left;">
-        <th style="padding:8px; color:#9999bb;"></th>
-        <th style="padding:8px; color:#9999bb;">ngrok</th>
-        <th style="padding:8px; color:#9999bb;">Cloudflare</th>
-        <th style="padding:8px; color:#9999bb;">Tailscale</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr style="border-bottom:1px solid #1e1e36;">
-        <td style="padding:8px; color:#8888bb;">Setup time</td>
-        <td style="padding:8px;">~2 min</td>
-        <td style="padding:8px;">~10 min</td>
-        <td style="padding:8px;">~5 min</td>
-      </tr>
-      <tr style="border-bottom:1px solid #1e1e36;">
-        <td style="padding:8px; color:#8888bb;">Needs domain?</td>
-        <td style="padding:8px;">No</td>
-        <td style="padding:8px;">Yes (or use quick tunnel)</td>
-        <td style="padding:8px;">No</td>
-      </tr>
-      <tr style="border-bottom:1px solid #1e1e36;">
-        <td style="padding:8px; color:#8888bb;">Permanent URL</td>
-        <td style="padding:8px;">1 free static domain</td>
-        <td style="padding:8px;">Yes (your domain)</td>
-        <td style="padding:8px;">Yes (*.ts.net)</td>
-      </tr>
-      <tr style="border-bottom:1px solid #1e1e36;">
-        <td style="padding:8px; color:#8888bb;">Bandwidth</td>
-        <td style="padding:8px;">1 GB/mo free</td>
-        <td style="padding:8px;">Unlimited</td>
-        <td style="padding:8px;">Unlimited</td>
-      </tr>
-      <tr>
-        <td style="padding:8px; color:#8888bb;">Best for</td>
-        <td style="padding:8px;">Quick testing</td>
-        <td style="padding:8px;">Permanent setup</td>
-        <td style="padding:8px;">Personal use</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="warn">
-    <strong>Important:</strong> After setting up your tunnel, update the server URL in the
-    StealthOS app to the new <code>wss://</code> address. Your friends will use this address
-    in their invitation links.
-  </div>
-
-  <h2>Verify it works</h2>
-  <p>Once your tunnel is running, test from any device:</p>
-  <div class="copy-wrap">
-    <pre><code># Replace with your tunnel URL
-curl -i --http1.1 \
+    <h2 id="check">Check it works</h2>
+    <p>From any device, with your own address in place of <code>your-tunnel-url</code>:</p>
+    <div class="cmd"><pre><code>curl -i --http1.1 \
   -H "Connection: Upgrade" \
   -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" \
-  -H "Sec-WebSocket-Key: dGVzdA==" \
-  https://your-tunnel-url/</code></pre>
-  </div>
-  <p>You should see a <code>101 Switching Protocols</code> response. That means your relay
-  is live and reachable from the internet.</p>
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  https://your-tunnel-url/</code></pre></div>
+    <p>You should see <code>101 Switching Protocols</code>, which means the relay answers from the internet. curl then keeps the connection open, so press Ctrl+C to end it.</p>
 
-  <div class="footer">
-    <p>
-      <a href="https://github.com/Olib-AI/StealthRelay" target="_blank" rel="noopener">StealthRelay</a>
-      by <a href="https://www.olib.ai" target="_blank" rel="noopener">Olib AI</a>
-      &mdash;
-      <a href="https://www.stealthos.app" target="_blank" rel="noopener">StealthOS</a>
-    </p>
-  </div>
+    <h2 id="in-app">Use it in StealthOS</h2>
+    <p>If the app still has a different address for this relay, open Connection Pool, edit the saved server's URL and enter the new <code>wss://</code> address. Invitations you create after that carry the new address.</p>
 
+    <footer class="foot">
+      <p><a href="https://github.com/Olib-AI/StealthRelay" target="_blank" rel="noopener">StealthRelay</a> is made by <a href="https://www.olib.ai" target="_blank" rel="noopener">Olib AI</a> for <a href="https://www.stealthos.app" target="_blank" rel="noopener">StealthOS</a>.</p>
+      <p>This page checks for a new version by asking GitHub from your browser, not from the relay.</p>
+    </footer>
+  </main>
 </div>
-<script>
-// Client-side update check — the BROWSER fetches the GitHub API, not the server.
+"##;
+
+/// Update check for the page shown once the server is claimed.
+const READY_SCRIPT: &str = r"
+// Client-side update check: the BROWSER fetches the GitHub API, not the server.
 // Zero privacy impact on the relay. No outbound connections from your server.
 (function() {
   var current = document.getElementById('current-version').textContent.replace(/^v/, '');
@@ -1362,7 +1378,7 @@ curl -i --http1.1 \
         document.getElementById('update-banner').classList.add('visible');
       }
     })
-    .catch(function() { /* silently ignore — no connectivity or rate limited */ });
+    .catch(function() { /* silently ignore: no connectivity or rate limited */ });
 
   function compareSemver(a, b) {
     var pa = a.split('.').map(Number);
@@ -1374,85 +1390,49 @@ curl -i --http1.1 \
     return 0;
   }
 })();
-</script>
-</body>
-</html>"#;
+";
 
-/// Minimal styled page for the non-secret outcomes: denied, locked out,
-/// window closed. Kept to one template so the three read alike.
-fn notice_page(icon: &str, title: &str, body: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StealthOS Relay - {title}</title>
-<style>
-  body {{
-    margin: 0; padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f0f1a;
-    color: #e0e0e6;
-    min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-  }}
-  .container {{ max-width: 420px; padding: 32px 24px; }}
-  .icon {{ font-size: 3em; margin-bottom: 16px; }}
-  h1 {{ font-size: 1.4em; color: #fff; margin: 0 0 12px 0; }}
-  p {{ color: #9999bb; line-height: 1.6; }}
-  code {{
-    background: #1a1a2e;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.9em;
-  }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="icon">{icon}</div>
-  <h1>{title}</h1>
-  <p>{body}</p>
-</div>
-</body>
-</html>"#
-    )
+/// Minimal page for the non-secret outcomes: denied, locked out, window
+/// closed. Kept to one template so the three read alike.
+fn notice_page(title: &str, body: &str) -> String {
+    let main = format!(r#"<main class="notice"><h1>{title}</h1>{body}</main>"#);
+    html_document(&format!("StealthOS Relay: {title}"), &main, "")
 }
 
 /// HTML page shown when the token is missing or invalid.
 fn forbidden_page() -> String {
     notice_page(
-        "&#x1F512;",
         "Access Denied",
-        "A valid setup token is required to access this page. \
-         The setup URL, with its token, is printed to the server console \
-         at startup.",
+        &format!(
+            r#"<p class="lede">This page needs the relay's setup link, with its token.</p>
+<p>The relay printed the link to its console when it started. Each restart prints a new link, and the old one stops working.</p>
+{FIND_SETUP_LINK}"#
+        ),
     )
 }
 
 /// HTML page shown after too many bad tokens from one address.
 fn locked_out_page() -> String {
+    let minutes = TOKEN_LOCKOUT.as_secs() / 60;
     notice_page(
-        "&#x23F3;",
         "Too Many Attempts",
-        "Too many invalid setup tokens came from this address. \
-         Try again in a few minutes.",
+        &format!(
+            r#"<p class="lede">The relay received {MAX_TOKEN_ATTEMPTS} wrong setup tokens from this address, so it is refusing this address for {minutes} minutes.</p>
+<p>After that, open the setup link exactly as the relay printed it.</p>"#
+        ),
     )
 }
 
 /// HTML page shown once the setup window has closed.
 fn expired_page() -> String {
     notice_page(
-        "&#x23F0;",
         "Setup Window Closed",
-        "This server stopped handing out its claim code a while after \
-         starting up, so that a setup link cannot be used long after it was \
-         issued. Restart the relay to open a new setup window, or claim the \
-         server with the code from the startup console.",
+        r#"<p class="lede">This relay has stopped showing its claim code, so that an old setup link cannot be used.</p>
+<p>The code is shown for a limited time after the relay starts: one hour by default. The server is still unclaimed, and there are two ways to claim it:</p>
+<ul>
+<li>Restart the relay. It prints a new setup link and shows the code again for the same time.</li>
+<li>Enter the code by hand in the StealthOS app. The code is in the relay's startup console. If its output goes to a log instead, run <code>stealth-relay claim-code</code> on the server.</li>
+</ul>"#,
     )
 }
 
@@ -1748,6 +1728,75 @@ mod tests {
                 .get(axum::http::header::CONTENT_SECURITY_POLICY)
                 .is_some()
         );
+    }
+
+    /// Every page in its every form, for the checks that apply to all of them.
+    fn all_pages() -> Vec<String> {
+        vec![
+            render_setup_page(&[0xab; 32]),
+            unclaimed_root_page(),
+            claimed_page("0.0.0-test"),
+            forbidden_page(),
+            locked_out_page(),
+            expired_page(),
+        ]
+    }
+
+    /// ASCII only rules out em and en dashes and emoji in one check; the
+    /// entity forms have to be ruled out by name.
+    #[test]
+    fn pages_have_no_dashes_or_emoji() {
+        for html in all_pages() {
+            assert!(html.is_ascii(), "non-ASCII text in a page");
+            for entity in ["&mdash;", "&ndash;", "&#x1F", "&#x23", "&#x27"] {
+                assert!(!html.contains(entity), "{entity} in a page");
+            }
+        }
+    }
+
+    /// The CSP allows no outside fonts, images or stylesheets, so the pages
+    /// must not depend on any.
+    #[test]
+    fn pages_load_nothing_from_outside() {
+        for html in all_pages() {
+            for reference in ["<link", "<img", "@import", "@font-face", "url(", "src="] {
+                assert!(!html.contains(reference), "{reference} in a page");
+            }
+        }
+    }
+
+    /// The claim page script and markup have to agree on what the code is,
+    /// and the poll has to keep hitting the status route.
+    #[test]
+    fn claim_page_keeps_code_and_poll() {
+        let html = render_setup_page(&[0xab; 32]);
+        assert!(html.contains(&format!("var claimCode = '{}'", "ab".repeat(32))));
+        assert!(html.contains("fetch('/setup/status'"));
+        assert!(!html.contains("{{"));
+        for id in [
+            "claim-code",
+            "copy-btn",
+            "rk-display",
+            "rk-copy",
+            "rk-continue",
+        ] {
+            assert!(html.contains(&format!("id=\"{id}\"")), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn claimed_page_shows_version_and_no_claim_material() {
+        let html = claimed_page("1.2.3");
+        assert!(html.contains(">1.2.3<"));
+        assert!(!html.contains("{{"));
+        assert!(!html.contains("claim-code\""));
+    }
+
+    #[test]
+    fn locked_out_page_states_the_real_limits() {
+        let html = locked_out_page();
+        assert!(html.contains(&format!("{MAX_TOKEN_ATTEMPTS} wrong setup tokens")));
+        assert!(html.contains(&format!("{} minutes", TOKEN_LOCKOUT.as_secs() / 60)));
     }
 
     #[test]

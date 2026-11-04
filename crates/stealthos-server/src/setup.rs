@@ -33,6 +33,7 @@ use axum::{Router, routing::get};
 use rand_core::Rng;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 use crate::claim::{self, ClaimState};
 
@@ -54,6 +55,13 @@ const TOKEN_LOCKOUT: Duration = Duration::from_secs(300);
 /// Cap on addresses tracked by the throttle, so a spray from many sources
 /// cannot grow the map without bound.
 const MAX_TRACKED_CLIENTS: usize = 1024;
+
+/// How long after a claim the recovery key stays in memory for a page to read.
+///
+/// An open claim page polls every two seconds. Browsers can slow a background
+/// tab's timers to about one poll a minute, so this leaves such a tab plenty of
+/// polls, while keeping the plaintext key from outliving the claim.
+const RECOVERY_KEY_WINDOW: Duration = Duration::from_secs(600);
 
 /// Response headers for every setup page.
 ///
@@ -153,6 +161,14 @@ enum Access {
     LockedOut,
 }
 
+/// A recovery key waiting for a claim page to read it.
+struct PendingRecoveryKey {
+    /// The key as a hex string, wiped when this value is dropped.
+    key: Zeroizing<String>,
+    /// When the key stops being served and is cleared from memory.
+    expires_at: tokio::time::Instant,
+}
+
 /// Shared state for the setup page handler.
 pub struct SetupState {
     /// One-time setup token. Printed to stderr at startup and required, once,
@@ -164,9 +180,10 @@ pub struct SetupState {
     claim_state: Arc<Mutex<ClaimState>>,
     /// Server version string (from `CARGO_PKG_VERSION`).
     version: &'static str,
-    /// Recovery key (hex string), set once at claim time, cleared after first read.
-    /// This allows the setup page to show the recovery key one time after claiming.
-    recovery_key: Mutex<Option<String>>,
+    /// Recovery key, set at claim time and cleared by the first read or by the
+    /// end of [`RECOVERY_KEY_WINDOW`], whichever comes first. This allows the
+    /// setup page to show the recovery key one time after claiming.
+    recovery_key: Mutex<Option<PendingRecoveryKey>>,
     /// When this state was created, i.e. server startup.
     opened_at: Instant,
     /// How long after `opened_at` the claim secret stays available.
@@ -281,21 +298,54 @@ impl SetupState {
     }
 
     /// Store the recovery key after a successful claim. Called by the handler.
-    pub fn set_recovery_key(&self, key_hex: String) {
+    ///
+    /// A spawned timer clears the key at the end of [`RECOVERY_KEY_WINDOW`], so
+    /// it leaves memory even if no page ever polls. The timer holds only a weak
+    /// reference: if the state goes first, dropping it wipes the key anyway.
+    ///
+    /// Must be called from within the tokio runtime.
+    pub fn set_recovery_key(self: &Arc<Self>, key_hex: String) {
+        let expires_at = tokio::time::Instant::now() + RECOVERY_KEY_WINDOW;
+        *self
+            .recovery_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(PendingRecoveryKey {
+            key: Zeroizing::new(key_hex),
+            expires_at,
+        });
+
+        let state = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(expires_at).await;
+            if let Some(state) = state.upgrade() {
+                state.clear_recovery_key_expiring_at(expires_at);
+            }
+        });
+    }
+
+    /// Clear the pending recovery key, wiping it, if it is the one that expires
+    /// at `expires_at`. A key stored later has its own deadline and its own timer.
+    fn clear_recovery_key_expiring_at(&self, expires_at: tokio::time::Instant) {
         let mut rk = self
             .recovery_key
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *rk = Some(key_hex);
+        if rk.as_ref().is_some_and(|p| p.expires_at == expires_at) {
+            *rk = None;
+        }
     }
 
     /// Take the recovery key (returns it once, then clears it).
-    fn take_recovery_key(&self) -> Option<String> {
-        let mut rk = self
+    ///
+    /// Checks the deadline as well as relying on the timer, so a late timer on a
+    /// busy runtime cannot serve the key after its window.
+    fn take_recovery_key(&self) -> Option<Zeroizing<String>> {
+        let pending = self
             .recovery_key
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        rk.take()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        (tokio::time::Instant::now() < pending.expires_at).then_some(pending.key)
     }
 
     /// Check if the server has been claimed.
@@ -469,7 +519,8 @@ fn redirect_to_session(state: &SetupState) -> Response {
 /// GET /setup/status — JSON endpoint polled by the setup page JS.
 ///
 /// Returns claim status and, once after claiming, the recovery key.
-/// The recovery key is cleared after the first read (one-time).
+/// The recovery key is cleared after the first read (one-time), or at the end
+/// of [`RECOVERY_KEY_WINDOW`] if nothing reads it.
 /// Protected by the same session or token as `/setup`.
 async fn status_handler(
     State(state): State<Arc<SetupState>>,
@@ -507,7 +558,7 @@ async fn status_handler(
         status,
         axum::Json(serde_json::json!({
             "claimed": claimed,
-            "recovery_key": recovery_key,
+            "recovery_key": recovery_key.as_deref().map(String::as_str),
         })),
     )
         .into_response();
@@ -1066,8 +1117,8 @@ sudo brew services start tailscale</code></pre></div>
 </section>
 "##;
 
-/// Body of the claim page. `{{QR}}`, `{{CODE}}` and `{{GUIDE}}` are filled in
-/// by [`render_setup_page`].
+/// Body of the claim page. `{{QR}}`, `{{CODE}}`, `{{GUIDE}}` and
+/// `{{RECOVERY_MINUTES}}` are filled in by [`render_setup_page`].
 const CLAIM_BODY: &str = r#"
 <main class="claim" id="claim-view">
   <div class="claim-intro">
@@ -1103,7 +1154,7 @@ const CLAIM_BODY: &str = r#"
         <p>When the app asks you to claim the server, choose Scan QR Code and point the camera at this page, or enter the code by hand.</p>
       </li>
       <li><strong>Save your recovery key.</strong>
-        <p>The app shows it after the claim. Keep this page open and it appears here too.</p>
+        <p>The app shows it after the claim. Keep this page open and it appears here too. The relay discards its copy {{RECOVERY_MINUTES}} minutes after the claim, even if this page never showed it.</p>
       </li>
     </ol>
     <p class="small claim-window">By default the relay stops showing this code one hour after it starts. Restarting it starts the hour again and prints a new setup link.</p>
@@ -1212,6 +1263,10 @@ fn render_setup_page(claim_secret: &[u8; 32]) -> String {
 
     let body = CLAIM_BODY
         .replace("{{GUIDE}}", TUNNEL_GUIDE)
+        .replace(
+            "{{RECOVERY_MINUTES}}",
+            &(RECOVERY_KEY_WINDOW.as_secs() / 60).to_string(),
+        )
         .replace("{{QR}}", &svg)
         .replace("{{CODE}}", &formatted);
     let script = CLAIM_SCRIPT.replace("{{CLAIM_HEX}}", &full_hex);
@@ -1313,6 +1368,7 @@ const READY_BODY: &str = r##"
   <main class="manual-main">
     <h1>Server Claimed</h1>
     <p class="lede">This relay is running and belongs to the device that claimed it. Only that device can host pools here.</p>
+    <p>The app showed your recovery key when you claimed this server. This page does not show it.</p>
     <p class="small">Relay version <span id="current-version">{{VERSION}}</span></p>
 
     <div class="update" id="update-banner">
@@ -1797,6 +1853,114 @@ mod tests {
         let html = locked_out_page();
         assert!(html.contains(&format!("{MAX_TOKEN_ATTEMPTS} wrong setup tokens")));
         assert!(html.contains(&format!("{} minutes", TOKEN_LOCKOUT.as_secs() / 60)));
+    }
+
+    const TEST_RECOVERY_KEY: &str =
+        "abababababababababababababababababababababababababababababababab";
+
+    /// `true` while the server still holds a recovery key in memory. Looks at
+    /// the slot itself, because a read could hide a key that was never cleared.
+    fn recovery_key_held(setup: &SetupState) -> bool {
+        setup.recovery_key.lock().unwrap().is_some()
+    }
+
+    /// Poll `/setup/status` as an open claim page does.
+    async fn poll_status(setup: &Arc<SetupState>) -> serde_json::Value {
+        let resp = get(setup, "/setup/status", Some(&session_cookie_of(setup))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        serde_json::from_str(&body_string(resp).await).unwrap()
+    }
+
+    /// With nobody polling, the key must still leave memory when the window ends.
+    #[tokio::test(start_paused = true)]
+    async fn unread_recovery_key_is_cleared_without_any_poll() {
+        let setup = make_claimed_state();
+        setup.set_recovery_key(TEST_RECOVERY_KEY.to_owned());
+        assert!(recovery_key_held(&setup));
+
+        tokio::time::sleep(RECOVERY_KEY_WINDOW.saturating_sub(Duration::from_secs(1))).await;
+        assert!(recovery_key_held(&setup), "cleared before the window ended");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !recovery_key_held(&setup),
+            "still in memory after the window"
+        );
+    }
+
+    /// Someone polling with a valid setup link after the window gets nothing.
+    #[tokio::test(start_paused = true)]
+    async fn poll_after_the_window_gets_no_recovery_key() {
+        let setup = make_claimed_state();
+        setup.set_recovery_key(TEST_RECOVERY_KEY.to_owned());
+
+        tokio::time::sleep(RECOVERY_KEY_WINDOW + Duration::from_secs(1)).await;
+
+        let status = poll_status(&setup).await;
+        assert_eq!(status["claimed"], true);
+        assert!(status["recovery_key"].is_null());
+    }
+
+    /// A page polling at the last moment of the window still gets the key, once.
+    #[tokio::test(start_paused = true)]
+    async fn poll_in_the_window_gets_the_recovery_key_once() {
+        let setup = make_claimed_state();
+        setup.set_recovery_key(TEST_RECOVERY_KEY.to_owned());
+
+        tokio::time::sleep(RECOVERY_KEY_WINDOW.saturating_sub(Duration::from_secs(1))).await;
+
+        let first = poll_status(&setup).await;
+        assert_eq!(first["recovery_key"], TEST_RECOVERY_KEY);
+        assert!(!recovery_key_held(&setup), "still in memory after the read");
+
+        let second = poll_status(&setup).await;
+        assert_eq!(second["claimed"], true);
+        assert!(second["recovery_key"].is_null());
+    }
+
+    /// The timer for an older key must not cut a newer key's window short.
+    #[tokio::test(start_paused = true)]
+    async fn timer_for_an_older_key_leaves_a_newer_key_alone() {
+        let setup = make_claimed_state();
+        setup.set_recovery_key("older".to_owned());
+        tokio::time::sleep(RECOVERY_KEY_WINDOW / 2).await;
+        setup.set_recovery_key(TEST_RECOVERY_KEY.to_owned());
+
+        // Past the older key's deadline, inside the newer key's window.
+        tokio::time::sleep(RECOVERY_KEY_WINDOW / 2 + Duration::from_secs(1)).await;
+        assert!(recovery_key_held(&setup));
+
+        tokio::time::sleep(RECOVERY_KEY_WINDOW / 2).await;
+        assert!(!recovery_key_held(&setup));
+    }
+
+    /// The timer holds no strong reference, so it cannot keep the state, and
+    /// with it the key, alive past shutdown of the setup surface.
+    #[tokio::test(start_paused = true)]
+    async fn timer_does_not_keep_the_state_alive() {
+        let setup = make_claimed_state();
+        setup.set_recovery_key(TEST_RECOVERY_KEY.to_owned());
+        tokio::task::yield_now().await;
+        assert_eq!(Arc::strong_count(&setup), 1);
+    }
+
+    /// The claim page must say the relay only holds the key for a while, and
+    /// the number it gives must be the one the server enforces.
+    #[test]
+    fn claim_page_states_the_recovery_key_window() {
+        let html = render_setup_page(&[0xab; 32]);
+        assert!(html.contains("Keep this page open and it appears here too."));
+        let minutes = RECOVERY_KEY_WINDOW.as_secs() / 60;
+        assert!(html.contains(&format!("{minutes} minutes after the claim")));
+    }
+
+    /// A page opened after the claim, or redirected there after the window,
+    /// must send the reader to what the app showed, not imply a key is coming.
+    #[test]
+    fn claimed_page_says_the_app_showed_the_recovery_key() {
+        let html = claimed_page("0.0.0-test");
+        assert!(html.contains("The app showed your recovery key when you claimed this server."));
+        assert!(html.contains("This page does not show it."));
     }
 
     #[test]

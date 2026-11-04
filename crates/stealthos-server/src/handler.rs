@@ -1331,6 +1331,11 @@ impl MessageHandler {
                     "server reclaimed successfully"
                 );
 
+                // The reclaim invalidated any key still held for the setup page.
+                if let Some(ref ss) = self.setup_state {
+                    ss.clear_recovery_key();
+                }
+
                 let server_fp = claim::hex_encode(&self.host_identity.fingerprint());
                 let frame = ServerFrame::ClaimSuccess {
                     server_fingerprint: server_fp,
@@ -3406,17 +3411,6 @@ mod tests {
     }
 
     fn build_handler_with_tunnel(tunnel_enabled: bool) -> Arc<MessageHandler> {
-        let metrics = Arc::new(stealthos_observability::ServerMetrics::new());
-        let pool_registry = Arc::new(PoolRegistry::new(8));
-        let connection_registry = Arc::new(stealthos_transport::ConnectionRegistry::new(16));
-        let rate_cfg = RateLimitConfig::default();
-        let rate_limiter = Arc::new(stealthos_core::ratelimit::IpRateLimiter::new(
-            rate_cfg.clone(),
-        ));
-        let throttler = Arc::new(stealthos_core::ratelimit::ConnectionThrottler::new(
-            rate_cfg,
-        ));
-        let host_identity = Arc::new(HostIdentity::generate());
         // The claim state is not exercised by these tests, but the handler
         // requires one — pre-populate a Claimed binding so the signature
         // is satisfied. None of these fields are inspected by the
@@ -3429,6 +3423,31 @@ mod tests {
                 recovery_key_hash: String::new(),
             },
         }));
+        build_handler_with(
+            tunnel_enabled,
+            claim_state,
+            PathBuf::from("/tmp/stealthrelay-test-keydir"),
+            None,
+        )
+    }
+
+    fn build_handler_with(
+        tunnel_enabled: bool,
+        claim_state: Arc<Mutex<ClaimState>>,
+        key_dir: PathBuf,
+        setup_state: Option<Arc<crate::setup::SetupState>>,
+    ) -> Arc<MessageHandler> {
+        let metrics = Arc::new(stealthos_observability::ServerMetrics::new());
+        let pool_registry = Arc::new(PoolRegistry::new(8));
+        let connection_registry = Arc::new(stealthos_transport::ConnectionRegistry::new(16));
+        let rate_cfg = RateLimitConfig::default();
+        let rate_limiter = Arc::new(stealthos_core::ratelimit::IpRateLimiter::new(
+            rate_cfg.clone(),
+        ));
+        let throttler = Arc::new(stealthos_core::ratelimit::ConnectionThrottler::new(
+            rate_cfg,
+        ));
+        let host_identity = Arc::new(HostIdentity::generate());
         let tunnel_section = crate::config::TunnelSection {
             enabled: tunnel_enabled,
             // Allow loopback for tests (override the default deny list).
@@ -3452,8 +3471,8 @@ mod tests {
             "test:0".to_owned(),
             8,
             claim_state,
-            PathBuf::from("/tmp/stealthrelay-test-keydir"),
-            None,
+            key_dir,
+            setup_state,
             tunnel_gateway,
         ))
     }
@@ -4933,5 +4952,127 @@ mod tests {
             saw_404,
             "after pool destruction, member_rejoin must return 404; got: {frames:?}"
         );
+    }
+
+    /// A real unclaimed server's handler and setup page, sharing one claim
+    /// state, with one connection registered to send frames from.
+    struct ClaimHarness {
+        handler: Arc<MessageHandler>,
+        setup: Arc<crate::setup::SetupState>,
+        claim_secret: String,
+        conn: ConnectionId,
+        conn_rx: mpsc::Receiver<OutboundMessage>,
+        _key_dir: tempfile::TempDir,
+    }
+
+    impl ClaimHarness {
+        fn new() -> Self {
+            let key_dir = tempfile::tempdir().unwrap();
+            let claim = ClaimState::load_or_create(key_dir.path());
+            let claim_secret = claim::hex_encode(claim.claim_secret().unwrap());
+            let claim_state = Arc::new(Mutex::new(claim));
+            let setup = Arc::new(crate::setup::SetupState::new(
+                Arc::clone(&claim_state),
+                "0.0.0-test",
+                0,
+            ));
+            let handler = build_handler_with(
+                false,
+                claim_state,
+                key_dir.path().to_path_buf(),
+                Some(Arc::clone(&setup)),
+            );
+            let conn = ConnectionId(900);
+            let conn_rx = register_connection(&handler, conn);
+            Self {
+                handler,
+                setup,
+                claim_secret,
+                conn,
+                conn_rx,
+                _key_dir: key_dir,
+            }
+        }
+
+        /// Dispatch `frame` and return the single frame the server answers with.
+        async fn send(&mut self, frame: &ServerFrame) -> ServerFrame {
+            let raw = serde_json::to_string(frame).unwrap();
+            self.handler
+                .handle_message(self.conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+                .await
+                .expect("dispatch should not error");
+            let mut frames = drain_frames(&mut self.conn_rx);
+            assert_eq!(frames.len(), 1, "expected one answer, got {frames:?}");
+            frames.remove(0).expect("answer should parse")
+        }
+
+        /// Claim through the handler, returning the recovery key sent to the app.
+        async fn claim(&mut self) -> String {
+            let frame = ServerFrame::ClaimServer {
+                claim_secret: self.claim_secret.clone(),
+                host_public_key: Base64::encode_string(&[7u8; 32]),
+                display_name: "Owner".to_owned(),
+            };
+            match self.send(&frame).await {
+                ServerFrame::ClaimSuccess { recovery_key, .. } => recovery_key,
+                other => panic!("claim failed: {other:?}"),
+            }
+        }
+
+        async fn reclaim(&mut self, recovery_key: String) -> ServerFrame {
+            let frame = ServerFrame::ReclaimServer {
+                recovery_key,
+                new_host_public_key: Base64::encode_string(&[8u8; 32]),
+                display_name: "Owner".to_owned(),
+            };
+            self.send(&frame).await
+        }
+
+        /// The recovery key a page polling `/setup/status` would be served.
+        async fn poll_recovery_key(&self) -> Option<String> {
+            let uri = format!("/setup/status?token={}", self.setup.token_hex());
+            let request = axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let router = crate::setup::setup_router(Arc::clone(&self.setup));
+            let response = tower::ServiceExt::oneshot(router, request).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status["claimed"], true);
+            status["recovery_key"].as_str().map(str::to_owned)
+        }
+    }
+
+    /// A reclaim invalidates the key the claim stored for the setup page, so
+    /// the page must not serve it afterwards.
+    #[tokio::test]
+    async fn reclaim_clears_the_recovery_key_held_for_the_setup_page() {
+        let mut h = ClaimHarness::new();
+        let old_key = h.claim().await;
+
+        let new_key = match h.reclaim(old_key.clone()).await {
+            ServerFrame::ClaimSuccess { recovery_key, .. } => recovery_key,
+            other => panic!("reclaim failed: {other:?}"),
+        };
+        assert_ne!(new_key, old_key);
+
+        assert_eq!(h.poll_recovery_key().await, None);
+    }
+
+    /// A rejected reclaim changes nothing, so the stored key still works and
+    /// a stranger's bad guess must not take it away from the owner's page.
+    #[tokio::test]
+    async fn rejected_reclaim_leaves_the_recovery_key_for_the_setup_page() {
+        let mut h = ClaimHarness::new();
+        let key = h.claim().await;
+
+        let answer = h.reclaim("00".repeat(32)).await;
+        assert!(matches!(answer, ServerFrame::ClaimRejected { .. }));
+
+        assert_eq!(h.poll_recovery_key().await, Some(key));
     }
 }

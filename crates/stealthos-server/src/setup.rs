@@ -323,6 +323,14 @@ impl SetupState {
         });
     }
 
+    /// Clear the pending recovery key, wiping it, because it no longer works.
+    pub fn clear_recovery_key(&self) {
+        *self
+            .recovery_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     /// Clear the pending recovery key, wiping it, if it is the one that expires
     /// at `expires_at`. A key stored later has its own deadline and its own timer.
     fn clear_recovery_key_expiring_at(&self, expires_at: tokio::time::Instant) {

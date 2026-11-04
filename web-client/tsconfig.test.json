@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "types": ["node", "vite/client"],
+    "resolveJsonModule": true
+  },
+  "include": ["src/crypto", "src/transport/control-message.ts", "src/transport/outer-frame.ts", "src/transport/pool-transport-security.ts", "src/protocol", "src/utils", "tests"]
+}

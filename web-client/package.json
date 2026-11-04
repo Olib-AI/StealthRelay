@@ -8,12 +8,12 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.ts",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
-    "@noble/curves": "^2.0.1",
-    "@noble/ed25519": "^3.0.1",
-    "@noble/hashes": "^2.0.1",
+    "@noble/hashes": "2.0.1",
     "@tailwindcss/vite": "^4.2.2",
     "@types/uuid": "^10.0.0",
     "html5-qrcode": "^2.3.8",

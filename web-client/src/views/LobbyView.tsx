@@ -61,7 +61,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
             <div className="flex items-center gap-1.5">
               <span className="h-[6px] w-[6px] rounded-full bg-[#30D158]" />
               <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>
-                {peers.length + 1} of {poolInfo?.maxPeers ?? '?'} online
+                {otherPeers.length + 1} of {poolInfo?.maxPeers ?? '?'} online
               </span>
             </div>
           </div>

@@ -10,10 +10,6 @@ export interface PoolMessage {
   isReliable: boolean;
 }
 
-export interface ChatPayload {
-  text: string;
-}
-
 export interface EncryptedChatMessage {
   id: string;
   senderID: string;
@@ -40,9 +36,23 @@ export interface PollData {
   allowVoteChange: boolean;
 }
 
+/** ConnectionPool's KeyExchangePayload. Binary fields are base64, as Swift's `Data` encodes them. */
 export interface KeyExchangePayload {
   publicKey: string;
   senderPeerID: string;
+  /** This session's Ed25519 key, with a signature by it over its binding to the peer, pool and chat key. */
+  signingPublicKey?: string;
+  signingKeyBinding?: string;
+  /** The device key in this pool, its signature over the chat key, and a counter that only goes up. */
+  continuityKey?: string;
+  continuityProof?: string;
+  continuityCounter?: number;
+}
+
+export interface SystemPayload {
+  text: string;
+  event?: 'removed_from_pool' | 'pool_closed';
+  targetPeerID?: string;
 }
 
 export interface ProfileUpdatePayload {

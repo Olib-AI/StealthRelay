@@ -4,10 +4,13 @@ import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { parseInvitationUrl, isInvitationExpired } from '../crypto/invitation.ts';
 import { decodeCard, decodeCardQRText } from '../crypto/sealed-card.ts';
+
 import { transport } from '../transport/websocket.ts';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import QRScanner from '../components/QRScanner.tsx';
 import ThemeToggle from '../components/ThemeToggle.tsx';
+
+const BAD_CARD_TEXT = "This invite card is damaged, or isn't a StealthOS card. Ask the host for a new one.";
 
 function JoinView() {
   const [inviteUrl, setInviteUrl] = useState('');
@@ -36,13 +39,16 @@ function JoinView() {
       }
       setIsValid(true);
     } catch (err) {
-      setParseError(err instanceof Error ? err.message : 'Invalid invitation URL');
+      setParseError(err instanceof Error ? err.message : 'This invitation could not be read.');
     }
   }, []);
 
   function handleJoin() {
     if (!isValid || userProfile.displayName.trim().length === 0) return;
-    transport.connect(inviteUrl);
+    void transport.connect(inviteUrl);
+    // The link holds the pool's invite key. It has done its job, so it doesn't stay on screen.
+    setInviteUrl('');
+    setIsValid(false);
   }
 
   function handleQRScan(result: string) {
@@ -55,8 +61,8 @@ function JoinView() {
       try {
         const url = decodeCard(cardBytes);
         validateUrl(url);
-      } catch (err) {
-        setCardError(err instanceof Error ? err.message : 'Couldn\'t open invite QR.');
+      } catch {
+        setCardError(BAD_CARD_TEXT);
       }
       return;
     }
@@ -69,8 +75,8 @@ function JoinView() {
       const buf = new Uint8Array(await file.arrayBuffer());
       const url = decodeCard(buf);
       validateUrl(url);
-    } catch (err) {
-      setCardError(err instanceof Error ? err.message : 'Couldn\'t open invite card.');
+    } catch {
+      setCardError(BAD_CARD_TEXT);
     }
   }, [validateUrl]);
 
@@ -118,6 +124,10 @@ function JoinView() {
                 value={inviteUrl}
                 onChange={(e) => validateUrl(e.target.value)}
                 placeholder="stealth://invite/..."
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 className="w-full pl-9 pr-16 py-3 rounded-[10px] text-[15px] focus:border-[#007AFF] transition-colors"
                 style={{ backgroundColor: 'var(--bg-surface)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--separator)', color: 'var(--text-primary)' }}
                 disabled={isConnecting}

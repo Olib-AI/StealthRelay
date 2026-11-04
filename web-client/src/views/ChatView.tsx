@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback } from 'react';
-import { ArrowLeft, Lock, Users, User, MessageSquare, Phone, Video } from 'lucide-react';
+import { ArrowLeft, Lock, Users, User, MessageSquare } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useChatStore } from '../stores/chat.ts';
 import type { ChatMessage } from '../stores/chat.ts';
@@ -283,44 +283,6 @@ function ChatView({ onBack }: ChatViewProps) {
           )}
         </div>
 
-        {(() => {
-          // Only show call icons when we have a concrete target. Hidden on the
-          // private peer-list view (no peer selected) and the group tab when
-          // there are no other peers.
-          const callTargets =
-            currentView === 'private' && selectedPrivatePeerId
-              ? [selectedPrivatePeerId]
-              : currentView === 'group'
-                ? peers.filter((p) => p.peerId !== localPeerId).map((p) => p.peerId)
-                : [];
-          if (callTargets.length === 0) return null;
-          const remoteName =
-            currentView === 'private' && selectedPrivatePeerId
-              ? (peers.find((p) => p.peerId === selectedPrivatePeerId)?.displayName ?? 'Peer')
-              : 'Group';
-          return (
-            <div className="flex items-center gap-1 shrink-0">
-              <button
-                type="button"
-                title="Voice call"
-                aria-label="Start voice call"
-                onClick={() => transport.startCall({ peerIDs: callTargets, remoteDisplayName: remoteName, isVideoCall: false })}
-                className="p-2 rounded-full hover:bg-[rgba(0,122,255,0.12)] text-[#007AFF]"
-              >
-                <Phone className="h-5 w-5" />
-              </button>
-              <button
-                type="button"
-                title="Video call"
-                aria-label="Start video call"
-                onClick={() => transport.startCall({ peerIDs: callTargets, remoteDisplayName: remoteName, isVideoCall: true })}
-                className="p-2 rounded-full hover:bg-[rgba(0,122,255,0.12)] text-[#007AFF]"
-              >
-                <Video className="h-5 w-5" />
-              </button>
-            </div>
-          );
-        })()}
       </div>
 
       {/* Tabs */}

@@ -100,6 +100,11 @@ export interface ServerHelloData {
   signature: string;
 }
 
+export interface PoolHostStatusData {
+  online: boolean;
+  offline_since?: number;
+}
+
 export interface SessionResumedData {
   missed_messages: ServerFrame[];
   last_acked_sequence: number;
@@ -118,7 +123,8 @@ export type ServerFrameType =
   | 'kicked'
   | 'heartbeat_pong'
   | 'server_hello'
-  | 'session_resumed';
+  | 'session_resumed'
+  | 'pool_host_status';
 
 export interface ServerFrame {
   frame_type: string;

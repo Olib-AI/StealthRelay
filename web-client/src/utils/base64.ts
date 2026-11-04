@@ -71,3 +71,19 @@ export function base64UrlEncode(bytes: Uint8Array): string {
   }
   return result;
 }
+
+/**
+ * Strict decoders for anything that decides security: `null` for characters outside the
+ * alphabet or a bad length, where the lenient decoders above would quietly read them as 0.
+ * Matches `Data(base64Encoded:)`, which requires padding.
+ */
+export function base64DecodeStrict(str: string): Uint8Array | null {
+  if (str.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(str)) return null;
+  return decodeBase64(str, STANDARD_LOOKUP);
+}
+
+/** Unpadded base64url, as `TransportInviteSecret.fromBase64URL` accepts it. */
+export function base64UrlDecodeStrict(str: string): Uint8Array | null {
+  if (str.length % 4 === 1 || !/^[A-Za-z0-9_-]*$/.test(str)) return null;
+  return decodeBase64(str, URL_LOOKUP);
+}

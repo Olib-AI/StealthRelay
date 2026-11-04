@@ -31,8 +31,8 @@ interface ChatState {
   privateMessages: Record<string, ChatMessage[]>;
   unreadGroup: number;
   unreadPrivate: Record<string, number>;
-  peerSymmetricKeys: Record<string, Uint8Array>;
-  peerX25519Keys: Record<string, Uint8Array>;
+  /** Non-extractable AES-GCM keys, one per peer the key exchange has finished with. */
+  peerSymmetricKeys: Record<string, CryptoKey>;
   currentView: 'group' | 'private';
   selectedPrivatePeerId: string | null;
   replyingTo: ChatMessage | null;
@@ -40,8 +40,8 @@ interface ChatState {
   addPrivateMessage: (peerId: string, msg: ChatMessage) => void;
   markGroupRead: () => void;
   markPrivateRead: (peerId: string) => void;
-  setPeerSymmetricKey: (peerId: string, key: Uint8Array) => void;
-  setPeerX25519Key: (peerId: string, key: Uint8Array) => void;
+  setPeerSymmetricKey: (peerId: string, key: CryptoKey) => void;
+  removePeerSymmetricKey: (peerId: string) => void;
   setCurrentView: (view: 'group' | 'private') => void;
   setSelectedPrivatePeerId: (peerId: string | null) => void;
   setReplyingTo: (msg: ChatMessage | null) => void;
@@ -97,7 +97,6 @@ export const useChatStore = create<ChatState>((set) => ({
   unreadGroup: 0,
   unreadPrivate: {},
   peerSymmetricKeys: {},
-  peerX25519Keys: {},
   currentView: 'group',
   selectedPrivatePeerId: null,
   replyingTo: null,
@@ -126,10 +125,12 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => ({
       peerSymmetricKeys: { ...state.peerSymmetricKeys, [peerId]: key },
     })),
-  setPeerX25519Key: (peerId, key) =>
-    set((state) => ({
-      peerX25519Keys: { ...state.peerX25519Keys, [peerId]: key },
-    })),
+  removePeerSymmetricKey: (peerId) =>
+    set((state) => {
+      const remaining = { ...state.peerSymmetricKeys };
+      delete remaining[peerId];
+      return { peerSymmetricKeys: remaining };
+    }),
   setCurrentView: (currentView) => set({ currentView }),
   setSelectedPrivatePeerId: (selectedPrivatePeerId) => set({ selectedPrivatePeerId }),
   setReplyingTo: (replyingTo) => set({ replyingTo }),
@@ -172,7 +173,6 @@ export const useChatStore = create<ChatState>((set) => ({
       unreadGroup: 0,
       unreadPrivate: {},
       peerSymmetricKeys: {},
-      peerX25519Keys: {},
       currentView: 'group',
       selectedPrivatePeerId: null,
       replyingTo: null,

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+import type { OuterLayerStatus } from '../transport/pool-transport-security.ts';
+
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disconnected' | 'waiting_approval';
 
 interface ConnectionState {
@@ -11,12 +13,18 @@ interface ConnectionState {
   poolId: string | null;
   error: string | null;
   powProgress: number | null;
+  /** The outer layer's state, for the banner. `null` until the relay has let us in. */
+  security: OuterLayerStatus | null;
+  /** The relay says the pool's host has gone away for now. */
+  hostOffline: boolean;
   setStatus: (status: ConnectionStatus) => void;
   setServerUrl: (url: string) => void;
   setAuthNonce: (nonce: string) => void;
   setJoinAccepted: (data: { sessionToken: string; peerId: string; poolId: string }) => void;
   setError: (error: string | null) => void;
   setPowProgress: (progress: number | null) => void;
+  setSecurity: (security: OuterLayerStatus | null) => void;
+  setHostOffline: (hostOffline: boolean) => void;
   reset: () => void;
 }
 
@@ -29,13 +37,17 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   poolId: null,
   error: null,
   powProgress: null,
-  setStatus: (status) => set({ status, error: status === 'connecting' ? null : undefined }),
+  security: null,
+  hostOffline: false,
+  setStatus: (status) => set(status === 'connecting' ? { status, error: null } : { status }),
   setServerUrl: (serverUrl) => set({ serverUrl }),
   setAuthNonce: (authNonce) => set({ authNonce }),
   setJoinAccepted: ({ sessionToken, peerId, poolId }) =>
     set({ sessionToken, localPeerId: peerId, poolId, status: 'connected', error: null }),
   setError: (error) => set({ error }),
   setPowProgress: (powProgress) => set({ powProgress }),
+  setSecurity: (security) => set({ security }),
+  setHostOffline: (hostOffline) => set({ hostOffline }),
   reset: () =>
     set({
       status: 'idle',
@@ -46,5 +58,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       poolId: null,
       error: null,
       powProgress: null,
+      security: null,
+      hostOffline: false,
     }),
 }));

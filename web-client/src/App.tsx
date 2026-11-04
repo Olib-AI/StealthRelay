@@ -13,6 +13,7 @@ import GameChatOverlay from './components/GameChatOverlay.tsx';
 import ChatNotification from './components/ChatNotification.tsx';
 import GameInvitationBanner from './components/GameInvitationBanner.tsx';
 import CallView from './views/CallView.tsx';
+import SecurityBanner from './components/SecurityBanner.tsx';
 import { useChatStore } from './stores/chat.ts';
 
 type AppView = 'join' | 'lobby' | 'chat' | 'game_lobby' | 'connect_four' | 'chain_reaction' | 'chess' | 'ludo';
@@ -66,6 +67,7 @@ function App() {
   return (
     <div className="h-dvh flex items-center justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
       <div className="relative w-full h-dvh flex flex-col overflow-hidden lg:max-w-[430px] lg:max-h-[932px] lg:rounded-2xl lg:border lg:shadow-2xl lg:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
+        {isConnected && effectiveView !== 'join' && <SecurityBanner />}
         {(effectiveView === 'join' || effectiveView === 'lobby' || effectiveView === 'chat' || effectiveView === 'game_lobby') && (
           <div key={effectiveView} className="flex-1 flex flex-col min-h-0 animate-view-enter">
             {effectiveView === 'join' && <JoinView />}

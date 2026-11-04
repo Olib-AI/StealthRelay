@@ -8,7 +8,7 @@ import { APPLE_EPOCH_OFFSET } from './constants.ts';
 import type { KeyExchangePayload } from './messages.ts';
 import type { EncryptedMessageType } from './chat-wire.ts';
 
-export const MAX_DISPLAY_NAME = 64;
+export const MAX_DISPLAY_NAME = 128;
 const MAX_TEXT_CHARS = 200_000;
 const MAX_EMOJI_CHARS = 32;
 const MAX_POLL_OPTIONS = 32;
@@ -140,7 +140,42 @@ export function parseDecryptedChat(plaintext: Uint8Array): ValidChat | null {
   const wrapped = isObject(parsed.chatPayload);
   const chat = wrapped ? (parsed.chatPayload as Json) : parsed;
   if (wrapped && !absent(parsed.isPrivate) && typeof parsed.isPrivate !== 'boolean') return null;
+  return validateChat(chat, wrapped && parsed.isPrivate === true, false);
+}
 
+const MAX_HISTORY_MESSAGES = 1000;
+
+export interface ValidHistoryMessage extends ValidChat {
+  senderID: string;
+  senderName: string;
+  timestampMillis: number;
+}
+
+/**
+ * A decrypted `history_sync`: ChatHistorySyncPayload. A sync carries no media, so a photo or voice note
+ * comes as its type alone and is shown as not available, and whatever media a sender attached anyway is
+ * dropped. Nothing has happened yet, whatever it says, and nobody posts as the app. All of it is only as
+ * good as the host, which is the only one a caller may take this from. `null` if it isn't a group sync.
+ */
+export function parseHistorySync(plaintext: Uint8Array, nowMillis: number): ValidHistoryMessage[] | null {
+  const parsed = parseJson(plaintext);
+  if (!isObject(parsed) || parsed.isGroupChat !== true || !Array.isArray(parsed.messages)) return null;
+  const out: ValidHistoryMessage[] = [];
+  for (const entry of parsed.messages.slice(0, MAX_HISTORY_MESSAGES)) {
+    if (!isObject(entry) || typeof entry.senderID !== 'string') continue;
+    const chat = validateChat({ ...entry, imageData: undefined, voiceData: undefined }, false, true);
+    if (!chat) continue;
+    out.push({
+      ...chat,
+      senderID: entry.senderID,
+      senderName: sanitizeDisplayName(entry.senderName) ?? 'Someone',
+      timestampMillis: Math.min(timestampMillis(entry.timestamp), nowMillis),
+    });
+  }
+  return out;
+}
+
+function validateChat(chat: Json, isPrivate: boolean, mediaMayBeMissing: boolean): ValidChat | null {
   const id = chat.messageID ?? chat.id;
   const { contentType, text, imageData, voiceData, voiceDuration, emoji, senderAvatarEmoji, senderAvatarColorIndex } = chat;
   if (!isUuid(id)) return null;
@@ -174,15 +209,15 @@ export function parseDecryptedChat(plaintext: Uint8Array): ValidChat | null {
 
   // The content has to be what the type says it is.
   if (contentType === 'text' && typeof text !== 'string') return null;
-  if (contentType === 'image' && typeof imageData !== 'string') return null;
-  if (contentType === 'voice' && typeof voiceData !== 'string') return null;
+  if (contentType === 'image' && typeof imageData !== 'string' && !mediaMayBeMissing) return null;
+  if (contentType === 'voice' && typeof voiceData !== 'string' && !mediaMayBeMissing) return null;
   if (contentType === 'emoji' && typeof emoji !== 'string') return null;
   if (contentType === 'poll' && !pollData) return null;
 
   return {
     id,
     contentType: contentType as ChatContentType,
-    isPrivate: wrapped && parsed.isPrivate === true,
+    isPrivate,
     text: typeof text === 'string' ? text.slice(0, MAX_TEXT_CHARS) : undefined,
     imageData: imageData as string | undefined ?? undefined,
     voiceData: voiceData as string | undefined ?? undefined,

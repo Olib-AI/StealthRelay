@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import { useChatStore } from '../stores/chat.ts';
 import { usePoolStore } from '../stores/pool.ts';
+import { shownName } from '../protocol/peer-names.ts';
 
 function Row({ title, value, large }: { title: string; value: string; large?: boolean }) {
   return (
@@ -14,7 +15,8 @@ function Row({ title, value, large }: { title: string; value: string; large?: bo
 /** PeerSecurityCodeView in the app. The codes come out the same on both sides unless someone swapped keys. */
 function PeerSecurityCode({ peerId, onClose }: { peerId: string; onClose: () => void }) {
   const info = useChatStore((s) => s.peerSecurity[peerId]);
-  const name = usePoolStore((s) => s.peers.find((peer) => peer.peerId === peerId)?.displayName) ?? 'this person';
+  const peer = usePoolStore((s) => s.peers.find((candidate) => candidate.peerId === peerId));
+  const name = peer ? shownName(peer) : 'this person';
 
   return (
     <div role="dialog" aria-label="Security code" className="absolute inset-0 z-[70] flex flex-col p-5 gap-4 overflow-y-auto" style={{ backgroundColor: 'var(--bg-page)' }}>

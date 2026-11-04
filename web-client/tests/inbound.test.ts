@@ -129,7 +129,7 @@ test('names and profiles', () => {
   assert.equal(sanitizeDisplayName({}), null);
   assert.equal(sanitizeDisplayName('   '), null);
   assert.equal(sanitizeDisplayName('a‮b\nc\u0000'), 'abc');
-  assert.equal(sanitizeDisplayName('x'.repeat(100))?.length, 64);
+  assert.equal(sanitizeDisplayName('x'.repeat(200))?.length, 128);
   assert.equal(parseProfile({ displayName: {}, avatarEmoji: 'x', avatarColorIndex: 0 }), null);
   assert.equal(parseProfile({ displayName: 'a', avatarEmoji: 5, avatarColorIndex: 0 }), null);
   assert.equal(parseProfile({ displayName: 'a', avatarEmoji: 'x', avatarColorIndex: 'x' }), null);

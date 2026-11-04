@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Lock, ShieldAlert, WifiOff } from 'lucide-react';
+import { notProtectedText } from '../protocol/join-policy.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 
 const STILL_WAITING_AFTER_MS = 20_000;
@@ -14,6 +15,7 @@ function peopleOnOlderVersion(count: number): string {
 function SecurityBanner() {
   const security = useConnectionStore((s) => s.security);
   const hostOffline = useConnectionStore((s) => s.hostOffline);
+  const reconnecting = useConnectionStore((s) => s.status === 'reconnecting');
   const securing = security?.kind === 'securing';
   const [stillWaiting, setStillWaiting] = useState(false);
 
@@ -36,7 +38,7 @@ function SecurityBanner() {
       break;
     case 'hostNotProtected':
       warn = true;
-      text = "The host hasn't turned on protection for this pool, because someone here uses an older version of StealthOS. The web client only takes part in protected pools, so nothing is being sent or received until they update.";
+      text = notProtectedText(security.legacyPeers.length);
       break;
     case 'downgradeRefused':
       warn = true;
@@ -49,6 +51,14 @@ function SecurityBanner() {
       break;
   }
 
+  if (reconnecting) {
+    return (
+      <div role="status" className="shrink-0 flex items-start gap-2 px-4 py-2 text-[12px]" style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)' }}>
+        <WifiOff className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+        <span>Lost the connection to the relay. Trying again. What you write goes out when it's back, if that's within a few minutes.</span>
+      </div>
+    );
+  }
   if (hostOffline && !warn) {
     return (
       <div role="status" className="shrink-0 flex items-start gap-2 px-4 py-2 text-[12px]" style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-secondary)' }}>

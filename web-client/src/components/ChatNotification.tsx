@@ -6,6 +6,7 @@ import { usePoolStore } from '../stores/pool.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import PeerAvatar from './PeerAvatar.tsx';
 import { sendNotification } from '../hooks/useNotifications.ts';
+import { shownName } from '../protocol/peer-names.ts';
 
 interface Toast {
   id: string;
@@ -44,7 +45,7 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
       const newestGroup = state.groupMessages.at(-1);
       if (newestGroup && newestGroup.id !== prevGroupNewest) {
         const newMsg = newestGroup;
-        if (newMsg && newMsg.senderID !== 'system' && newMsg.senderID !== localPeerId && !isViewingGroup) {
+        if (newMsg && newMsg.senderID !== 'system' && !newMsg.isHistory && newMsg.senderID !== localPeerId && !isViewingGroup) {
           const id = newMsg.id + '-toast';
           setToasts((prev) => {
             if (prev.some((t) => t.id === id)) return prev;
@@ -92,7 +93,7 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
         const peer = peers.find((p) => p.peerId === toast.message.senderID);
         const avatarEmoji = toast.message.senderAvatarEmoji ?? peer?.avatarEmoji ?? '😀';
         const colorIndex = toast.message.senderAvatarColorIndex ?? peer?.avatarColorIndex ?? 0;
-        const senderName = peer?.displayName ?? toast.message.senderName;
+        const senderName = peer ? shownName(peer) : toast.message.senderName;
         const previewText = toast.message.text
           ? toast.message.text.slice(0, 50) + (toast.message.text.length > 50 ? '...' : '')
           : toast.message.contentType === 'image' ? '📷 Photo'

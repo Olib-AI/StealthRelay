@@ -1,4 +1,6 @@
 import { Lock, Reply, SmilePlus, Play, Pause, X } from 'lucide-react';
+import { shownName } from '../protocol/peer-names.ts';
+import { resolveReply } from '../protocol/reply.ts';
 import type { ChatMessage } from '../stores/chat.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
@@ -174,6 +176,10 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
   const localPeerId = useConnectionStore((s) => s.localPeerId);
   const peers = usePoolStore((s) => s.peers);
   const setReplyingTo = useChatStore((s) => s.setReplyingTo);
+  const conversation = useChatStore((s) => (isGroup ? s.groupMessages : s.selectedPrivatePeerId ? s.privateMessages[s.selectedPrivatePeerId] : undefined));
+  const sender = usePoolStore((s) => s.peers.find((peer) => peer.peerId === message.senderID));
+  const senderShown = sender ? shownName(sender) : message.senderName;
+  const quoted = message.replyTo ? resolveReply(message.replyTo, conversation ?? []) : null;
   const addReaction = useChatStore((s) => s.addReaction);
   const selectedPrivatePeerId = useChatStore((s) => s.selectedPrivatePeerId);
   const updatePollVote = useChatStore((s) => s.updatePollVote);
@@ -234,7 +240,7 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
       <div className={`max-w-[75%] min-w-0 ${isSelf ? 'items-end' : 'items-start'} flex flex-col`}>
         {/* Sender name */}
         {!isSelf && (
-          <span className="text-[11px] font-medium mb-0.5 px-1" style={{ color: 'var(--text-secondary)' }}>{message.senderName}</span>
+          <span className="text-[11px] font-medium mb-0.5 px-1" style={{ color: 'var(--text-secondary)' }}>{senderShown}</span>
         )}
 
         {/* Reply preview */}
@@ -243,8 +249,14 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
             className={`text-[12px] px-2 py-1 mb-0.5 rounded-lg max-w-full truncate ${isSelf ? 'self-end border-l-2 border-white/60' : 'self-start border-l-2 border-[#007AFF]'}`}
             style={{ backgroundColor: isSelf ? 'rgba(0, 122, 255, 0.3)' : 'var(--bubble-incoming)', color: 'var(--text-secondary)' }}
           >
-            <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{message.replyTo.senderName}: </span>
-            {message.replyTo.previewText}
+            {quoted ? (
+              <>
+                <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{quoted.senderName}: </span>
+                {quoted.text}
+              </>
+            ) : (
+              <span className="italic">Original not available</span>
+            )}
           </div>
         )}
 
@@ -264,6 +276,13 @@ function MessageBubble({ message, isGroup }: MessageBubbleProps) {
           }
         >
           {/* Voice content */}
+          {message.contentType === 'image' && !message.imageData && (
+            <p className="text-[13px] italic" style={{ color: 'var(--text-secondary)' }}>Photo not available</p>
+          )}
+          {message.contentType === 'voice' && !message.voiceData && (
+            <p className="text-[13px] italic" style={{ color: 'var(--text-secondary)' }}>Voice message not available</p>
+          )}
+
           {message.contentType === 'voice' && message.voiceData && (
             <VoicePlayer voiceData={message.voiceData} voiceDuration={message.voiceDuration} isSelf={isSelf} />
           )}

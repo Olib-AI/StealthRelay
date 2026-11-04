@@ -70,6 +70,7 @@ let fixedNow = Date(timeIntervalSince1970: TimeInterval(T) / 1000)
                                      now: { clock }, localPeerID: { hostPeerID },
                                      send: { d, t in sent.append((d, t)) }, deliver: { _, _ in })
     host.registerInvite(secretInvite, expiresAt: fixedNow.addingTimeInterval(3600))
+    host.memberApproved(memberPeerID) // the host says yes before the relay lets anyone in
     host.peerJoined(memberPeerID)
 
     func makeRequest(invite: Data?, nonce: Data) throws -> (TransportControlMessage, Data, Data) {
@@ -240,6 +241,7 @@ let fixedNow = Date(timeIntervalSince1970: TimeInterval(T) / 1000)
     let invite = TransportInviteSecret(inviteKey: fill(0x44), hostIdentityKey: hostKey.publicKey.rawRepresentation)
     host.registerInvite(invite, expiresAt: tsNow.addingTimeInterval(3600))
     let sender = o["memberPeerID"] as! String
+    host.memberApproved(sender)
     host.peerJoined(sender)
     host.receive(Data(base64Encoded: o["requestWire"] as! String)!, from: sender)
     check("host accepted the TS key request and answered with a grant", sent.count >= 2 && TransportControlMessage.decode(sent[0].0)?.kind == .keyGrant)

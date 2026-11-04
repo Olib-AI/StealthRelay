@@ -1,3 +1,4 @@
+import { shownName } from '../protocol/peer-names.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import PeerAvatar from './PeerAvatar.tsx';
@@ -39,7 +40,7 @@ function PeerList() {
             />
             <div className="min-w-0 flex-1">
               <p className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
-                {peer.displayName}
+                {shownName(peer)}
                 {peer.peerId === poolInfo?.hostPeerId && (
                   <span className="ml-1.5 text-[10px] font-bold text-white px-1.5 py-0.5 rounded-full bg-[#FF9F0A]">HOST</span>
                 )}

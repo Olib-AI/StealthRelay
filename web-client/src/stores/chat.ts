@@ -50,6 +50,8 @@ export interface ChatMessage {
   senderAvatarColorIndex?: number;
   isEncrypted: boolean;
   isPrivate: boolean;
+  /** Came with the host's history sync: it isn't news, and it's only as good as the host. */
+  isHistory?: boolean;
 }
 
 interface ChatState {
@@ -66,6 +68,7 @@ interface ChatState {
   replyingTo: ChatMessage | null;
   addGroupMessage: (msg: ChatMessage) => void;
   addPrivateMessage: (peerId: string, msg: ChatMessage) => void;
+  mergeHistory: (messages: ChatMessage[]) => void;
   markGroupRead: () => void;
   markPrivateRead: (peerId: string) => void;
   setPeerSymmetricKey: (peerId: string, key: CryptoKey) => void;
@@ -139,6 +142,19 @@ export const useChatStore = create<ChatState>((set) => ({
       groupMessages: capMessages([...state.groupMessages, msg]),
       unreadGroup: state.unreadGroup + 1,
     })),
+  mergeHistory: (messages) =>
+    set((state) => {
+      const seen = new Set(state.groupMessages.map((m) => m.id.toLowerCase()));
+      const fresh: ChatMessage[] = [];
+      for (const message of messages) {
+        const key = message.id.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fresh.push({ ...message, isHistory: true });
+      }
+      if (fresh.length === 0) return state;
+      return { groupMessages: capMessages([...state.groupMessages, ...fresh].sort((a, b) => a.timestamp - b.timestamp)) };
+    }),
   addPrivateMessage: (peerId, msg) =>
     set((state) => ({
       privateMessages: {

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { PeerNameBook } from '../protocol/peer-names.ts';
 
 export interface Peer {
   peerId: string;
@@ -7,6 +8,8 @@ export interface Peer {
   connectedAt: number;
   avatarEmoji: string;
   avatarColorIndex: number;
+  /** The start of their key, if their name reads like someone else's. */
+  nameTag?: string | null;
 }
 
 export interface PoolInfo {
@@ -48,6 +51,18 @@ function saveProfile(profile: UserProfile): void {
   localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
 }
 
+let nameBook = new PeerNameBook();
+let localPeerId: string | null = null;
+
+/** Keeps what tells people apart up to date with who is here. */
+function withTags(peers: Peer[]): Peer[] {
+  for (const peer of peers) nameBook.hold(peer.displayName, peer.peerId);
+  return peers.map((peer) => {
+    const nameTag = nameBook.tag(peer.peerId, peer.displayName, localPeerId);
+    return peer.nameTag === nameTag ? peer : { ...peer, nameTag };
+  });
+}
+
 interface PoolState {
   peers: Peer[];
   poolInfo: PoolInfo | null;
@@ -56,6 +71,8 @@ interface PoolState {
   removePeer: (peerId: string) => void;
   setPeers: (peers: Peer[]) => void;
   updatePeerProfile: (peerId: string, profile: { displayName: string; avatarEmoji: string; avatarColorIndex: number }) => void;
+  updatePeerAvatar: (peerId: string, avatarEmoji: string | undefined, avatarColorIndex: number | undefined) => void;
+  setLocalIdentity: (peerId: string, displayName: string) => void;
   setPoolInfo: (info: PoolInfo) => void;
   setUserProfile: (profile: Partial<UserProfile>) => void;
   reset: () => void;
@@ -68,19 +85,31 @@ export const usePoolStore = create<PoolState>((set) => ({
   addPeer: (peer) =>
     set((state) => {
       if (state.peers.some((p) => p.peerId === peer.peerId)) return state;
-      return { peers: [...state.peers, peer] };
+      return { peers: withTags([...state.peers, peer]) };
     }),
   removePeer: (peerId) =>
     set((state) => ({ peers: state.peers.filter((p) => p.peerId !== peerId) })),
-  setPeers: (peers) => set({ peers }),
+  setPeers: (peers) => set({ peers: withTags(peers) }),
   updatePeerProfile: (peerId, profile) =>
     set((state) => ({
-      peers: state.peers.map((p) =>
+      peers: withTags(state.peers.map((p) =>
         p.peerId === peerId
           ? { ...p, displayName: profile.displayName, avatarEmoji: profile.avatarEmoji, avatarColorIndex: profile.avatarColorIndex }
           : p,
+      )),
+    })),
+  updatePeerAvatar: (peerId, avatarEmoji, avatarColorIndex) =>
+    set((state) => ({
+      peers: state.peers.map((p) =>
+        p.peerId === peerId
+          ? { ...p, avatarEmoji: avatarEmoji ?? p.avatarEmoji, avatarColorIndex: avatarColorIndex ?? p.avatarColorIndex }
+          : p,
       ),
     })),
+  setLocalIdentity: (peerId, displayName) => {
+    localPeerId = peerId;
+    nameBook.hold(displayName, peerId);
+  },
   setPoolInfo: (poolInfo) => set({ poolInfo }),
   setUserProfile: (partial) =>
     set((state) => {
@@ -88,5 +117,9 @@ export const usePoolStore = create<PoolState>((set) => ({
       saveProfile(newProfile);
       return { userProfile: newProfile };
     }),
-  reset: () => set({ peers: [], poolInfo: null }),
+  reset: () => {
+    nameBook = new PeerNameBook();
+    localPeerId = null;
+    set({ peers: [], poolInfo: null });
+  },
 }));

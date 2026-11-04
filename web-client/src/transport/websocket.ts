@@ -21,6 +21,7 @@ import {
   parseDecryptedChat,
   parseDecryptedPollVote,
   parseDecryptedReaction,
+  parseHistorySync,
   parseJoinAccepted,
   parsePeerInfo,
 } from '../protocol/inbound.ts';
@@ -30,18 +31,17 @@ import { buildGameDecline, buildPoolMessage, buildPrivateChatPayload } from '../
 import type { EncryptedChatPayload, EncryptedMessageType } from '../protocol/chat-wire.ts';
 import {
   HEARTBEAT_INTERVAL_MS,
-  MAX_RECONNECT_ATTEMPTS,
-  INITIAL_RECONNECT_DELAY_MS,
-  MAX_RECONNECT_DELAY_MS,
   MAX_MESSAGE_SIZE,
 } from '../protocol/constants.ts';
+import { canAttemptJoin, joinRefusalText, reconnectDelayMs, serverErrorOutcome } from '../protocol/join-policy.ts';
+import { shownName } from '../protocol/peer-names.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
 import { useChatStore } from '../stores/chat.ts';
 import type { ChatMessage } from '../stores/chat.ts';
 import { useGameStore } from '../stores/game.ts';
 import type { ActiveGameType } from '../stores/game.ts';
-import { loadOrCreatePoolIdentity } from '../crypto/identity.ts';
+import { loadOrCreatePoolIdentity, peekPoolIdentityJoined } from '../crypto/identity.ts';
 import type { PoolIdentity } from '../crypto/identity.ts';
 import { parseInvitationUrl, computeJoinProof, isInvitationExpired, memberRejoinTranscript, relayUrlFromInvitation } from '../crypto/invitation.ts';
 import type { ParsedInvitation } from '../crypto/invitation.ts';
@@ -125,6 +125,9 @@ class WebSocketTransport {
   /** People we have already told the user about, so one bad key is one line in the chat. */
   private undecryptableNoticed = new Set<string>();
   private unreadableNoticed = new Set<string>();
+  /** One history answer for each time we ask. A sync nobody asked for is ignored, as in the app. */
+  private historyAsked = false;
+  private historyPending = false;
   /** Sealed frames that came ready while the socket was down. */
   private unsentFrames: { data: Uint8Array; targetPeerIds: string[] | null }[] = [];
   /** Bumped by every connect and disconnect, so a slow step can tell it was overtaken. */
@@ -142,11 +145,6 @@ class WebSocketTransport {
       this.failWith(err instanceof Error ? err.message : 'This invitation could not be read.');
       return;
     }
-    if (isInvitationExpired(invitation)) {
-      this.failWith('This invitation has expired.');
-      return;
-    }
-
     connection.setStatus('connecting');
     try {
       await assertCryptoSupported();
@@ -167,6 +165,11 @@ class WebSocketTransport {
     }
     if (generation !== this.generation) return;
 
+    if (!canAttemptJoin({ expired: isInvitationExpired(invitation), joinedBefore: identity.joined })) {
+      this.failWith('This invitation has expired. Ask the host for a new one.');
+      return;
+    }
+
     // The app keeps the host key from the first join and refuses another: a pool's host can't change.
     if (!identity.hostKeyMatches(invitation.transport.hostIdentityKey)) {
       this.failWith('This invitation names a different host than the one you joined this pool with, so it was refused. Nothing was sent. Ask the host for a new invitation.');
@@ -184,6 +187,15 @@ class WebSocketTransport {
 
     connection.setServerUrl(serverUrl);
     this.openWebSocket();
+  }
+
+  /** Whether this browser's key was already let in to that link's pool, so an expired link still gets it back. */
+  async mayRejoinWith(invitation: ParsedInvitation): Promise<boolean> {
+    try {
+      return await peekPoolIdentityJoined(relayUrlFromInvitation(invitation.serverAddress, import.meta.env.DEV), invitation.poolId);
+    } catch {
+      return false;
+    }
   }
 
   private makeSecurity(invitation: ParsedInvitation, identity: PoolIdentity): MemberTransportSecurity {
@@ -395,6 +407,7 @@ class WebSocketTransport {
 
     this.send('join_request', data);
     useConnectionStore.getState().setStatus('waiting_approval');
+    useConnectionStore.getState().setKeyHint(this.identity.peerId.slice(0, 8));
   }
 
   /** The host approved this identity before: the relay lets it back in with a signature. */
@@ -429,6 +442,8 @@ class WebSocketTransport {
     }
 
     this.joinedThisSession = true;
+    this.historyAsked = false;
+    this.historyPending = false;
     void identity.markJoined();
     void identity.pinHostKey(invitation.transport.hostIdentityKey);
 
@@ -443,6 +458,7 @@ class WebSocketTransport {
     this.startSecurityTimer();
 
     usePoolStore.getState().setPoolInfo(accepted.pool);
+    usePoolStore.getState().setLocalIdentity(accepted.peerId, usePoolStore.getState().userProfile.displayName);
     usePoolStore.getState().setPeers(accepted.peers.map((peer) => ({ ...peer, avatarEmoji: '😀', avatarColorIndex: 0 })));
 
     // All of this waits inside the security layer until the host has given us the secret.
@@ -453,8 +469,9 @@ class WebSocketTransport {
   }
 
   private handleJoinRejected(data: JoinRejectedData): void {
-    useConnectionStore.getState().setError(`Join rejected: ${data.reason}`);
-    useConnectionStore.getState().setStatus('failed');
+    this.tearDownSession();
+    this.resetSessionStores();
+    this.failWith(joinRefusalText(data.reason));
   }
 
   private handlePeerJoined(data: PeerJoinedData): void {
@@ -544,6 +561,18 @@ class WebSocketTransport {
     }
   }
 
+  /**
+   * After the key exchange with the host, so what it sends can be read. ChatHistoryRequestPayload isn't
+   * encrypted in the app either: it says nothing, and the frame around it is sealed.
+   */
+  private requestHistoryFrom(peerId: string): void {
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    if (this.historyAsked || !localPeerId || peerId !== usePoolStore.getState().poolInfo?.hostPeerId) return;
+    this.historyAsked = true;
+    this.historyPending = true;
+    this.sendPoolMessage('custom', { requestID: uuidv4(), requestingPeerID: localPeerId }, [peerId], true);
+  }
+
   private handleGameFrame(type: string, message: PoolMessage): void {
     if (type === 'game_control') this.handleGameControl(message);
     else if (type === 'game_state') this.handleGameState(message);
@@ -576,6 +605,7 @@ class WebSocketTransport {
     const key = e2e.keyFor(fromPeerId);
     if (key) useChatStore.getState().setPeerSymmetricKey(fromPeerId, key);
     useChatStore.getState().setPeerSecurity(fromPeerId, await e2e.securityInfo(fromPeerId));
+    this.requestHistoryFrom(fromPeerId);
     this.undecryptableNoticed.delete(fromPeerId);
 
     // A peer that started over has lost our key, as a host that restarted has.
@@ -591,7 +621,8 @@ class WebSocketTransport {
   }
 
   private displayName(peerId: string): string {
-    return usePoolStore.getState().peers.find((peer) => peer.peerId === peerId)?.displayName ?? 'Someone';
+    const peer = usePoolStore.getState().peers.find((candidate) => candidate.peerId === peerId);
+    return peer ? shownName(peer) : 'Someone';
   }
 
   /** A line in the group chat that nobody sent. */
@@ -638,10 +669,30 @@ class WebSocketTransport {
       case 'media_frame':
         await this.handleIncomingMediaFrame(action.encryptedData, fromPeerId);
         break;
+      case 'history_sync':
+        await this.handleHistorySync(action.encryptedData, fromPeerId);
+        break;
       default:
-        // media_frame_v2 needs per-call keys; history_sync and clear_history are not handled here.
+        // media_frame_v2 needs per-call keys; clear_history is not handled here.
         break;
     }
+  }
+
+  private async handleHistorySync(encryptedData: Uint8Array, fromPeerId: string): Promise<void> {
+    // Only this pool's host, and only an answer to our asking.
+    if (!this.historyPending || fromPeerId !== usePoolStore.getState().poolInfo?.hostPeerId) return;
+    const plaintext = await this.decryptFrom(encryptedData, fromPeerId);
+    const history = plaintext && parseHistorySync(plaintext, Date.now());
+    if (!history) return;
+    this.historyPending = false;
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    useChatStore.getState().mergeHistory(history.map(({ timestampMillis, ...message }) => ({
+      ...message,
+      // The host's word on an author makes nothing this person's: their own lines show as anyone's.
+      senderID: message.senderID === localPeerId ? 'history' : message.senderID,
+      timestamp: timestampMillis,
+      isEncrypted: true,
+    })));
   }
 
   private async handleEncryptedChat(encryptedData: Uint8Array, timestamp: number, fromPeerId: string): Promise<void> {
@@ -654,6 +705,11 @@ class WebSocketTransport {
         this.addSystemNotice(`A message from ${this.displayName(fromPeerId)} couldn't be read by this page, so it isn't shown.`);
       }
       return;
+    }
+
+    if (chat.senderAvatarEmoji !== undefined || chat.senderAvatarColorIndex !== undefined) {
+      // Their own word, end to end. A first profile can come before the pool is protected, and is lost.
+      usePoolStore.getState().updatePeerAvatar(fromPeerId, chat.senderAvatarEmoji, chat.senderAvatarColorIndex);
     }
 
     const message: ChatMessage = {
@@ -1260,14 +1316,14 @@ class WebSocketTransport {
       } else {
         this.failWith("This server hasn't been set up yet. Ask the server owner to complete setup first.");
       }
-    } else if (data.code === 429) {
-      useConnectionStore.getState().setError('Rate limited. Please try again later.');
     } else if ((data.code === 403 && data.message === 'not_approved') || (data.code === 404 && data.message === 'pool_not_found')) {
       this.handleRejoinRefused(data.code);
     } else {
-      useConnectionStore.getState().setError(`Server error (${data.code}): ${data.message}`);
-      if (data.code === 401 || data.code === 403) {
-        useConnectionStore.getState().setStatus('failed');
+      const outcome = serverErrorOutcome(data.code, String(data.message), this.joinedThisSession);
+      if (outcome.terminal) {
+        this.tearDownSession();
+        this.resetSessionStores();
+        this.failWith(outcome.text ?? 'The connection to the relay ended.');
       }
     }
   }
@@ -1277,7 +1333,9 @@ class WebSocketTransport {
     const { identity, invitation, serverUrl } = this;
     const stillInvited = code === 403 && !this.joinedThisSession && invitation && !isInvitationExpired(invitation);
     if (!stillInvited || !invitation || !serverUrl) {
-      this.leaveWithReason(code === 404 ? 'This pool no longer exists.' : "You're no longer a member of this pool.");
+      this.leaveWithReason(code === 404
+        ? 'This pool is no longer on the relay. Ask the host for a new invitation.'
+        : "The relay no longer has you in this pool: the host removed you, or the relay restarted. Ask the host for a new invitation.");
       return;
     }
     // Someone returning with a live invitation asks the host again, as a new member.
@@ -1563,12 +1621,6 @@ class WebSocketTransport {
   }
 
   private attemptReconnect(): void {
-    if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-      useConnectionStore.getState().setError('Failed to reconnect after multiple attempts.');
-      useConnectionStore.getState().setStatus('failed');
-      return;
-    }
-
     // An approved member rejoins with its key. The invitation's expiry only binds someone who has
     // not been let in yet.
     if (!this.joinedThisSession && this.invitation && isInvitationExpired(this.invitation)) {
@@ -1578,10 +1630,7 @@ class WebSocketTransport {
     }
 
     useConnectionStore.getState().setStatus('reconnecting');
-    const delay = Math.min(
-      INITIAL_RECONNECT_DELAY_MS * Math.pow(2, this.reconnectAttempt),
-      MAX_RECONNECT_DELAY_MS,
-    );
+    const delay = reconnectDelayMs(this.reconnectAttempt);
     this.reconnectAttempt++;
 
     this.reconnectTimer = setTimeout(() => {
@@ -1629,6 +1678,8 @@ class WebSocketTransport {
     this.unsentFrames = [];
     this.undecryptableNoticed.clear();
     this.unreadableNoticed.clear();
+    this.historyAsked = false;
+    this.historyPending = false;
     this.declinedInvitations.clear();
     useConnectionStore.getState().reset();
   }

@@ -17,6 +17,8 @@ interface ConnectionState {
   security: OuterLayerStatus | null;
   /** The relay says the pool's host has gone away for now. */
   hostOffline: boolean;
+  /** The start of this identity's key, which the host's join request shows too. */
+  keyHint: string | null;
   setStatus: (status: ConnectionStatus) => void;
   setServerUrl: (url: string) => void;
   setAuthNonce: (nonce: string) => void;
@@ -25,6 +27,7 @@ interface ConnectionState {
   setPowProgress: (progress: number | null) => void;
   setSecurity: (security: OuterLayerStatus | null) => void;
   setHostOffline: (hostOffline: boolean) => void;
+  setKeyHint: (keyHint: string | null) => void;
   reset: () => void;
 }
 
@@ -39,6 +42,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   powProgress: null,
   security: null,
   hostOffline: false,
+  keyHint: null,
   setStatus: (status) => set(status === 'connecting' ? { status, error: null } : { status }),
   setServerUrl: (serverUrl) => set({ serverUrl }),
   setAuthNonce: (authNonce) => set({ authNonce }),
@@ -48,6 +52,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   setPowProgress: (powProgress) => set({ powProgress }),
   setSecurity: (security) => set({ security }),
   setHostOffline: (hostOffline) => set({ hostOffline }),
+  setKeyHint: (keyHint) => set({ keyHint }),
   reset: () =>
     set({
       status: 'idle',
@@ -60,5 +65,6 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
       powProgress: null,
       security: null,
       hostOffline: false,
+      keyHint: null,
     }),
 }));

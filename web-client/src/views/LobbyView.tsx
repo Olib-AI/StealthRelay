@@ -5,6 +5,7 @@ import { useConnectionStore } from '../stores/connection.ts';
 import { useGameStore } from '../stores/game.ts';
 import { transport } from '../transport/websocket.ts';
 import { GAMES_ENABLED } from '../protocol/features.ts';
+import { shownName } from '../protocol/peer-names.ts';
 import PeerAvatar from '../components/PeerAvatar.tsx';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import ThemeToggle from '../components/ThemeToggle.tsx';
@@ -62,7 +63,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
             <div className="flex items-center gap-1.5">
               <span className="h-[6px] w-[6px] rounded-full bg-[#30D158]" />
               <span className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>
-                {otherPeers.length + 1} of {poolInfo?.maxPeers ?? '?'} online
+                {otherPeers.length + 1} online
               </span>
             </div>
           </div>
@@ -197,7 +198,7 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
               >
                 <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="md" isHost={peer.peerId === poolInfo?.hostPeerId} />
                 <p className="flex-1 text-[16px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>
-                  {peer.displayName}
+                  {shownName(peer)}
                 </p>
                 {peer.peerId === poolInfo?.hostPeerId && (
                   <span className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[#FF9F0A]/15 text-[#FF9F0A]">

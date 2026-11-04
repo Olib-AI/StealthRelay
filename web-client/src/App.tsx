@@ -15,6 +15,8 @@ import GameInvitationBanner from './components/GameInvitationBanner.tsx';
 import CallView from './views/CallView.tsx';
 import SecurityBanner from './components/SecurityBanner.tsx';
 import ErrorBoundary from './components/ErrorBoundary.tsx';
+import { effectiveView } from './view-state.ts';
+import type { AppView } from './view-state.ts';
 import { useChatStore } from './stores/chat.ts';
 
 /** Better than a blank page: whatever failed to draw, the pool connection is still up. */
@@ -29,26 +31,14 @@ function PageFallback({ onRecover }: { onRecover: () => void }) {
   );
 }
 
-type AppView = 'join' | 'lobby' | 'chat' | 'game_lobby' | 'connect_four' | 'chain_reaction' | 'chess' | 'ludo';
-
 function App() {
   const status = useConnectionStore((s) => s.status);
   const isGameActive = useGameStore((s) => s.isGameActive);
   const activeGameType = useGameStore((s) => s.activeGameType);
   const [view, setView] = useState<AppView>('join');
 
-  // Auto-navigate based on connection status
   const isConnected = status === 'connected';
-  const isJoining = status === 'connecting' || status === 'waiting_approval';
-  const isDisconnected = status === 'idle' || status === 'disconnected' || status === 'failed';
-
-  const effectiveView = (() => {
-    if (isDisconnected && view !== 'join') return 'join';
-    if (isJoining) return 'join';
-    if (isConnected && view === 'join') return 'lobby';
-    if (isGameActive && activeGameType && view === 'game_lobby') return activeGameType;
-    return view;
-  })();
+  const shownView = effectiveView(view, status, { isGameActive, activeGameType });
 
   const handleStartGame = useCallback((type: 'connect_four' | 'chain_reaction' | 'chess' | 'ludo') => {
     setView(type);
@@ -81,51 +71,51 @@ function App() {
     <div className="h-dvh flex items-center justify-center" style={{ backgroundColor: 'var(--bg-page)' }}>
       <div className="relative w-full h-dvh flex flex-col overflow-hidden lg:max-w-[430px] lg:max-h-[932px] lg:rounded-2xl lg:border lg:shadow-2xl lg:shadow-black/50" style={{ backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)', borderColor: 'var(--separator)' }}>
         <ErrorBoundary fallback={<PageFallback onRecover={() => { useChatStore.getState().clearMessages(); setView(isConnected ? 'lobby' : 'join'); }} />}>
-        {isConnected && effectiveView !== 'join' && <SecurityBanner />}
-        {(effectiveView === 'join' || effectiveView === 'lobby' || effectiveView === 'chat' || effectiveView === 'game_lobby') && (
-          <div key={effectiveView} className="flex-1 flex flex-col min-h-0 animate-view-enter">
-            {effectiveView === 'join' && <JoinView />}
-            {effectiveView === 'lobby' && (
+        {(isConnected || status === 'reconnecting') && shownView !== 'join' && <SecurityBanner />}
+        {(shownView === 'join' || shownView === 'lobby' || shownView === 'chat' || shownView === 'game_lobby') && (
+          <div key={shownView} className="flex-1 flex flex-col min-h-0 animate-view-enter">
+            {shownView === 'join' && <JoinView />}
+            {shownView === 'lobby' && (
               <LobbyView
                 onNavigateChat={() => setView('chat')}
                 onNavigateGames={() => setView('game_lobby')}
                 onReturnToGame={isGameActive && activeGameType ? () => setView(activeGameType) : undefined}
               />
             )}
-            {effectiveView === 'chat' && <ChatView onBack={() => setView('lobby')} />}
-            {effectiveView === 'game_lobby' && (
+            {shownView === 'chat' && <ChatView onBack={() => setView('lobby')} />}
+            {shownView === 'game_lobby' && (
               <GameLobby onBack={() => setView('lobby')} onStartGame={handleStartGame} />
             )}
           </div>
         )}
         {showConnectFour && (
-          <div className={effectiveView === 'connect_four' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
+          <div className={shownView === 'connect_four' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
             <ConnectFour onBack={handleGameBack} />
           </div>
         )}
         {showChainReaction && (
-          <div className={effectiveView === 'chain_reaction' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
+          <div className={shownView === 'chain_reaction' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
             <ChainReaction onBack={handleGameBack} />
           </div>
         )}
         {showChess && (
-          <div className={effectiveView === 'chess' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
+          <div className={shownView === 'chess' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
             <Chess onBack={handleGameBack} />
           </div>
         )}
         {showLudo && (
-          <div className={effectiveView === 'ludo' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
+          <div className={shownView === 'ludo' ? 'flex-1 flex flex-col min-h-0' : 'hidden'}>
             <Ludo onBack={handleGameBack} />
           </div>
         )}
-        {isGameActive && (effectiveView === 'connect_four' || effectiveView === 'chain_reaction' || effectiveView === 'chess' || effectiveView === 'ludo') && (
+        {isGameActive && (shownView === 'connect_four' || shownView === 'chain_reaction' || shownView === 'chess' || shownView === 'ludo') && (
           <GameChatOverlay />
         )}
-        {isConnected && effectiveView !== 'join' && (
+        {isConnected && shownView !== 'join' && (
           <GameInvitationBanner onNavigateToGames={handleNavigateToGames} />
         )}
-        {isConnected && effectiveView !== 'join' && (
-          <ChatNotification currentView={effectiveView} onNavigateToChat={handleNotificationNav} />
+        {isConnected && shownView !== 'join' && (
+          <ChatNotification currentView={shownView} onNavigateToChat={handleNotificationNav} />
         )}
         <CallView />
         </ErrorBoundary>

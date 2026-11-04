@@ -643,7 +643,7 @@ docker build -t stealth-relay .
 
 ## Web Client
 
-A React web app lets friends without StealthOS or an iPhone join your pool from any browser. Same E2E encrypted protocol, no app install required.
+A React web app lets friends without StealthOS or an iPhone join a protected pool from a current browser, with no app to install. It runs the same E2E protocol as the app. It needs WebCrypto with Ed25519 and X25519, and says so in a browser without them. It has been run against the app in Chrome and in WebKit (the engine of Safari, through Playwright). Firefox has not been run. A pool the host hasn't protected, because someone in it is on StealthOS 1.4 or older, is refused: nothing is sent or received.
 
 **Hosted version:** [web.stealthos.app](https://web.stealthos.app) - paste an invitation link and join instantly.
 
@@ -662,7 +662,7 @@ npm run build
 # Serve web-client/dist/ with any static hosting (Nginx, Caddy, Vercel, etc.)
 ```
 
-Supports group and private chat, voice messages, image sharing, reactions, polls, and multiplayer games (Chess, Connect Four, Chain Reaction).
+Supports group and private chat, voice messages, image sharing, reactions and polls. Calls and games aren't available on the web yet: an incoming game invitation or call is declined, and the person on the web is told why.
 
 ## Recovery
 

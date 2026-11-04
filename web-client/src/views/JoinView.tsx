@@ -19,12 +19,15 @@ function JoinView() {
   const [showScanner, setShowScanner] = useState(false);
   const [cardError, setCardError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const latestUrl = useRef('');
   const status = useConnectionStore((s) => s.status);
   const error = useConnectionStore((s) => s.error);
   const powProgress = useConnectionStore((s) => s.powProgress);
+  const keyHint = useConnectionStore((s) => s.keyHint);
   const userProfile = usePoolStore((s) => s.userProfile);
 
   const validateUrl = useCallback((url: string) => {
+    latestUrl.current = url;
     setInviteUrl(url);
     setParseError(null);
     setIsValid(false);
@@ -34,7 +37,14 @@ function JoinView() {
     try {
       const parsed = parseInvitationUrl(url);
       if (isInvitationExpired(parsed)) {
-        setParseError('This invitation has expired.');
+        setParseError('This invitation has expired. Ask the host for a new one.');
+        // Someone the host already let in doesn't need the link to be current: the relay decides.
+        void transport.mayRejoinWith(parsed).then((mayRejoin) => {
+          if (mayRejoin && latestUrl.current === url) {
+            setParseError(null);
+            setIsValid(true);
+          }
+        });
         return;
       }
       setIsValid(true);
@@ -220,6 +230,12 @@ function JoinView() {
               </>
             )}
           </button>
+
+          {status === 'waiting_approval' && keyHint && (
+            <p className="text-xs text-center" style={{ color: 'var(--text-secondary)' }}>
+              Your key starts with <span className="font-mono select-text">{keyHint}</span>. The host sees this too, and may ask you for it.
+            </p>
+          )}
 
           {/* PoW progress */}
           {powProgress !== null && (

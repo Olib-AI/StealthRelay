@@ -1,8 +1,5 @@
 export const MAX_MESSAGE_SIZE = 2097152;
 export const HEARTBEAT_INTERVAL_MS = 15000;
-export const MAX_RECONNECT_ATTEMPTS = 5;
-export const INITIAL_RECONNECT_DELAY_MS = 1000;
-export const MAX_RECONNECT_DELAY_MS = 30000;
 export const APPLE_EPOCH_OFFSET = 978307200;
 
 export const AVATAR_EMOJIS = [

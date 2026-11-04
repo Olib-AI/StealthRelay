@@ -216,7 +216,7 @@ export class MemberTransportSecurity {
     if (this.mode === 'identityMismatch') return;
     const latest = this.keys[this.keys.length - 1];
     const canSeal = latest && (this.mode === 'protected' || this.mode === 'downgradeRefused');
-    if (!canSeal) {
+    if (!canSeal || this.behindAnnouncedEpoch()) {
       this.outboundQueue.push({ data, targets });
       if (this.outboundQueue.length > MAX_QUEUED_FRAMES) this.outboundQueue.shift();
       return;
@@ -270,6 +270,11 @@ export class MemberTransportSecurity {
     }
     if (isOuterFrame(data)) await this.receiveOuter(data, sender);
     // Anything else is a plaintext frame. This client has no use for one.
+  }
+
+  /** The host moved on and its key is on the way. Under the old one, the host drops a frame after 30 s. */
+  private behindAnnouncedEpoch(): boolean {
+    return this.mode === 'protected' && this.announcedEpoch > this.latestEpoch();
   }
 
   private latestEpoch(): number {
@@ -435,7 +440,7 @@ export class MemberTransportSecurity {
   }
 
   private async drainQueues(): Promise<void> {
-    const canSend = (this.mode === 'protected' || this.mode === 'downgradeRefused') && this.keys.length > 0;
+    const canSend = (this.mode === 'protected' || this.mode === 'downgradeRefused') && this.keys.length > 0 && !this.behindAnnouncedEpoch();
     if (canSend && this.outboundQueue.length > 0) {
       const queued = this.outboundQueue;
       this.outboundQueue = [];

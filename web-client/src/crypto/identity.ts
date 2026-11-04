@@ -213,6 +213,12 @@ async function accountFor(serverUrl: string, poolId: string): Promise<string> {
   return hexEncode(await sha256(utf8(`${serverUrl}:${poolId.toLowerCase()}`)));
 }
 
+/** Whether this browser's key for that pool has been let in, without creating one if it has none. */
+export async function peekPoolIdentityJoined(serverUrl: string, poolId: string, store: IdentityStore = defaultStore): Promise<boolean> {
+  const existing = await store.get(await accountFor(serverUrl, poolId));
+  return existing?.joined === true;
+}
+
 export async function loadOrCreatePoolIdentity(
   serverUrl: string,
   poolId: string,

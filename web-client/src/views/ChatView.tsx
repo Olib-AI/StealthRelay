@@ -11,6 +11,7 @@ import { appleTimestamp } from '../utils/time.ts';
 import type { EncryptedChatMessage } from '../protocol/messages.ts';
 import MessageBubble from '../components/MessageBubble.tsx';
 import ErrorBoundary from '../components/ErrorBoundary.tsx';
+import { shownName } from '../protocol/peer-names.ts';
 import PeerSecurityCode from '../components/PeerSecurityCode.tsx';
 import ChatInput from '../components/ChatInput.tsx';
 import PeerAvatar from '../components/PeerAvatar.tsx';
@@ -269,11 +270,11 @@ function ChatView({ onBack }: ChatViewProps) {
               return peer ? (
                 <>
                   <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
-                  <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
+                  <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{shownName(peer)}</span>
                   {peerSymmetricKeys[selectedPrivatePeerId] && (
                     <button
                       type="button"
-                      aria-label={`Security code with ${peer.displayName}`}
+                      aria-label={`Security code with ${shownName(peer)}`}
                       title="Security code"
                       onClick={() => setSecurityPeerId(peer.peerId)}
                       className="p-1.5 -m-1 rounded-full hover:bg-[rgba(48,209,88,0.12)] shrink-0"
@@ -349,7 +350,7 @@ function ChatView({ onBack }: ChatViewProps) {
                 <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
                 <div className="flex-1 min-w-0 text-left">
                   <div className="flex items-center justify-between">
-                    <span className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
+                    <span className="text-[15px] font-medium truncate" style={{ color: 'var(--text-primary)' }}>{shownName(peer)}</span>
                     {unread > 0 && (
                       <span className="h-5 min-w-5 px-1.5 rounded-full bg-[#FF453A] text-white text-[10px] font-bold flex items-center justify-center">
                         {unread}

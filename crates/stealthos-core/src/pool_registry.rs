@@ -228,12 +228,18 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
         pool.add_invitation_commitment([1u8; 16], [0u8; 32], now + 300, 1);
         registry.cleanup_idle_pools(Duration::ZERO);
-        assert!(registry.get_pool(pool_id).is_some(), "someone holds a good link to it");
+        assert!(
+            registry.get_pool(pool_id).is_some(),
+            "someone holds a good link to it"
+        );
 
         assert!(pool.revoke_invitation(&[1u8; 16]));
         pool.add_invitation_commitment([2u8; 16], [0u8; 32], now - 1, 1);
         registry.cleanup_idle_pools(Duration::ZERO);
-        assert!(registry.get_pool(pool_id).is_none(), "an expired link keeps nothing alive");
+        assert!(
+            registry.get_pool(pool_id).is_none(),
+            "an expired link keeps nothing alive"
+        );
     }
 
     #[test]

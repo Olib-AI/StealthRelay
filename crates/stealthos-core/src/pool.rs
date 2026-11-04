@@ -457,6 +457,15 @@ impl Pool {
         self.invitation_commitments.remove(token_id).is_some()
     }
 
+    /// Whether an unexpired invitation with a use left is out there. Revoking one removes it.
+    #[must_use]
+    pub fn has_live_invitation(&self) -> bool {
+        let now_unix = chrono::Utc::now().timestamp();
+        self.invitation_commitments.iter().any(|entry| {
+            entry.expires_at > now_unix && entry.use_count.load(Ordering::Acquire) < entry.max_uses
+        })
+    }
+
     /// Remove all expired invitation commitments.
     pub fn cleanup_expired_invitations(&self) {
         let now_unix = chrono::Utc::now().timestamp();

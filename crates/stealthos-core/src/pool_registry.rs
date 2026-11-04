@@ -180,13 +180,19 @@ impl PoolRegistry {
     ///
     /// A pool is considered idle if it has zero guest peers and has existed
     /// for longer than `max_idle`. The host connection is cleaned up as well.
+    /// One with a live invitation stays: whoever holds that link would be told it is
+    /// not valid while it says it has minutes left, and neither they nor the host would
+    /// know why.
     pub fn cleanup_idle_pools(&self, max_idle: Duration) {
         let now = tokio::time::Instant::now();
         let mut to_remove = Vec::new();
 
         for entry in &self.pools {
             let pool = entry.value();
-            if pool.peer_count() == 0 && now.duration_since(pool.created_at) > max_idle {
+            if pool.peer_count() == 0
+                && now.duration_since(pool.created_at) > max_idle
+                && !pool.has_live_invitation()
+            {
                 to_remove.push(*entry.key());
             }
         }
@@ -201,6 +207,34 @@ impl PoolRegistry {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn idle_cleanup_keeps_a_pool_with_a_live_invitation() {
+        let registry = PoolRegistry::new(10);
+        let pool_id = PoolId(Uuid::from_u128(7));
+        let pool = registry
+            .create_pool(
+                pool_id,
+                "test".into(),
+                ConnectionId(1),
+                PeerId("host".into()),
+                [0u8; 32],
+                "TestHost".into(),
+                8,
+            )
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        pool.add_invitation_commitment([1u8; 16], [0u8; 32], now + 300, 1);
+        registry.cleanup_idle_pools(Duration::ZERO);
+        assert!(registry.get_pool(pool_id).is_some(), "someone holds a good link to it");
+
+        assert!(pool.revoke_invitation(&[1u8; 16]));
+        pool.add_invitation_commitment([2u8; 16], [0u8; 32], now - 1, 1);
+        registry.cleanup_idle_pools(Duration::ZERO);
+        assert!(registry.get_pool(pool_id).is_none(), "an expired link keeps nothing alive");
+    }
 
     #[test]
     fn create_and_get_pool() {

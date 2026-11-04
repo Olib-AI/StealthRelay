@@ -11,8 +11,9 @@ import { ed25519Verify } from '../src/crypto/webcrypto.ts';
 import { aesGcmOpenCombined } from '../src/crypto/webcrypto.ts';
 import { announcementTranscript, decodeControlMessage, grantTranscript, requestTranscript } from '../src/transport/control-message.ts';
 import { encodeHeader, openOuterFrame, outerAad, parseHeader, sealOuterFrame } from '../src/transport/outer-frame.ts';
-import { bindingStatement, ChatEncryption, continuityStatement, deriveChatKey } from '../src/crypto/encryption.ts';
-import { buildPoolMessage, buildPrivateChatPayload } from '../src/protocol/chat-wire.ts';
+import { bindingStatement, ChatEncryption, continuityStatement, deriveChatKey, keyFingerprint } from '../src/crypto/encryption.ts';
+import { buildGameDecline, buildPoolMessage, buildPrivateChatPayload } from '../src/protocol/chat-wire.ts';
+import { classifyAppFrame, parseDecryptedCallSignal, parseDecryptedChat, parseDecryptedPollVote, parseDecryptedReaction } from '../src/protocol/inbound.ts';
 import type { KeyExchangePayload, PoolMessage } from '../src/protocol/messages.ts';
 
 const poolIdBytes = hex((V.poolID as string).replace(/-/g, ''));
@@ -136,7 +137,8 @@ test('follows the host through a rotation', async () => {
 test('inner E2E: derives the same key as Swift and reads its message', async () => {
   const e = V.e2e;
   const web = await importX25519(hex(e.webChatSeed), hex(e.webChatPublic));
-  const key = await deriveChatKey(web.privateKey, web.publicKey, hex(e.hostChatPublic));
+  const { key, safetyCode } = await deriveChatKey(web.privateKey, web.publicKey, hex(e.hostChatPublic));
+  assert.equal(safetyCode, e.sharedFingerprint, 'the safety code is the one the app shows');
   const msg = JSON.parse(e.customMessage) as PoolMessage;
   const wrapped = JSON.parse(new TextDecoder().decode(b64(msg.payload))) as { encryptedData: string; messageType: string; senderPeerID: string };
   assert.equal(wrapped.messageType, 'chat_message');
@@ -166,6 +168,47 @@ test('accepts the Swift key exchange', async () => {
   const result = await chat.acceptKeyExchange(payload, V.hostPeerID);
   assert.deepEqual(result, { outcome: 'newPeer', accepted: true, shouldAnswer: true });
   assert.ok(chat.keyFor(V.hostPeerID));
+});
+
+test('the security-code screen shows what the app shows, on both sides', async () => {
+  const e = V.e2e;
+  const web = await ChatEncryption.create(await importX25519(hex(e.webChatSeed), hex(e.webChatPublic)));
+  await web.acceptKeyExchange({ publicKey: base64Encode(hex(e.hostChatPublic)), senderPeerID: V.hostPeerID }, V.hostPeerID);
+  assert.deepEqual(await web.securityInfo(V.hostPeerID), { safetyCode: e.sharedFingerprint, theirKey: e.hostKeyFingerprint, yourKey: e.webKeyFingerprint });
+  web.removePeer(V.hostPeerID);
+  assert.equal(await web.securityInfo(V.hostPeerID), null, 'no code for someone with no session');
+  assert.notEqual((await keyFingerprint(hex(e.webChatPublic))), e.hostKeyFingerprint);
+});
+
+test('every kind of message the app sends gets through the validator', () => {
+  const s = V.wire.samples;
+  const parse = (json: string) => parseDecryptedChat(new TextEncoder().encode(json));
+  const text = parse(s.text)!;
+  assert.equal(text.text, 'hi');
+  assert.equal(text.replyTo?.previewText, 'earlier');
+  assert.deepEqual(text.mentions, [V.memberPeerID]);
+  const poll = parse(s.poll)!;
+  assert.deepEqual(poll.pollData?.options, ['A', 'B']);
+  assert.deepEqual(poll.pollData?.votes, { A: [], B: [] });
+  assert.equal(parse(s.image)!.imageData, '/9j/');
+  assert.equal(parse(s.voice)!.voiceDuration, 2.5);
+  assert.equal(parse(s.emoji)!.emoji, '🎉');
+  assert.equal(parseDecryptedReaction(new TextEncoder().encode(V.wire.reaction))?.emoji, '👍');
+  assert.equal(parseDecryptedPollVote(new TextEncoder().encode(V.wire.pollVote))?.option, 'A');
+  assert.equal(parseDecryptedCallSignal(new TextEncoder().encode(V.wire.callOffer))?.signalType, 'offer');
+});
+
+test('the app\'s control messages are understood', () => {
+  const context = { hostPeerId: V.hostPeerID, localPeerId: V.memberPeerID };
+  const classify = (json: string) => classifyAppFrame(new TextEncoder().encode(json), V.hostPeerID, context);
+  assert.equal(classify(V.wire.gameInvite)?.kind, 'game_invite');
+  assert.equal(classify(V.e2e.keyExchangeMessage)?.kind, 'key_exchange');
+  assert.equal(classify(V.e2e.customMessage)?.kind, 'encrypted');
+  assert.equal(classify(V.wire.poolClosed)?.kind, 'pool_closed');
+  assert.equal(classify(V.wire.removed)?.kind, 'removed');
+  const profile = classify(V.wire.profileUpdate);
+  assert.equal(profile?.kind, 'profile');
+  assert.deepEqual(profile?.kind === 'profile' && profile.profile, { displayName: 'Host', avatarEmoji: '🦊', avatarColorIndex: 3 });
 });
 
 // Everything the Swift side checks in its `verify` step. Set STEALTH_TS_OUTPUT to write it.
@@ -204,7 +247,15 @@ test('writes what this client produces, for the Swift side to verify', async (t)
     epoch: 1, session: 42n, counter: 1n, timestampMillis: now, nonce: crypto.getRandomValues(new Uint8Array(12)),
   }, poolIdBytes, V.memberPeerID);
 
+  const invite = classifyAppFrame(new TextEncoder().encode(V.wire.gameInvite), V.hostPeerID, { hostPeerId: V.hostPeerID, localPeerId: V.memberPeerID });
+  assert.equal(invite?.kind, 'game_invite');
+  const gameDecline = buildPoolMessage(crypto.randomUUID(), 'game_control', V.memberPeerID, 'Webby',
+    buildGameDecline(invite?.kind === 'game_invite' ? invite.invite : { invitationID: '', gameType: '', sessionID: '' }, V.memberPeerID, 'Webby'), true, now);
+  const callReject = { callID: crypto.randomUUID(), signalType: 'reject', callerPeerID: V.hostPeerID, callerDisplayName: 'Host', calleePeerIDs: [V.memberPeerID], isVideoCall: false, timestamp: now / 1000 - 978307200, mediaControl: null };
+
   writeFileSync(path, JSON.stringify({
+    gameDecline: JSON.stringify(gameDecline),
+    callReject: JSON.stringify(callReject),
     nowMillis: now,
     memberPeerID: V.memberPeerID,
     requestWire: base64Encode(h.sent[0]!.data),

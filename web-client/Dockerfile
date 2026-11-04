@@ -18,6 +18,9 @@ server {
 
     # add_header in a location drops server-level headers, so each location
     # lists them. Camera and microphone are for calls and QR scanning.
+    # connect-src: a relay can be on any host, always over wss:, except one on this machine. An
+    # invitation's ws:// address is upgraded by the client too (relayUrlFromInvitation).
+    # style-src needs 'unsafe-inline' for React's style attributes. Scripts stay 'self' only.
     location / {
         try_files $uri $uri/ /index.html;
         add_header Cache-Control "no-cache" always;
@@ -25,6 +28,7 @@ server {
         add_header Referrer-Policy "no-referrer" always;
         add_header X-Frame-Options "DENY" always;
         add_header Permissions-Policy "camera=(self), microphone=(self), geolocation=()" always;
+        add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; worker-src 'self'; manifest-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
     }
 
     location ~* \.(js|css|svg|png|ico|woff2?)$ {
@@ -32,6 +36,7 @@ server {
         add_header Cache-Control "public, immutable" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "no-referrer" always;
+        add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; worker-src 'self'; manifest-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
     }
 }
 EOF

@@ -10,7 +10,8 @@
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",
     "test": "node --test tests/*.test.ts",
-    "typecheck:test": "tsc -p tsconfig.test.json --noEmit"
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test:swift-output": "STEALTH_TS_OUTPUT=${STEALTH_TS_OUTPUT:-/tmp/stealth-ts-output.json} node --test tests/interop.test.ts"
   },
   "dependencies": {
     "@noble/hashes": "2.0.1",

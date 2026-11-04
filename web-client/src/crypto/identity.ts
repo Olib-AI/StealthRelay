@@ -6,7 +6,7 @@
 
 import { base64Encode } from '../utils/base64.ts';
 import { hexEncode } from '../utils/hex.ts';
-import { randomBytes, utf8 } from '../utils/bytes.ts';
+import { bytesEqual, randomBytes, utf8 } from '../utils/bytes.ts';
 import { ed25519Sign, generateEd25519, sha256 } from './webcrypto.ts';
 
 /** Where earlier versions kept one raw private key for every pool. */
@@ -28,6 +28,8 @@ interface IdentityRecord {
   joined: boolean;
   /** The host enrolled this key for the transport secret. */
   enrolled: boolean;
+  /** The host key this pool was first joined under, once the relay agreed. It never changes. */
+  hostIdentityKey?: Uint8Array;
 }
 
 export interface IdentityStore {
@@ -158,6 +160,23 @@ export class PoolIdentity {
     publicKey: (): Uint8Array => this.record.devicePublic,
     sign: (message: Uint8Array): Promise<Uint8Array> => ed25519Sign(this.record.devicePrivate, message),
   };
+
+  /**
+   * `false` when an invitation names another host than the one this identity joined under, as
+   * PoolTransportSecurity does with its stored record. A pool's host key can't legitimately change:
+   * the relay binds a pool to it.
+   */
+  hostKeyMatches(hostKey: Uint8Array): boolean {
+    const pinned = this.record.hostIdentityKey;
+    return pinned === undefined || bytesEqual(pinned, hostKey);
+  }
+
+  /** Remembers the host once the relay has named the same one as the invitation. */
+  async pinHostKey(hostKey: Uint8Array): Promise<void> {
+    if (this.record.hostIdentityKey) return;
+    this.record.hostIdentityKey = hostKey.slice();
+    await this.store.put(this.account, this.record);
+  }
 
   /** Only ever goes up, whatever the clock does, so an older proof can be refused. */
   async nextContinuityCounter(now: number = Date.now()): Promise<number> {

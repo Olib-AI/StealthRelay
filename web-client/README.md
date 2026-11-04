@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# StealthRelay web client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Join a StealthOS pool from a browser and chat with the people in it. It joins by invitation, and the
+host approves you as usual. Calls and games aren't available on the web yet: an incoming call or a
+game invitation is declined, and you're told.
 
-Currently, two official plugins are available:
+## Who you are trusting
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Messages are encrypted on the page before they leave it, so the relay can't read them, and peers are
+checked the same way the app checks them. You can compare a security code with someone from your
+private chat with them (tap the lock).
 
-## React Compiler
+The page itself is different from the app: it is code your browser fetches each time from whoever
+hosts it. That host could change it to read your invitation and your messages. So:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Use a copy hosted by someone you trust. Host it yourself if you can (`Dockerfile`), on HTTPS.
+- Trust in the relay and trust in the page's host are separate. Running your own relay doesn't help
+  if someone else serves the page.
 
-## Expanding the ESLint configuration
+The invitation's part after the `#` holds the pool's invite key. The relay never receives it. Only
+paste an invitation into a page you trust.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Requirements
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+A current Chrome, Edge, Firefox or Safari, over HTTPS or on localhost: it needs Ed25519 and X25519 in
+Web Crypto. Other browsers are told so and don't connect. Pools with someone on StealthOS 1.4.x don't
+work here: the web client only takes part in protected pools.
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## Development
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm ci
+npm run dev           # HTTPS, with a proxy for ws:// relays
+npm run build
+npm run lint
+npm test              # no browser or Swift needed
+npm run typecheck:test
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+See [tests/README.md](tests/README.md) for what the tests prove, and how to rerun the checks against
+the Swift code.

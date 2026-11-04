@@ -142,8 +142,15 @@ export function isInvitationExpired(invitation: ParsedInvitation): boolean {
   return Date.now() / 1000 > invitation.expiry;
 }
 
-function isLoopbackHost(host: string): boolean {
-  return host === 'localhost' || host === '[::1]' || host.startsWith('127.');
+/** The URL's real host, not whatever text comes first: `ws://127.0.0.1@evil.com` is evil.com. */
+function isLoopbackUrl(address: string): boolean {
+  let host: string;
+  try {
+    host = new URL(address).hostname;
+  } catch {
+    return false;
+  }
+  return host === 'localhost' || host === '[::1]' || /^127(\.\d{1,3}){3}$/.test(host);
 }
 
 /**
@@ -154,9 +161,7 @@ function isLoopbackHost(host: string): boolean {
 export function relayUrlFromInvitation(address: string, allowCleartext: boolean): string {
   if (address.startsWith('wss://')) return address;
   if (address.startsWith('ws://')) {
-    const rest = address.slice('ws://'.length);
-    const host = rest.split('/')[0]!.replace(/:\d+$/, '');
-    return allowCleartext || isLoopbackHost(host) ? address : `wss://${rest}`;
+    return allowCleartext || isLoopbackUrl(address) ? address : `wss://${address.slice('ws://'.length)}`;
   }
   return `wss://${address}`;
 }

@@ -35,6 +35,15 @@ const CONTROL_MAX_FUTURE_MS = 60_000;
 const PREVIOUS_EPOCH_GRACE_MS = 30_000;
 const REQUEST_RETRY_MS = 5_000;
 const MAX_QUEUED_FRAMES = 256;
+
+/** The relay's own `max_message_size`, and more than any frame it can legitimately relay decodes to. */
+export const MAX_INBOUND_FRAME_BYTES = 2 * 1024 * 1024;
+/** Frames waiting for a key: unauthenticated until then, so a share per sender and a total, in bytes. */
+export const MAX_QUEUED_BYTES_PER_SENDER = 4 * 1024 * 1024;
+export const MAX_QUEUED_BYTES_TOTAL = 16 * 1024 * 1024;
+/** Frames waiting for their turn in line. Past this they are dropped, not lined up for ever. */
+export const MAX_PENDING_RECEIVE_BYTES = 32 * 1024 * 1024;
+export const MAX_PENDING_RECEIVE_STEPS = 4096;
 /**
  * The app keeps its secret, so an enrolled member always asks without the invite key. This client
  * keeps none across a reload, and a request a host can't place gets no answer, so after this many
@@ -70,6 +79,8 @@ export interface MemberTransportSecurityOptions {
   /** Whether the host enrolled this identity on an earlier connection. */
   enrolled: boolean;
   onEnrolled?: () => void;
+  /** Any grant has opened: an invite key is no longer needed by anyone. */
+  onGranted?: () => void;
   now?: () => number;
   /** Test seams, so a run can be compared byte for byte with the Swift side's. */
   newEphemeral?: () => Promise<RawPublicKeyPair>;
@@ -120,6 +131,10 @@ export class MemberTransportSecurity {
   private readonly removedPeers = new Set<string>();
   private outboundQueue: { data: Uint8Array; targets: string[] | null }[] = [];
   private inboundQueue: { data: Uint8Array; sender: string }[] = [];
+  private queuedBytesTotal = 0;
+  private readonly queuedBytesBySender = new Map<string, number>();
+  private pendingReceiveBytes = 0;
+  private pendingReceiveSteps = 0;
   private lastStatusKey = '';
   private destroyed = false;
 
@@ -225,7 +240,23 @@ export class MemberTransportSecurity {
 
   /** Handles one relayed frame. App plaintext goes to `deliver`. */
   receive(data: Uint8Array, sender: string): Promise<void> {
-    return this.enqueue(() => this.receiveNow(data, sender));
+    if (data.length > MAX_INBOUND_FRAME_BYTES) return Promise.resolve();
+    if (
+      this.pendingReceiveSteps >= MAX_PENDING_RECEIVE_STEPS ||
+      this.pendingReceiveBytes + data.length > MAX_PENDING_RECEIVE_BYTES
+    ) {
+      return Promise.resolve();
+    }
+    this.pendingReceiveSteps += 1;
+    this.pendingReceiveBytes += data.length;
+    return this.enqueue(async () => {
+      try {
+        await this.receiveNow(data, sender);
+      } finally {
+        this.pendingReceiveSteps -= 1;
+        this.pendingReceiveBytes -= data.length;
+      }
+    });
   }
 
   private async receiveNow(data: Uint8Array, sender: string): Promise<void> {
@@ -261,16 +292,34 @@ export class MemberTransportSecurity {
     if (!header || !this.replayGuard.isFresh(header, this.now()) || !this.replayGuard.wouldAccept(header, sender)) return;
     const frameKey = this.frameKeyForReceiving(header.epoch, sender);
     if (!frameKey) {
-      const newest = this.keys.reduce((max, key) => Math.max(max, key.epoch), 0);
-      if (this.mode === 'securing' || header.epoch > newest) {
-        this.inboundQueue.push({ data, sender });
-        if (this.inboundQueue.length > MAX_QUEUED_FRAMES) this.inboundQueue.shift();
-      }
+      this.queueForLater(data, sender, header.epoch);
       return;
     }
     const opened = await openOuterFrame(data, frameKey, this.options.poolIdBytes, sender);
     if (!opened || !this.replayGuard.accept(opened.header, sender)) return;
     await this.options.deliver(opened.plaintext, sender);
+  }
+
+  /**
+   * A frame under an epoch we have no key for yet may be a rotation we haven't caught up with. Only
+   * the next epoch can be, so nothing further ahead waits. Nobody can have authenticated this frame,
+   * so what is full stays as it is: one sender can't push out what another sent.
+   */
+  private queueForLater(data: Uint8Array, sender: string, epoch: number): void {
+    const newest = this.keys.reduce((max, key) => Math.max(max, key.epoch), this.announcedEpoch);
+    if (epoch > newest + 1) return;
+    if (this.keys.length > 0 && epoch <= this.latestEpoch()) return; // An old epoch we have let go of.
+    const fromSender = this.queuedBytesBySender.get(sender) ?? 0;
+    if (
+      this.inboundQueue.length >= MAX_QUEUED_FRAMES ||
+      fromSender + data.length > MAX_QUEUED_BYTES_PER_SENDER ||
+      this.queuedBytesTotal + data.length > MAX_QUEUED_BYTES_TOTAL
+    ) {
+      return;
+    }
+    this.inboundQueue.push({ data, sender });
+    this.queuedBytesBySender.set(sender, fromSender + data.length);
+    this.queuedBytesTotal += data.length;
   }
 
   private isFresh(millis: number): boolean {
@@ -352,6 +401,7 @@ export class MemberTransportSecurity {
     }
     this.inviteKey?.fill(0);
     this.inviteKey = null;
+    this.options.onGranted?.();
     if (previousLatest !== null && epoch > previousLatest) {
       this.oldEpochsValidUntil = this.now() + PREVIOUS_EPOCH_GRACE_MS;
     }
@@ -394,10 +444,16 @@ export class MemberTransportSecurity {
     if (this.mode !== 'securing' && this.inboundQueue.length > 0) {
       const queued = this.inboundQueue;
       this.inboundQueue = [];
+      this.queuedBytesTotal = 0;
+      this.queuedBytesBySender.clear();
       for (const { data, sender } of queued) {
         const header = parseHeader(data);
         if (header && this.frameKeyForReceiving(header.epoch, sender) === null) continue; // still no key: drop rather than loop
-        await this.receiveNow(data, sender);
+        try {
+          await this.receiveNow(data, sender);
+        } catch {
+          // One bad frame must not take the rest of the queue with it.
+        }
       }
     }
     this.publishStatus();
@@ -426,5 +482,7 @@ export class MemberTransportSecurity {
     this.outstanding = null;
     this.outboundQueue = [];
     this.inboundQueue = [];
+    this.queuedBytesTotal = 0;
+    this.queuedBytesBySender.clear();
   }
 }

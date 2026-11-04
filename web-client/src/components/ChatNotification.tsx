@@ -25,10 +25,11 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
 
   // Subscribe to store changes outside React render cycle
   useEffect(() => {
-    let prevGroupCount = useChatStore.getState().groupMessages.length;
-    const prevPrivateCounts: Record<string, number> = {};
+    // The newest message's ID, not a count: a long chat stops growing at its cap.
+    let prevGroupNewest = useChatStore.getState().groupMessages.at(-1)?.id;
+    const prevPrivateNewest: Record<string, string | undefined> = {};
     for (const [pid, msgs] of Object.entries(useChatStore.getState().privateMessages)) {
-      prevPrivateCounts[pid] = msgs.length;
+      prevPrivateNewest[pid] = msgs.at(-1)?.id;
     }
 
     const unsub = useChatStore.subscribe((state) => {
@@ -40,9 +41,9 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
       const isViewingPrivate = isOnChat && chatTab === 'private';
 
       // Check group messages
-      const groupCount = state.groupMessages.length;
-      if (groupCount > prevGroupCount) {
-        const newMsg = state.groupMessages[groupCount - 1];
+      const newestGroup = state.groupMessages.at(-1);
+      if (newestGroup && newestGroup.id !== prevGroupNewest) {
+        const newMsg = newestGroup;
         if (newMsg && newMsg.senderID !== 'system' && newMsg.senderID !== localPeerId && !isViewingGroup) {
           const id = newMsg.id + '-toast';
           setToasts((prev) => {
@@ -50,22 +51,16 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
             return [...prev, { id, message: newMsg, isPrivate: false }].slice(-3);
           });
           setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
-          const senderPeer = usePoolStore.getState().peers.find(p => p.peerId === newMsg.senderID);
-          sendNotification(
-            senderPeer?.displayName ?? newMsg.senderName ?? 'Group Chat',
-            newMsg.text ?? (newMsg.contentType === 'image' ? 'Sent a photo' : newMsg.contentType === 'voice' ? 'Sent a voice message' : 'New message'),
-            'group-' + newMsg.id
-          );
+          sendNotification('group-' + newMsg.id);
         }
       }
-      prevGroupCount = groupCount;
+      prevGroupNewest = newestGroup?.id;
 
       // Check private messages
       for (const [peerId, msgs] of Object.entries(state.privateMessages)) {
-        const prev = prevPrivateCounts[peerId] ?? 0;
-        const curr = msgs.length;
-        if (curr > prev) {
-          const newMsg = msgs[curr - 1];
+        const newest = msgs.at(-1);
+        if (newest && newest.id !== prevPrivateNewest[peerId]) {
+          const newMsg = newest;
           const isViewingThisChat = isViewingPrivate && selectedPeer === peerId;
           if (newMsg && newMsg.senderID !== localPeerId && !isViewingThisChat) {
             const id = newMsg.id + '-toast';
@@ -74,15 +69,10 @@ function ChatNotification({ currentView, onNavigateToChat }: ChatNotificationPro
               return [...prev, { id, message: newMsg, isPrivate: true, peerId }].slice(-3);
             });
             setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
-            const privatePeer = usePoolStore.getState().peers.find(p => p.peerId === newMsg.senderID);
-            sendNotification(
-              privatePeer?.displayName ?? newMsg.senderName ?? 'Private Message',
-              newMsg.text ?? (newMsg.contentType === 'image' ? 'Sent a photo' : newMsg.contentType === 'voice' ? 'Sent a voice message' : 'New message'),
-              'private-' + newMsg.id
-            );
+            sendNotification('private-' + newMsg.id);
           }
         }
-        prevPrivateCounts[peerId] = curr;
+        prevPrivateNewest[peerId] = newest?.id;
       }
     });
 

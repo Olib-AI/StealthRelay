@@ -1,4 +1,30 @@
 import { create } from 'zustand';
+import type { PeerSecurityInfo } from '../crypto/encryption.ts';
+
+/** What one conversation keeps. A peer can send as much as it likes; this page keeps this much. */
+export const MAX_MESSAGES_PER_CHAT = 500;
+export const MAX_CHAT_BYTES = 64 * 1024 * 1024;
+/** Same as the app's `StoredMessageChange.maximumReactors`. */
+const MAX_REACTORS_PER_MESSAGE = 100;
+
+function messageWeight(message: ChatMessage): number {
+  return (message.text?.length ?? 0) + (message.imageData?.length ?? 0) + (message.voiceData?.length ?? 0);
+}
+
+/** Drops the oldest messages past either limit. */
+export function capMessages(messages: ChatMessage[]): ChatMessage[] {
+  let kept = messages.length > MAX_MESSAGES_PER_CHAT ? messages.slice(-MAX_MESSAGES_PER_CHAT) : messages;
+  let bytes = kept.reduce((sum, message) => sum + messageWeight(message), 0);
+  if (bytes > MAX_CHAT_BYTES) {
+    let start = 0;
+    while (bytes > MAX_CHAT_BYTES && start < kept.length - 1) {
+      bytes -= messageWeight(kept[start]!);
+      start += 1;
+    }
+    kept = kept.slice(start);
+  }
+  return kept;
+}
 
 export interface ChatMessage {
   id: string;
@@ -33,6 +59,8 @@ interface ChatState {
   unreadPrivate: Record<string, number>;
   /** Non-extractable AES-GCM keys, one per peer the key exchange has finished with. */
   peerSymmetricKeys: Record<string, CryptoKey>;
+  /** Safety code and key fingerprints per peer, for the security-code screen. */
+  peerSecurity: Record<string, PeerSecurityInfo>;
   currentView: 'group' | 'private';
   selectedPrivatePeerId: string | null;
   replyingTo: ChatMessage | null;
@@ -42,6 +70,8 @@ interface ChatState {
   markPrivateRead: (peerId: string) => void;
   setPeerSymmetricKey: (peerId: string, key: CryptoKey) => void;
   removePeerSymmetricKey: (peerId: string) => void;
+  setPeerSecurity: (peerId: string, info: PeerSecurityInfo | null) => void;
+  clearMessages: () => void;
   setCurrentView: (view: 'group' | 'private') => void;
   setSelectedPrivatePeerId: (peerId: string | null) => void;
   setReplyingTo: (msg: ChatMessage | null) => void;
@@ -56,6 +86,8 @@ function addReactionToMessages(messages: ChatMessage[], messageId: string, emoji
     if (m.id.toLowerCase() !== normalizedId) return m;
     const reactions = { ...m.reactions };
     const existing = reactions[emoji] ?? [];
+    const reactorCount = Object.values(reactions).reduce((sum, ids) => sum + ids.length, 0);
+    if (!existing.includes(peerId) && reactorCount >= MAX_REACTORS_PER_MESSAGE) return m;
     if (existing.includes(peerId)) {
       const filtered = existing.filter((id) => id !== peerId);
       if (filtered.length === 0) {
@@ -74,6 +106,7 @@ function updatePollInMessages(messages: ChatMessage[], messageId: string, option
   const normalizedId = messageId.toLowerCase();
   return messages.map((m) => {
     if (m.id.toLowerCase() !== normalizedId || !m.pollData) return m;
+    if (!m.pollData.options.includes(option)) return m; // Only what the poll offers.
     const votes = { ...m.pollData.votes };
     // Remove previous votes if not allowed to change
     for (const [opt, voters] of Object.entries(votes)) {
@@ -97,19 +130,20 @@ export const useChatStore = create<ChatState>((set) => ({
   unreadGroup: 0,
   unreadPrivate: {},
   peerSymmetricKeys: {},
+  peerSecurity: {},
   currentView: 'group',
   selectedPrivatePeerId: null,
   replyingTo: null,
   addGroupMessage: (msg) =>
     set((state) => ({
-      groupMessages: [...state.groupMessages, msg],
+      groupMessages: capMessages([...state.groupMessages, msg]),
       unreadGroup: state.unreadGroup + 1,
     })),
   addPrivateMessage: (peerId, msg) =>
     set((state) => ({
       privateMessages: {
         ...state.privateMessages,
-        [peerId]: [...(state.privateMessages[peerId] ?? []), msg],
+        [peerId]: capMessages([...(state.privateMessages[peerId] ?? []), msg]),
       },
       unreadPrivate: {
         ...state.unreadPrivate,
@@ -129,8 +163,18 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => {
       const remaining = { ...state.peerSymmetricKeys };
       delete remaining[peerId];
-      return { peerSymmetricKeys: remaining };
+      const security = { ...state.peerSecurity };
+      delete security[peerId];
+      return { peerSymmetricKeys: remaining, peerSecurity: security };
     }),
+  setPeerSecurity: (peerId, info) =>
+    set((state) => {
+      const security = { ...state.peerSecurity };
+      if (info) security[peerId] = info;
+      else delete security[peerId];
+      return { peerSecurity: security };
+    }),
+  clearMessages: () => set({ groupMessages: [], privateMessages: {}, unreadGroup: 0, unreadPrivate: {}, replyingTo: null }),
   setCurrentView: (currentView) => set({ currentView }),
   setSelectedPrivatePeerId: (selectedPrivatePeerId) => set({ selectedPrivatePeerId }),
   setReplyingTo: (replyingTo) => set({ replyingTo }),
@@ -173,6 +217,7 @@ export const useChatStore = create<ChatState>((set) => ({
       unreadGroup: 0,
       unreadPrivate: {},
       peerSymmetricKeys: {},
+      peerSecurity: {},
       currentView: 'group',
       selectedPrivatePeerId: null,
       replyingTo: null,

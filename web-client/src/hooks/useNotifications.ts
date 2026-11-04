@@ -27,14 +27,18 @@ export function disableNotifications(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
-export function sendNotification(title: string, body: string, tag?: string): void {
+/**
+ * A notification leaves this page for the OS, its history and the lock screen. So, as with the app's
+ * background session, it carries no sender, no title and no content: just that something arrived.
+ */
+export function sendNotification(tag?: string): void {
   if (!isNotificationSupported() || Notification.permission !== 'granted' || !isNotificationEnabled()) return;
   // Don't notify if the page is focused
   if (document.hasFocus()) return;
 
   try {
-    new Notification(title, {
-      body,
+    new Notification('StealthOS', {
+      body: 'You have a new message.',
       icon: '/icons/icon-192.png',
       tag: tag ?? 'stealth-message',
     } as NotificationOptions);

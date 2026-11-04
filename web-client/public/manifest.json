@@ -1,7 +1,7 @@
 {
   "name": "StealthRelay",
   "short_name": "Stealth",
-  "description": "End-to-end encrypted chat and games",
+  "description": "Encrypted chat with friends",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",

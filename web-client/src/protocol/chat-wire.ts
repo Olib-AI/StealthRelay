@@ -52,6 +52,21 @@ export function buildPrivateChatPayload(
   return { chatPayload, isPrivate, targetPeerID: isPrivate ? targetPeerId : null };
 }
 
+/** GameControlPayload { invite_response } with a GameInvitationResponse saying no. */
+export function buildGameDecline(
+  invite: { invitationID: string; gameType: string; sessionID: string },
+  localPeerId: string,
+  localName: string,
+): Record<string, unknown> {
+  const response = { invitationID: invite.invitationID, accepted: false, responderPeerID: localPeerId, responderName: localName };
+  return {
+    controlType: 'invite_response',
+    gameType: invite.gameType,
+    sessionID: invite.sessionID,
+    data: base64Encode(utf8(JSON.stringify(response))),
+  };
+}
+
 export function buildPoolMessage(
   id: string,
   type: PoolMessage['type'],

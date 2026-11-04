@@ -105,11 +105,6 @@ export interface PoolHostStatusData {
   offline_since?: number;
 }
 
-export interface SessionResumedData {
-  missed_messages: ServerFrame[];
-  last_acked_sequence: number;
-}
-
 /* ---- Frame wrapper ---- */
 
 export type ServerFrameType =
@@ -123,7 +118,6 @@ export type ServerFrameType =
   | 'kicked'
   | 'heartbeat_pong'
   | 'server_hello'
-  | 'session_resumed'
   | 'pool_host_status';
 
 export interface ServerFrame {

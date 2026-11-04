@@ -111,6 +111,26 @@ export async function hkdfToAesKey(
   }
 }
 
+/**
+ * The same HKDF output as `hkdfToAesKey`, as a non-extractable HMAC-SHA256 key. Used once, for the
+ * safety code the app computes over the shared chat key (`sharedKeyFingerprint`).
+ */
+export async function hkdfToHmacKey(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array): Promise<CryptoKey> {
+  const source = raw(ikm);
+  try {
+    const base = await crypto.subtle.importKey('raw', source, 'HKDF', false, ['deriveKey']);
+    return await crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: raw(salt), info: raw(info) },
+      base,
+      { name: 'HMAC', hash: 'SHA-256', length: 256 },
+      false,
+      ['sign'],
+    );
+  } finally {
+    source.fill(0);
+  }
+}
+
 /** AES-256-GCM with a fresh random nonce: `nonce(12) || ciphertext || tag(16)`, CryptoKit's `combined`. */
 export async function aesGcmSealCombined(key: CryptoKey, plaintext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
   const iv = crypto.getRandomValues(new Uint8Array(12));

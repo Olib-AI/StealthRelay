@@ -99,7 +99,7 @@ function JoinView() {
           <img src="/logo.png" alt="StealthOS" className="h-20 w-20 mb-2 mx-auto" />
           <h1 className="text-[28px] font-bold" style={{ color: 'var(--text-primary)' }}>StealthRelay</h1>
           <p className="text-[15px]" style={{ color: 'var(--text-secondary)' }}>
-            Join a pool to chat and play games with friends
+            Join a pool to chat with friends
           </p>
         </div>
 
@@ -244,8 +244,8 @@ function JoinView() {
         {/* Theme + Footer */}
         <div className="flex flex-col items-center gap-3" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
           <ThemeToggle />
-          <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
-            End-to-end encrypted. No account required.
+          <p className="text-[11px] text-center" style={{ color: 'var(--text-tertiary)' }}>
+            Messages are encrypted on this page before they're sent, so the relay can't read them. This page comes from whoever hosts it, so use a copy you trust. No account required.
           </p>
         </div>
       </div>

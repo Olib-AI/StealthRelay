@@ -73,6 +73,18 @@ export async function makeMember(overrides: Partial<MemberTransportSecurityOptio
   return { member, sent, delivered, statuses, clock, inviteKey };
 }
 
+/**
+ * Whether this member can read the pool: it heard every announcement a real host would send, then a
+ * real frame. A refusal is only shown by this, since a member stays `securing` until it hears one.
+ */
+export async function canReadPool(h: Harness): Promise<boolean> {
+  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
+  await h.member.settled();
+  const before = h.delivered.length;
+  await h.member.receive(b64(V.frames.fromHost[0]), V.hostPeerID);
+  return h.delivered.length > before;
+}
+
 /** Connected, granted and told the pool is protected: the state of a normal first join. */
 export async function makeProtectedMember(overrides: Partial<MemberTransportSecurityOptions> = {}): Promise<Harness> {
   const h = await makeMember(overrides);

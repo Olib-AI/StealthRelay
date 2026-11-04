@@ -1,13 +1,16 @@
 // What this client must refuse: wrong keys, tampering, bad signatures, replays, downgrades.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { V, b64, hex, importAes, importX25519, makeMember, makeProtectedMember } from './helpers.ts';
+import { V, b64, canReadPool, hex, importAes, importEd25519, importX25519, makeMember, makeProtectedMember } from './helpers.ts';
 import { base64Encode } from '../src/utils/base64.ts';
 import { InvitationError, parseInvitationUrl, parseTransportFragment, relayUrlFromInvitation } from '../src/crypto/invitation.ts';
-import { decodeControlMessage, encodeControlMessage } from '../src/transport/control-message.ts';
+import { decodeControlMessage, encodeControlMessage, grantTranscript, requestTranscript, secretAad } from '../src/transport/control-message.ts';
+import type { ControlMessage } from '../src/transport/control-message.ts';
+import { be32, concatBytes } from '../src/utils/bytes.ts';
+import { MAX_INBOUND_FRAME_BYTES, MAX_PENDING_RECEIVE_BYTES, MAX_PENDING_RECEIVE_STEPS, MAX_QUEUED_BYTES_PER_SENDER, MAX_QUEUED_BYTES_TOTAL } from '../src/transport/pool-transport-security.ts';
 import { openOuterFrame, sealOuterFrame } from '../src/transport/outer-frame.ts';
 import { ChatEncryption, continuityStatement, deriveChatKey } from '../src/crypto/encryption.ts';
-import { aesGcmOpenCombined, generateEd25519, generateX25519, UnsupportedBrowserError } from '../src/crypto/webcrypto.ts';
+import { aesGcmOpenCombined, aesGcmSealCombined, generateEd25519, generateX25519, hkdfToAesKey, sha256, UnsupportedBrowserError, x25519SharedSecret } from '../src/crypto/webcrypto.ts';
 import { loadOrCreatePoolIdentity, memoryIdentityStore, wipeLegacyIdentity } from '../src/crypto/identity.ts';
 import type { KeyExchangePayload } from '../src/protocol/messages.ts';
 
@@ -67,15 +70,25 @@ test('a relay naming another host: nothing is sent, ever', async () => {
   await h.member.sendApp(utf8('secret'), null);
   await h.member.tick();
   assert.equal(h.sent.length, 0);
+  assert.equal((h.member as unknown as { outboundQueue: unknown[] }).outboundQueue.length, 0, 'not even kept for later');
 });
 
-test('a key grant not signed by the invitation\'s host is refused', async () => {
+test('a control path a real grant does pass: the checks below are not passing by default', async () => {
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+  assert.equal(await canReadPool(h), true);
+});
+
+test('a key grant not signed by the invitation\'s host is refused, and nothing opens', async () => {
   const h = await makeMember();
   h.member.connected(V.hostPeerID);
   await h.member.settled();
   const forged = decodeControlMessage(b64(V.firstJoin.grantWire))!;
   forged.hostSignature = new Uint8Array(64).fill(1);
   await h.member.receive(encodeControlMessage(forged), V.hostPeerID);
+  assert.equal(await canReadPool(h), false);
   assert.equal(h.member.status.kind, 'securing');
 });
 
@@ -88,20 +101,84 @@ test('a tampered grant is refused: every signed field', async () => {
     const grant = decodeControlMessage(b64(V.firstJoin.grantWire))!;
     grant[field]![0]! ^= 1;
     await h.member.receive(encodeControlMessage(grant), V.hostPeerID);
-    for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
-    await h.member.settled();
+    assert.equal(await canReadPool(h), false, `tampered ${field}`);
     assert.equal(h.member.status.kind, 'securing', `tampered ${field}`);
   }
 });
 
-test('a grant from anyone but the host is ignored', async () => {
+test('a grant signed over another epoch or time is refused', async () => {
+  for (const change of [{ epoch: 9 }, { timestampMillis: V.nowMillis + 1 }]) {
+    const h = await makeMember();
+    h.member.connected(V.hostPeerID);
+    await h.member.settled();
+    const grant = { ...decodeControlMessage(b64(V.firstJoin.grantWire))!, ...change };
+    await h.member.receive(encodeControlMessage(grant), V.hostPeerID);
+    assert.equal(await canReadPool(h), false, JSON.stringify(change));
+  }
+});
+
+test('a grant with the wrong request hash but a good signature is refused', async () => {
+  // Signed by the real host key, so only the hash check stands in the way.
+  const signing = await importEd25519(hex(V.hostSeed));
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  const grant = decodeControlMessage(b64(V.firstJoin.grantWire))!;
+  grant.requestHash = new Uint8Array(32).fill(5);
+  grant.hostSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', signing, new Uint8Array(grantTranscript(grant, poolIdBytes)!)));
+  await h.member.receive(encodeControlMessage(grant), V.hostPeerID);
+  assert.equal(await canReadPool(h), false);
+});
+
+test('a grant whose secret is not 32 bytes is refused', async () => {
+  // A host that did everything else right: properly sealed for this request, properly signed.
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  const request = decodeControlMessage(h.sent[0]!.data)!;
+  const requestHash = await sha256(requestTranscript(request, poolIdBytes)!);
+  const ephemeral = await generateX25519();
+  const shared = await x25519SharedSecret(ephemeral.privateKey, request.memberEphemeral!);
+  const info = concatBytes(utf8('STEALTH_WS_TRANSPORT_KEY_V2'), be32(1), hex(V.fragment.inviteKey));
+  const sealingKey = await hkdfToAesKey(shared, requestHash, info);
+  const grant: ControlMessage = {
+    kind: 'keyGrant', poolID: V.poolID, timestampMillis: V.nowMillis, epoch: 1, requestHash,
+    hostEphemeral: ephemeral.publicKey,
+    sealedSecret: await aesGcmSealCombined(sealingKey, new Uint8Array(16).fill(1), secretAad(poolIdBytes, 1)),
+  };
+  const signing = await importEd25519(hex(V.hostSeed));
+  grant.hostSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', signing, new Uint8Array(grantTranscript(grant, poolIdBytes)!)));
+  await h.member.receive(encodeControlMessage(grant), V.hostPeerID);
+  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
+  assert.equal(h.member.status.kind, 'securing', 'no key came of it');
+  assert.equal(h.inviteKey.every((byte) => byte === 0), false, 'and the invite key is kept for a real grant');
+});
+
+test('a control message over the size limit is refused, whatever it says', async () => {
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  const json = JSON.parse(new TextDecoder().decode(b64(V.firstJoin.grantWire).subarray(4)));
+  json.padding = 'x'.repeat(17 * 1024);
+  await h.member.receive(concatBytes(utf8('SWK2'), utf8(JSON.stringify(json))), V.hostPeerID);
+  assert.equal(await canReadPool(h), false);
+});
+
+test('a control message with a field of the wrong type is refused outright', () => {
+  const base = { kind: 'keyGrant', poolID: V.poolID, timestampMillis: 1 };
+  const decode = (extra: Record<string, unknown>) => decodeControlMessage(concatBytes(utf8('SWK2'), utf8(JSON.stringify({ ...base, ...extra }))));
+  assert.ok(decode({}), 'the control case');
+  for (const bad of [{ nonce: 5 }, { nonce: '***' }, { epoch: 'x' }, { epoch: -1 }, { epoch: 2 ** 32 }, { protected: 'yes' }, { memberPeerID: 5 }, { removedPeerIDs: 'x' }, { removedPeerIDs: [1] }, { legacyPeerIDs: {} }, { timestampMillis: 'x' }, { timestampMillis: 1.5 }, { poolID: 5 }, { kind: 'nope' }]) {
+    assert.equal(decode(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('a grant from anyone but the host is ignored, and nothing opens', async () => {
   const h = await makeMember();
   h.member.connected(V.hostPeerID);
   await h.member.settled();
   await h.member.receive(b64(V.firstJoin.grantWire), 'someone-else');
-  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
-  await h.member.settled();
-  assert.equal(h.member.status.kind, 'securing');
+  assert.equal(await canReadPool(h), false);
 });
 
 test('a grant sealed for another invite key opens nothing', async () => {
@@ -109,9 +186,7 @@ test('a grant sealed for another invite key opens nothing', async () => {
   h.member.connected(V.hostPeerID);
   await h.member.settled();
   await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
-  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
-  await h.member.settled();
-  assert.equal(h.member.status.kind, 'securing');
+  assert.equal(await canReadPool(h), false);
 });
 
 test('a grant answering an old request is refused', async () => {
@@ -122,9 +197,7 @@ test('a grant answering an old request is refused', async () => {
   h.clock.now += 6000;
   await h.member.tick();
   await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
-  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
-  await h.member.settled();
-  assert.equal(h.member.status.kind, 'securing');
+  assert.equal(await canReadPool(h), false);
 });
 
 test('a replayed grant changes nothing', async () => {
@@ -133,26 +206,70 @@ test('a replayed grant changes nothing', async () => {
   assert.deepEqual(h.member.status, { kind: 'protected', epoch: 1, excludedPeers: [] });
 });
 
-test('stale and future control messages are refused', async () => {
+test('a stale or future grant is refused', async () => {
   for (const shift of [301_000, -61_000]) {
     const h = await makeMember();
     h.member.connected(V.hostPeerID);
     await h.member.settled();
     h.clock.now += shift;
     await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+    h.clock.now -= shift;
+    assert.equal(await canReadPool(h), false, `shift ${shift}`);
+  }
+});
+
+test('a stale or future announcement is refused', async () => {
+  for (const shift of [301_000, -61_000]) {
+    const h = await makeMember();
+    h.member.connected(V.hostPeerID);
     await h.member.settled();
+    await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+    h.clock.now += shift;
+    for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
     assert.equal(h.member.status.kind, 'securing', `shift ${shift}`);
   }
 });
 
-test('a control message for another pool is ignored', async () => {
+test('a control message naming another pool is ignored', async () => {
   const h = await makeMember();
   h.member.connected(V.hostPeerID);
   await h.member.settled();
   const grant = decodeControlMessage(b64(V.firstJoin.grantWire))!;
   grant.poolID = '00000000-0000-4000-8000-000000000000';
   await h.member.receive(encodeControlMessage(grant), V.hostPeerID);
-  assert.equal(h.member.status.kind, 'securing');
+  assert.equal(await canReadPool(h), false);
+});
+
+test('a replayed older announcement can\'t undo a newer one', async () => {
+  const h = await makeProtectedMember();
+  await h.member.receive(b64(V.signedOff), V.hostPeerID); // at T + 5 s, refused as a downgrade
+  assert.equal(h.member.status.kind, 'downgradeRefused');
+  await h.member.receive(b64(V.signedOn2), V.hostPeerID); // at T + 6 s, with a legacy peer named
+  assert.deepEqual(h.member.status, { kind: 'protected', epoch: 1, excludedPeers: ['someone'] });
+  // The same "off" again, and one before it: nothing moves.
+  await h.member.receive(b64(V.signedOff), V.hostPeerID);
+  assert.deepEqual(h.member.status, { kind: 'protected', epoch: 1, excludedPeers: ['someone'] });
+  await h.member.receive(b64(V.firstJoin.announcementsWire[0]), V.hostPeerID);
+  assert.deepEqual(h.member.status, { kind: 'protected', epoch: 1, excludedPeers: ['someone'] }, 'older word leaves the list alone');
+});
+
+test('only the invite key the invitation holds is proved, and only until a grant', async () => {
+  const h = await makeProtectedMember();
+  assert.ok(h.inviteKey.every((byte) => byte === 0));
+  const enrolled = await makeMember({ enrolled: true, onGranted: () => undefined });
+  enrolled.member.connected(V.hostPeerID);
+  await enrolled.member.settled();
+  assert.equal(decodeControlMessage(enrolled.sent[0]!.data)!.inviteProof, undefined);
+});
+
+test('an enrolled member\'s grant clears the invite key too, and tells the owner', async () => {
+  let granted = 0;
+  const h = await makeMember({ enrolled: false, onGranted: () => { granted += 1; } });
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+  assert.equal(granted, 1);
+  assert.ok(h.inviteKey.every((byte) => byte === 0));
 });
 
 test('malformed control messages are dropped', async () => {
@@ -172,6 +289,8 @@ test('forged announcements are refused', async () => {
   assert.equal(h.member.status.kind, 'protected');
   await h.member.receive(b64(V.signedOff), 'someone-else');
   assert.equal(h.member.status.kind, 'protected');
+  await h.member.settled();
+  assert.equal(await canReadPool(h), true, 'and the pool still works');
 });
 
 test('downgrade: a signed "protection off" for a protected pool is refused, and frames stay sealed', async () => {
@@ -196,6 +315,22 @@ test('a pool the host never protected: nothing is sent or taken in the clear', a
   assert.equal(h.sent.length, 1, 'only the key request');
   await h.member.receive(plaintextFrame, V.hostPeerID);
   assert.equal(h.delivered.length, 0);
+});
+
+test('holding a key isn\'t enough to send: not before the host says protected, not when it says off', async () => {
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+  await h.member.sendApp(utf8('held'), null);
+  assert.equal(h.sent.length, 1, 'granted, no announcement yet: only the key request has gone');
+  await h.member.receive(b64(V.signedOff), V.hostPeerID);
+  assert.equal(h.member.status.kind, 'hostNotProtected');
+  await h.member.sendApp(utf8('still held'), null);
+  assert.equal(h.sent.length, 1, 'never protected, so nothing goes');
+  await h.member.receive(b64(V.signedOn2), V.hostPeerID);
+  assert.equal(h.sent.length, 3, 'protection on: both go, sealed');
+  assert.ok(h.sent.slice(1).every((f) => new TextDecoder().decode(f.data.subarray(0, 4)) === 'SWO2'));
 });
 
 test('plaintext frames are dropped in every state', async () => {
@@ -295,6 +430,7 @@ test('after destroy, nothing moves', async () => {
   await h.member.receive(b64(V.frames.fromHost[0]), V.hostPeerID);
   assert.equal(h.sent.length, before);
   assert.equal(h.delivered.length, 0);
+  assert.equal((h.member as unknown as { outboundQueue: unknown[] }).outboundQueue.length, 0, 'nothing is kept');
 });
 
 // --- Inner E2E
@@ -308,9 +444,9 @@ async function pair() {
 test('E2E: the wrong key and tampering fail', async () => {
   const e = V.e2e;
   const web = await importX25519(hex(e.webChatSeed), hex(e.webChatPublic));
-  const right = await deriveChatKey(web.privateKey, web.publicKey, hex(e.hostChatPublic));
+  const { key: right } = await deriveChatKey(web.privateKey, web.publicKey, hex(e.hostChatPublic));
   const wrongPeer = await generateX25519();
-  const wrong = await deriveChatKey(web.privateKey, web.publicKey, wrongPeer.publicKey);
+  const { key: wrong } = await deriveChatKey(web.privateKey, web.publicKey, wrongPeer.publicKey);
   const msg = JSON.parse(e.customMessage) as { payload: string };
   const wrapped = JSON.parse(new TextDecoder().decode(b64(msg.payload))) as { encryptedData: string };
   const sealed = b64(wrapped.encryptedData);
@@ -446,6 +582,112 @@ test('the raw key earlier versions kept in localStorage is wiped', () => {
   assert.equal(items.has('stealth_ed25519_private_key'), false);
   assert.equal(items.has('stealth_user_profile'), true);
   Reflect.deleteProperty(globalThis, 'localStorage');
+});
+
+test('the host key is pinned across joins', async () => {
+  const store = memoryIdentityStore();
+  const first = await loadOrCreatePoolIdentity('wss://r', V.poolID, store);
+  const realHost = hex(V.hostPublic);
+  const otherHost = new Uint8Array(32).fill(7);
+  assert.equal(first.hostKeyMatches(otherHost), true, 'nothing is pinned until a join is verified');
+  await first.pinHostKey(realHost);
+  assert.equal(first.hostKeyMatches(realHost), true);
+  assert.equal(first.hostKeyMatches(otherHost), false);
+  const again = await loadOrCreatePoolIdentity('wss://r', V.poolID, store);
+  assert.equal(again.hostKeyMatches(otherHost), false, 'it survives a reload');
+  await again.pinHostKey(otherHost);
+  assert.equal(again.hostKeyMatches(otherHost), false, 'a later pin moves nothing');
+  await again.forget();
+  const fresh = await loadOrCreatePoolIdentity('wss://r', V.poolID, store);
+  assert.equal(fresh.hostKeyMatches(otherHost), true, 'leaving the pool ends it');
+});
+
+// --- Limits on what can queue
+
+async function highEpochFrame(epoch: number, size: number, sender = 'junk'): Promise<Uint8Array> {
+  const key = await importAes(new Uint8Array(32).fill(3));
+  return sealOuterFrame(new Uint8Array(size), key, { epoch, session: 11n, counter: BigInt(size + epoch), timestampMillis: V.nowMillis, nonce: new Uint8Array(12) }, poolIdBytes, sender);
+}
+
+test('an oversized inbound frame is refused, even a properly sealed one', async () => {
+  const h = await makeProtectedMember();
+  const key = await importAes(hex(V.frames.frameKey));
+  const seal = (size: number, counter: bigint) => sealOuterFrame(new Uint8Array(size), key, { epoch: 1, session: 13n, counter, timestampMillis: V.nowMillis, nonce: crypto.getRandomValues(new Uint8Array(12)) }, poolIdBytes, V.hostPeerID);
+  await h.member.receive(await seal(MAX_INBOUND_FRAME_BYTES, 1n), V.hostPeerID);
+  assert.equal(h.delivered.length, 0);
+  await h.member.receive(await seal(1024, 2n), V.hostPeerID);
+  assert.equal(h.delivered.length, 1, 'the control case');
+});
+
+test('frames for epochs past newest + 1 don\'t queue', async () => {
+  const h = await makeProtectedMember();
+  await h.member.receive(await highEpochFrame(2, 100), 'a');
+  const queue = () => (h.member as unknown as { inboundQueue: unknown[] }).inboundQueue.length;
+  assert.equal(queue(), 1, 'the next epoch waits');
+  await h.member.receive(await highEpochFrame(3, 100), 'a');
+  await h.member.receive(await highEpochFrame(0xffffffff, 100), 'a');
+  assert.equal(queue(), 1, 'nothing further ahead does');
+});
+
+test('queued bytes are capped per sender and in total, and junk can\'t push out what is queued', async () => {
+  const h = await makeMember();
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  const inner = h.member as unknown as { inboundQueue: { sender: string }[]; queuedBytesTotal: number };
+  const real = await sealOuterFrame(utf8('real'), await importAes(new Uint8Array(32).fill(4)), { epoch: 1, session: 12n, counter: 1n, timestampMillis: V.nowMillis, nonce: new Uint8Array(12) }, poolIdBytes, V.hostPeerID);
+  await h.member.receive(real, V.hostPeerID);
+  const chunk = 1024 * 1024;
+  for (let i = 0; i < 10; i++) await h.member.receive(await highEpochFrame(1, chunk + i), 'junk');
+  const junk = inner.inboundQueue.filter((entry) => entry.sender === 'junk').length;
+  assert.ok(junk * chunk <= MAX_QUEUED_BYTES_PER_SENDER, `one sender got ${junk} MiB`);
+  assert.ok(inner.inboundQueue.some((entry) => entry.sender === V.hostPeerID), 'the real frame is still there');
+  for (let sender = 0; sender < 12; sender++) {
+    for (let i = 0; i < 5; i++) await h.member.receive(await highEpochFrame(1, chunk + i, `junk-${sender}`), `junk-${sender}`);
+  }
+  assert.ok(inner.queuedBytesTotal <= MAX_QUEUED_BYTES_TOTAL);
+  assert.ok(inner.inboundQueue.some((entry) => entry.sender === V.hostPeerID), 'still there');
+});
+
+test('the line of frames waiting for their turn is bounded', async () => {
+  const h = await makeProtectedMember();
+  const frame = new Uint8Array(1024);
+  const pending: Promise<void>[] = [];
+  for (let i = 0; i < MAX_PENDING_RECEIVE_STEPS + 500; i++) pending.push(h.member.receive(frame, V.hostPeerID));
+  const inner = h.member as unknown as { pendingReceiveSteps: number };
+  assert.ok(inner.pendingReceiveSteps <= MAX_PENDING_RECEIVE_STEPS);
+  await Promise.all(pending);
+  await h.member.settled();
+  assert.equal(inner.pendingReceiveSteps, 0, 'and it drains');
+  const big = new Uint8Array(2 * 1024 * 1024);
+  const burst: Promise<void>[] = [];
+  for (let i = 0; i < 40; i++) burst.push(h.member.receive(big, V.hostPeerID));
+  assert.ok((h.member as unknown as { pendingReceiveBytes: number }).pendingReceiveBytes <= MAX_PENDING_RECEIVE_BYTES);
+  await Promise.all(burst);
+});
+
+test('one frame that fails doesn\'t take the queue with it', async () => {
+  let calls = 0;
+  const h = await makeMember({ deliver: () => { calls += 1; if (calls === 1) throw new Error('boom'); } });
+  h.member.connected(V.hostPeerID);
+  await h.member.settled();
+  for (const wire of V.frames.fromHost as string[]) await h.member.receive(b64(wire), V.hostPeerID);
+  await h.member.receive(b64(V.firstJoin.grantWire), V.hostPeerID);
+  for (const wire of V.firstJoin.announcementsWire as string[]) await h.member.receive(b64(wire), V.hostPeerID);
+  await h.member.settled();
+  assert.equal(calls, 2, 'the second frame was still delivered');
+});
+
+// --- The relay's address
+
+test('an address that only looks local is not talked to in the clear', () => {
+  assert.equal(relayUrlFromInvitation('ws://127.0.0.1@evil.com/', false), 'wss://127.0.0.1@evil.com/');
+  assert.equal(relayUrlFromInvitation('ws://127.evil.com:9090', false), 'wss://127.evil.com:9090');
+  assert.equal(relayUrlFromInvitation('ws://localhost.evil.com', false), 'wss://localhost.evil.com');
+  assert.equal(relayUrlFromInvitation('ws://not a url', false), 'wss://not a url');
+  assert.equal(relayUrlFromInvitation('ws://localhost:9090', false), 'ws://localhost:9090');
+  assert.equal(relayUrlFromInvitation('ws://LOCALHOST:9090', false), 'ws://LOCALHOST:9090', 'the URL parser decides, not the spelling');
+  assert.equal(relayUrlFromInvitation('ws://[::1]:9090', false), 'ws://[::1]:9090');
+  assert.equal(relayUrlFromInvitation('ws://127.1.2.3:9090/x', false), 'ws://127.1.2.3:9090/x');
 });
 
 test('the unsupported-browser error says what to do', () => {

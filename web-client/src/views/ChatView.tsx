@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import { ArrowLeft, Lock, Users, User, MessageSquare } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useChatStore } from '../stores/chat.ts';
@@ -10,6 +10,8 @@ import { transport } from '../transport/websocket.ts';
 import { appleTimestamp } from '../utils/time.ts';
 import type { EncryptedChatMessage } from '../protocol/messages.ts';
 import MessageBubble from '../components/MessageBubble.tsx';
+import ErrorBoundary from '../components/ErrorBoundary.tsx';
+import PeerSecurityCode from '../components/PeerSecurityCode.tsx';
 import ChatInput from '../components/ChatInput.tsx';
 import PeerAvatar from '../components/PeerAvatar.tsx';
 
@@ -34,6 +36,7 @@ function ChatView({ onBack }: ChatViewProps) {
   const userProfile = usePoolStore((s) => s.userProfile);
   const totalPrivateUnread = Object.values(unreadPrivate).reduce((sum, n) => sum + n, 0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [securityPeerId, setSecurityPeerId] = useState<string | null>(null);
 
   const currentMessages: ChatMessage[] =
     currentView === 'group'
@@ -268,7 +271,15 @@ function ChatView({ onBack }: ChatViewProps) {
                   <PeerAvatar emoji={peer.avatarEmoji} colorIndex={peer.avatarColorIndex} size="sm" />
                   <span className="text-[17px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{peer.displayName}</span>
                   {peerSymmetricKeys[selectedPrivatePeerId] && (
-                    <Lock className="h-3 w-3 text-[#30D158] shrink-0" />
+                    <button
+                      type="button"
+                      aria-label={`Security code with ${peer.displayName}`}
+                      title="Security code"
+                      onClick={() => setSecurityPeerId(peer.peerId)}
+                      className="p-1.5 -m-1 rounded-full hover:bg-[rgba(48,209,88,0.12)] shrink-0"
+                    >
+                      <Lock className="h-3.5 w-3.5 text-[#30D158]" />
+                    </button>
                   )}
                 </>
               ) : (
@@ -370,7 +381,9 @@ function ChatView({ onBack }: ChatViewProps) {
               </div>
             )}
             {currentMessages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} isGroup={currentView === 'group'} />
+              <ErrorBoundary key={msg.id} fallback={<p className="text-[12px] text-center py-1" style={{ color: 'var(--text-tertiary)' }}>This message couldn't be shown.</p>}>
+                <MessageBubble message={msg} isGroup={currentView === 'group'} />
+              </ErrorBoundary>
             ))}
             <div ref={messagesEndRef} />
           </div>
@@ -383,6 +396,7 @@ function ChatView({ onBack }: ChatViewProps) {
           />
         </>
       )}
+      {securityPeerId && <PeerSecurityCode peerId={securityPeerId} onClose={() => setSecurityPeerId(null)} />}
     </div>
   );
 }

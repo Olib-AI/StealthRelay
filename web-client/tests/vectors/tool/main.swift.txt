@@ -1,0 +1,294 @@
+// Scratch: generates interop vectors from the real Swift code, and verifies what the TS side produced.
+import Foundation
+import CryptoKit
+@testable import ConnectionPool
+@testable import PoolChat
+
+final class MemStore: SecureItemStore, @unchecked Sendable {
+    var items: [String: Data] = [:]
+    func load(service: String, account: String) throws -> Data? { items[service + "|" + account] }
+    func save(_ data: Data, service: String, account: String) throws { items[service + "|" + account] = data }
+    func delete(service: String, account: String) throws { items[service + "|" + account] = nil }
+}
+
+func hex(_ d: Data) -> String { d.map { String(format: "%02x", $0) }.joined() }
+func unhex(_ s: String) -> Data {
+    var out = Data(); var i = s.startIndex
+    while i < s.endIndex { let j = s.index(i, offsetBy: 2); out.append(UInt8(s[i..<j], radix: 16)!); i = j }
+    return out
+}
+func fill(_ b: UInt8, _ n: Int = 32) -> Data { Data(repeating: b, count: n) }
+func b64(_ d: Data) -> String { d.base64EncodedString() }
+
+let poolID = UUID(uuidString: "6BA7B810-9DAD-41D1-80B4-00C04FD430C8")!
+let T: Int64 = 1_800_000_000_000
+let fixedNow = Date(timeIntervalSince1970: TimeInterval(T) / 1000)
+
+@MainActor func generate() throws -> [String: Any] {
+    var v: [String: Any] = [:]
+    v["poolID"] = poolID.uuidString
+    v["nowMillis"] = T
+
+    let hostSeed = fill(0x11), memberSeed = fill(0x22), memberEphSeed = fill(0x33), inviteKey = fill(0x44)
+    let hostKey = try Curve25519.Signing.PrivateKey(rawRepresentation: hostSeed)
+    let memberKey = try Curve25519.Signing.PrivateKey(rawRepresentation: memberSeed)
+    let memberEph = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: memberEphSeed)
+    let hostPeerID = b64(hostKey.publicKey.rawRepresentation)
+    let memberPeerID = b64(memberKey.publicKey.rawRepresentation)
+    v["hostSeed"] = hex(hostSeed); v["hostPublic"] = hex(hostKey.publicKey.rawRepresentation); v["hostPeerID"] = hostPeerID
+    v["memberSeed"] = hex(memberSeed); v["memberPublic"] = hex(memberKey.publicKey.rawRepresentation); v["memberPeerID"] = memberPeerID
+    v["memberEphSeed"] = hex(memberEphSeed); v["memberEphPublic"] = hex(memberEph.publicKey.rawRepresentation)
+
+    // Fragment
+    let secretInvite = TransportInviteSecret(inviteKey: inviteKey, hostIdentityKey: hostKey.publicKey.rawRepresentation)
+    v["fragment"] = ["inviteKey": hex(inviteKey), "hostKey": hex(hostKey.publicKey.rawRepresentation), "fragment": secretInvite.fragment, "keyID": hex(secretInvite.inviteKeyID)]
+
+    // Real invitation URL with fragment, and Swift's own parse of it
+    let wireObj: [String: Any] = ["id": Array(repeating: 1, count: 16), "secret": Array(repeating: 2, count: 32), "pool": Array(withUnsafeBytes(of: poolID.uuid) { Array($0) }), "fp": Array(repeating: 3, count: 8), "exp": 1_900_000_000, "max": 0, "addr": "wss://relay.example:9090", "sig": "c2ln"]
+    let wireData = try JSONSerialization.data(withJSONObject: wireObj)
+    let payload = TransportInviteSecret.base64URL(wireData)
+    let inviteURL = "stealth://invite/\(payload)#\(secretInvite.fragment)"
+    let parsedInvite = RemotePoolService.parseInvitationURL(URL(string: inviteURL)!)
+    precondition(parsedInvite?.transportSecret == secretInvite)
+    v["inviteURL"] = inviteURL
+
+    let card = try SealedInviteCard.encode(url: inviteURL)
+    v["card"] = ["bytes": hex(card), "url": inviteURL]
+
+    // Join proof + rejoin
+    let nonce32 = fill(0x55)
+    v["joinProof"] = ["tokenSecret": hex(fill(0x02)), "tokenID": hex(fill(0x01, 16)), "timestamp": 1_800_000_000, "nonce": hex(nonce32),
+                      "proof": hex(RelayTranscripts.joinProof(tokenSecret: fill(0x02), tokenID: fill(0x01, 16), poolID: poolID, timestamp: 1_800_000_000, nonce: nonce32))]
+    let rejoin = WebSocketTransport.memberRejoinTranscript(poolID: poolID, timestamp: 1_800_000_000, nonce: nonce32)
+    v["rejoin"] = ["transcript": hex(rejoin), "signature": hex(try memberKey.signature(for: rejoin))]
+
+    // The real host state machine, on a fixed clock
+    let mem = MemStore()
+    var sent: [(Data, [String]?)] = []
+    var clock = fixedNow
+    let host = PoolTransportSecurity(hostIdentity: hostKey, poolID: poolID, store: TransportSecurityStore(store: { mem }),
+                                     now: { clock }, localPeerID: { hostPeerID },
+                                     send: { d, t in sent.append((d, t)) }, deliver: { _, _ in })
+    host.registerInvite(secretInvite, expiresAt: fixedNow.addingTimeInterval(3600))
+    host.peerJoined(memberPeerID)
+
+    func makeRequest(invite: Data?, nonce: Data) throws -> (TransportControlMessage, Data, Data) {
+        var m = TransportControlMessage(kind: .keyRequest, poolID: poolID, timestampMillis: T)
+        m.memberPeerID = memberPeerID
+        m.memberIdentityKey = memberKey.publicKey.rawRepresentation
+        m.memberEphemeral = memberEph.publicKey.rawRepresentation
+        m.nonce = nonce
+        if let invite { m.inviteKeyID = TransportInviteSecret.keyID(invite) }
+        let t = m.requestTranscript()!
+        m.memberSignature = try memberKey.signature(for: t)
+        if let invite { m.inviteProof = Data(HMAC<SHA256>.authenticationCode(for: t, using: SymmetricKey(data: invite))) }
+        return (m, t, m.encoded()!)
+    }
+    func recordSecret() -> HostTransportRecord { try! JSONDecoder().decode(HostTransportRecord.self, from: mem.items[TransportSecurityStore.service + "|" + TransportSecurityStore.hostAccount(poolID)]!) }
+
+    // First join, with the invite key
+    let (_, t1, w1) = try makeRequest(invite: inviteKey, nonce: fill(0x66))
+    sent = []
+    host.receive(w1, from: memberPeerID)
+    let firstRound = sent
+    precondition(firstRound.count >= 2, "grant and announcement expected")
+    v["firstJoin"] = [
+        "requestWire": b64(w1), "requestTranscript": hex(t1), "nonce": hex(fill(0x66)),
+        "grantWire": b64(firstRound[0].0),
+        "grantTranscript": hex(TransportControlMessage.decode(firstRound[0].0)!.grantTranscript()!),
+        "announcementsWire": firstRound.dropFirst().map { b64($0.0) },
+        "announcementTranscript": hex(TransportControlMessage.decode(firstRound[1].0)!.announcementTranscript()!),
+        "secret": hex(recordSecret().secret), "epoch": recordSecret().epoch,
+    ]
+    let secret1 = recordSecret().secret
+
+    // Frames the real host sends once protected
+    sent = []
+    host.sendApp(Data("hello from the host".utf8), to: [memberPeerID])
+    host.sendApp(Data("second".utf8), to: nil)
+    let frameWires = sent.map { b64($0.0) }
+
+    // Outer frame on a fixed nonce, all byte layouts pinned
+    let frameKey = OuterFrameV2.frameKey(secret: SymmetricKey(data: secret1), poolID: poolID, epoch: 1)
+    let hdr = OuterFrameV2.Header(epoch: 1, session: 0x0102030405060708, counter: 9, timestampMillis: T, nonce: fill(0x77, 12))
+    let fixedFrame = OuterFrameV2.seal(Data("fixed".utf8), key: frameKey, header: hdr, poolID: poolID, senderPeerID: hostPeerID)!
+    v["frames"] = ["fromHost": frameWires, "plaintexts": ["hello from the host", "second"],
+                   "fixedWire": b64(fixedFrame), "fixedPlain": "fixed",
+                   "fixedHeader": hex(hdr.encoded()),
+                   "frameKey": frameKey.withUnsafeBytes { hex(Data($0)) },
+                   "aad": hex(OuterFrameV2.aad(header: hdr.encoded(), poolID: poolID, senderPeerID: hostPeerID))]
+
+    // Rotation: someone else was removed, the enrolled member asks again without the invite key
+    let other = b64(fill(0x99))
+    clock = fixedNow.addingTimeInterval(1)
+    sent = []
+    host.peerJoined(other)
+    host.memberRemoved(other)
+    let rotAnnounce = sent.map { b64($0.0) }
+    let (_, t2, w2) = try makeRequest(invite: nil, nonce: fill(0x67))
+    sent = []
+    host.receive(w2, from: memberPeerID)
+    v["rotation"] = ["announcementWire": rotAnnounce, "removed": other,
+                     "requestWire": b64(w2), "requestTranscript": hex(t2), "nonce": hex(fill(0x67)),
+                     "grantWire": b64(sent[0].0), "secret": hex(recordSecret().secret), "epoch": recordSecret().epoch,
+                     "previousSecret": hex(secret1)]
+    let rotSecret = recordSecret().secret
+    sent = []
+    host.sendApp(Data("under epoch two".utf8), to: nil)
+    var rot = v["rotation"] as! [String: Any]
+    rot["frameWire"] = b64(sent[0].0)
+    _ = rotSecret
+    v["rotation"] = rot
+
+    // A signed "protection off" (downgrade attempt once protected, and "off" before)
+    func announcement(protected: Bool, ts: Int64, epoch: UInt32, removed: [String] = [], legacy: [String] = [], key: Curve25519.Signing.PrivateKey) throws -> Data {
+        var m = TransportControlMessage(kind: .announcement, poolID: poolID, timestampMillis: ts)
+        m.epoch = epoch; m.protected = protected; m.removedPeerIDs = removed; m.legacyPeerIDs = legacy
+        m.hostSignature = try key.signature(for: m.announcementTranscript()!)
+        return m.encoded()!
+    }
+    v["signedOff"] = b64(try announcement(protected: false, ts: T + 5000, epoch: 1, legacy: ["someone"], key: hostKey))
+    v["signedOn2"] = b64(try announcement(protected: true, ts: T + 6000, epoch: 1, legacy: ["someone"], key: hostKey))
+    let forged = try Curve25519.Signing.PrivateKey(rawRepresentation: fill(0xAA))
+    v["forgedOff"] = b64(try announcement(protected: false, ts: T + 5000, epoch: 1, key: forged))
+
+    // Inner E2E
+    let hostChat = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: fill(0xB1))
+    let webChat = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: fill(0xB2))
+    let enc = ChatEncryptionService(privateKey: hostChat)
+    precondition(enc.performKeyExchange(peerPublicKeyData: webChat.publicKey.rawRepresentation, peerID: memberPeerID))
+    let chatKey = enc.getSharedKey(for: memberPeerID)!.withUnsafeBytes { Data($0) }
+    let signing = EnvelopeSigningKeys(localKey: try Curve25519.Signing.PrivateKey(rawRepresentation: fill(0xB3)))
+    let binding = signing.makeBinding(localPeerID: hostPeerID, poolID: poolID, keyAgreementPublicKey: hostChat.publicKey.rawRepresentation)!
+    let device = PoolDeviceIdentity(seed: SymmetricKey(data: fill(0xB4)))
+    let scope = "remote:vector"
+    let counter: Int64 = 1_900_000_000_123
+    let proof = device.continuityProof(scope: scope, peerID: hostPeerID, keyAgreementKey: hostChat.publicKey.rawRepresentation, counter: counter, signingKey: signing.localPublicKey)!
+    let kx = PoolMessage.keyExchange(from: hostPeerID, senderName: "Host", publicKey: hostChat.publicKey.rawRepresentation,
+                                     signingPublicKey: signing.localPublicKey, signingKeyBinding: binding,
+                                     continuityKey: proof.key, continuityProof: proof.proof, continuityCounter: counter)
+    let rich = RichChatMessage.textMessage(from: hostPeerID, senderName: "Host", text: "hello web", isFromLocalUser: true)
+    let ext = PrivateChatPayload(chatPayload: RichChatPayload(from: rich), isPrivate: false, targetPeerID: nil)
+    let plainJSON = try JSONEncoder().encode(ext)
+    let sealed = enc.encrypt(plainJSON, for: memberPeerID)!
+    let wrapped = EncryptedChatPayload(encryptedData: sealed, senderPeerID: hostPeerID, isPrivateChat: false, targetPeerID: nil, messageType: .chatMessage)
+    let custom = PoolMessage(type: .custom, senderID: hostPeerID, senderName: "Host", payload: try JSONEncoder().encode(wrapped))
+    // Every kind of chat message the app sends, encoded by its real types.
+    func sample(_ m: RichChatMessage) throws -> String {
+        String(data: try JSONEncoder().encode(PrivateChatPayload(chatPayload: RichChatPayload(from: m), isPrivate: false, targetPeerID: nil)), encoding: .utf8)!
+    }
+    let reply = ReplyPreview(messageID: UUID(), senderName: "Host", previewText: "earlier")
+    let samples: [String: String] = [
+        "text": try sample(.textMessage(from: hostPeerID, senderName: "Host", text: "hi", isFromLocalUser: true, replyTo: reply, mentions: [memberPeerID])),
+        "poll": try sample(.pollMessage(from: hostPeerID, senderName: "Host", question: "Which?", options: ["A", "B"], isFromLocalUser: true)),
+        "image": try sample(.imageMessage(from: hostPeerID, senderName: "Host", imageData: Data([0xFF, 0xD8, 0xFF]), isFromLocalUser: true)),
+        "voice": try sample(.voiceMessage(from: hostPeerID, senderName: "Host", voiceData: Data([1, 2, 3, 4]), duration: 2.5, isFromLocalUser: true)),
+        "emoji": try sample(.emojiMessage(from: hostPeerID, senderName: "Host", emoji: "🎉", isFromLocalUser: true)),
+    ]
+    let reaction = ReactionUpdatePayload(messageID: rich.id, emoji: "👍", peerID: hostPeerID, isAdding: true)
+    let vote = PollVotePayload(messageID: rich.id, option: "A", voterID: hostPeerID)
+    let invite = GameInvitation(gameType: .connectFour, hostPeerID: hostPeerID, hostName: "Host", sessionID: UUID(), targetPeerID: memberPeerID)
+    let inviteMessage = PoolMessage.gameControl(from: hostPeerID, senderName: "Host", controlType: .invite, gameType: .connectFour, sessionID: invite.sessionID, additionalData: invite)!
+    let offer = CallSignal(callID: UUID(), signalType: .offer, callerPeerID: hostPeerID, callerDisplayName: "Host", calleePeerIDs: [memberPeerID], isVideoCall: true, mediaProtocolVersions: [1, 2])
+    let profile = PoolMessage.profileUpdate(from: hostPeerID, senderName: "Host", profile: PoolUserProfile(displayName: "Host", avatarEmoji: "🦊", avatarColorIndex: 3))
+    let closed = PoolMessage.poolClosed(from: hostPeerID, senderName: "Host", hostSignature: nil)
+    let removed = PoolMessage.systemEvent(from: hostPeerID, senderName: "Host", event: .removedFromPool, targetPeerID: memberPeerID, text: "x")
+    v["wire"] = [
+        "samples": samples,
+        "reaction": String(data: try JSONEncoder().encode(reaction), encoding: .utf8)!,
+        "pollVote": String(data: try JSONEncoder().encode(vote), encoding: .utf8)!,
+        "gameInvite": String(data: inviteMessage.encode()!, encoding: .utf8)!,
+        "callOffer": String(data: try JSONEncoder().encode(offer), encoding: .utf8)!,
+        "profileUpdate": String(data: profile.encode()!, encoding: .utf8)!,
+        "poolClosed": String(data: closed.encode()!, encoding: .utf8)!,
+        "removed": String(data: removed.encode()!, encoding: .utf8)!,
+    ]
+
+    v["e2e"] = [
+        "hostChatSeed": hex(fill(0xB1)), "hostChatPublic": hex(hostChat.publicKey.rawRepresentation),
+        "webChatSeed": hex(fill(0xB2)), "webChatPublic": hex(webChat.publicKey.rawRepresentation),
+        "sharedKey": hex(chatKey), "sharedFingerprint": enc.sharedKeyFingerprint(for: memberPeerID)!,
+        "hostKeyFingerprint": enc.publicKeyFingerprint, "webKeyFingerprint": enc.knownPeerFingerprint(for: memberPeerID)!,
+        "keyExchangeMessage": String(data: kx.encode()!, encoding: .utf8)!,
+        "bindingStatement": hex(EnvelopeSigningKeys.bindingStatement(peerID: hostPeerID, poolID: poolID, keyAgreementPublicKey: hostChat.publicKey.rawRepresentation, signingPublicKey: signing.localPublicKey)),
+        "continuityStatement": hex(PoolDeviceIdentity.continuityStatement(peerID: hostPeerID, keyAgreementKey: hostChat.publicKey.rawRepresentation, publicKey: proof.key, counter: counter, signingKey: signing.localPublicKey)),
+        "signingPublic": hex(signing.localPublicKey), "binding": hex(binding),
+        "continuityKey": hex(proof.key), "continuityProof": hex(proof.proof), "continuityCounter": String(counter),
+        "customMessage": String(data: custom.encode()!, encoding: .utf8)!,
+        "chatText": "hello web",
+        "plainPayload": String(data: plainJSON, encoding: .utf8)!,
+    ]
+    return v
+}
+
+// Verifies what the TS side made, with the real Swift code.
+@MainActor func verify(path: String) throws {
+    let o = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as! [String: Any]
+    func check(_ name: String, _ ok: Bool) { print((ok ? "PASS " : "FAIL ") + name); if !ok { failed = true } }
+    var failed = false
+    let hostKey = try Curve25519.Signing.PrivateKey(rawRepresentation: fill(0x11))
+    let hostPeerID = b64(hostKey.publicKey.rawRepresentation)
+
+    // A key request the TS code built goes through the real host; the grant comes back for the TS side.
+    let tsNow = Date(timeIntervalSince1970: (o["nowMillis"] as! NSNumber).doubleValue / 1000)
+    let mem = MemStore()
+    var sent: [(Data, [String]?)] = []
+    var delivered: [(Data, String)] = []
+    let host = PoolTransportSecurity(hostIdentity: hostKey, poolID: poolID, store: TransportSecurityStore(store: { mem }),
+                                     now: { tsNow }, localPeerID: { hostPeerID },
+                                     send: { d, t in sent.append((d, t)) }, deliver: { d, s in delivered.append((d, s)) })
+    let invite = TransportInviteSecret(inviteKey: fill(0x44), hostIdentityKey: hostKey.publicKey.rawRepresentation)
+    host.registerInvite(invite, expiresAt: tsNow.addingTimeInterval(3600))
+    let sender = o["memberPeerID"] as! String
+    host.peerJoined(sender)
+    host.receive(Data(base64Encoded: o["requestWire"] as! String)!, from: sender)
+    check("host accepted the TS key request and answered with a grant", sent.count >= 2 && TransportControlMessage.decode(sent[0].0)?.kind == .keyGrant)
+    if case .protected = host.status { check("host turned protection on with the TS member enrolled", true) } else { check("host turned protection on with the TS member enrolled", false) }
+
+    // The TS outer frame needs the host's secret, so it is sealed by TS with the vector secret and
+    // checked with OuterFrameV2 directly.
+    let secret = unhex(o["outerSecret"] as! String)
+    let key = OuterFrameV2.frameKey(secret: SymmetricKey(data: secret), poolID: poolID, epoch: 1)
+    let opened = OuterFrameV2.open(Data(base64Encoded: o["outerWire"] as! String)!, key: key, poolID: poolID, senderPeerID: sender)
+    check("TS outer frame opens in Swift", opened?.plaintext == Data((o["outerPlain"] as! String).utf8))
+    check("TS outer frame refuses another claimed sender", OuterFrameV2.open(Data(base64Encoded: o["outerWire"] as! String)!, key: key, poolID: poolID, senderPeerID: hostPeerID) == nil)
+
+    // PoolMessage / key exchange / chat
+    let kxMsg = PoolMessage.decode(from: Data((o["keyExchangeMessage"] as! String).utf8))
+    check("TS key exchange decodes as PoolMessage", kxMsg?.type == .keyExchange)
+    let kx = kxMsg?.decodePayload(as: ConnectionPool.KeyExchangePayload.self)
+    check("TS key exchange payload decodes", kx != nil)
+    if let kx {
+        let hostChat = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: fill(0xB1))
+        let enc = ChatEncryptionService(privateKey: hostChat)
+        check("TS continuity proof verifies", PoolDeviceIdentity.verifyContinuity(key: kx.continuityKey!, proof: kx.continuityProof!, peerID: sender, keyAgreementKey: kx.publicKey, counter: kx.continuityCounter!, signingKey: kx.signingPublicKey))
+        let signing = EnvelopeSigningKeys()
+        check("TS signing key binding verifies", signing.register(peerID: sender, signingPublicKey: kx.signingPublicKey!, binding: kx.signingKeyBinding!, keyAgreementPublicKey: kx.publicKey, poolID: poolID) == .registered)
+        check("TS key exchange accepted", enc.performKeyExchange(peerPublicKeyData: kx.publicKey, peerID: sender, continuityKey: kx.continuityKey, continuityProof: kx.continuityProof, continuityCounter: kx.continuityCounter, signingKey: kx.signingPublicKey))
+        let msg = PoolMessage.decode(from: Data((o["customMessage"] as! String).utf8))
+        let wrapped = msg?.decodePayload(as: EncryptedChatPayload.self)
+        check("TS chat wrapper decodes as EncryptedChatPayload", wrapped?.messageType == .chatMessage)
+        let plain = wrapped.flatMap { enc.decrypt($0.encryptedData, from: sender) }
+        check("TS chat decrypts in Swift", plain != nil)
+        let ext = plain.flatMap { try? JSONDecoder().decode(PrivateChatPayload.self, from: $0) }
+        check("TS chat decodes as PrivateChatPayload with its text", ext?.chatPayload.text == (o["chatText"] as! String))
+        let decline = PoolMessage.decode(from: Data((o["gameDecline"] as! String).utf8))
+        let control = decline?.decodePayload(as: GameControlPayload.self)
+        let response = control?.data.flatMap { try? JSONDecoder().decode(GameInvitationResponse.self, from: $0) }
+        check("TS game decline decodes, and says no", control?.controlType == .inviteResponse && response?.accepted == false)
+        let reject = try? JSONDecoder().decode(CallSignal.self, from: Data((o["callReject"] as! String).utf8))
+        check("TS call reject decodes", reject?.signalType == .reject)
+        if let ts = ext?.chatPayload.timestamp { check("TS chat timestamp is a sensible date", abs(ts.timeIntervalSinceNow) < 86400 * 400) }
+    }
+    if failed { exit(1) }
+}
+
+let args = CommandLine.arguments
+if args.count >= 3, args[1] == "verify" {
+    try verify(path: args[2])
+} else {
+    let v = try generate()
+    let data = try JSONSerialization.data(withJSONObject: v, options: [.prettyPrinted, .sortedKeys])
+    FileManager.default.createFile(atPath: args.count >= 2 ? args[1] : "vectors.json", contents: data)
+    print("wrote", data.count)
+}

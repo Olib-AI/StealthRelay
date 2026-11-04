@@ -3,7 +3,6 @@ import { makeFrame } from '../protocol/frames.ts';
 import type {
   ServerFrame,
   AuthChallengeData,
-  JoinAcceptedData,
   JoinRejectedData,
   PeerJoinedData,
   PeerLeftData,
@@ -12,11 +11,22 @@ import type {
   KickedData,
   HeartbeatPongData,
   ServerHelloData,
-  SessionResumedData,
   PoolHostStatusData,
 } from '../protocol/frames.ts';
-import type { PoolMessage, KeyExchangePayload, ProfileUpdatePayload, PeerInfoPayload, EncryptedChatMessage, GameControlPayload, SystemPayload } from '../protocol/messages.ts';
-import { buildPoolMessage, buildPrivateChatPayload } from '../protocol/chat-wire.ts';
+import type { PoolMessage, KeyExchangePayload, EncryptedChatMessage, GameControlPayload, ProfileUpdatePayload } from '../protocol/messages.ts';
+import {
+  classifyAppFrame,
+  joinAcceptedMatches,
+  parseDecryptedCallSignal,
+  parseDecryptedChat,
+  parseDecryptedPollVote,
+  parseDecryptedReaction,
+  parseJoinAccepted,
+  parsePeerInfo,
+} from '../protocol/inbound.ts';
+import type { GameInvite, InboundAction } from '../protocol/inbound.ts';
+import { CALLS_ENABLED, GAMES_ENABLED } from '../protocol/features.ts';
+import { buildGameDecline, buildPoolMessage, buildPrivateChatPayload } from '../protocol/chat-wire.ts';
 import type { EncryptedChatPayload, EncryptedMessageType } from '../protocol/chat-wire.ts';
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -24,11 +34,9 @@ import {
   INITIAL_RECONNECT_DELAY_MS,
   MAX_RECONNECT_DELAY_MS,
   MAX_MESSAGE_SIZE,
-  APPLE_EPOCH_OFFSET,
 } from '../protocol/constants.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import { usePoolStore } from '../stores/pool.ts';
-import type { Peer } from '../stores/pool.ts';
 import { useChatStore } from '../stores/chat.ts';
 import type { ChatMessage } from '../stores/chat.ts';
 import { useGameStore } from '../stores/game.ts';
@@ -38,10 +46,11 @@ import type { PoolIdentity } from '../crypto/identity.ts';
 import { parseInvitationUrl, computeJoinProof, isInvitationExpired, memberRejoinTranscript, relayUrlFromInvitation } from '../crypto/invitation.ts';
 import type { ParsedInvitation } from '../crypto/invitation.ts';
 import { solvePowAsync } from '../crypto/pow.ts';
+import type { PowTask } from '../crypto/pow.ts';
 import { ChatEncryption } from '../crypto/encryption.ts';
 import type { LocalDeviceSigner } from '../crypto/encryption.ts';
 import { assertCryptoSupported, UNSUPPORTED_BROWSER_MESSAGE } from '../crypto/webcrypto.ts';
-import { MemberTransportSecurity } from './pool-transport-security.ts';
+import { MAX_INBOUND_FRAME_BYTES, MemberTransportSecurity } from './pool-transport-security.ts';
 import { base64Encode, base64Decode, base64DecodeStrict } from '../utils/base64.ts';
 import { CallManager, type ActiveCall, type CallManagerDelegate } from '../calling/call-manager.ts';
 import { appleTimestampNow } from '../calling/types.ts';
@@ -68,13 +77,6 @@ import type {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-
-/**
- * Calls need the per-call media keys of MediaEncryptionService (v2), which this client does not have
- * yet. Its v1 media would pass as an older StealthOS, so it stays off: incoming calls are declined and
- * the person is told, here and on the caller's side.
- */
-const CALLS_ENABLED = false as boolean;
 
 /** Same bound as the app's `maxPendingMessages`: messages waiting for a peer's key. */
 const MAX_PENDING_E2E = 50;
@@ -107,7 +109,9 @@ class WebSocketTransport {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private securityTimer: ReturnType<typeof setInterval> | null = null;
   private powSolution: { challenge: string; solution: string } | null = null;
-  private powInFlight = false;
+  private powTask: PowTask | null = null;
+  /** Game invitations already answered: the host may say it again. */
+  private declinedInvitations = new Set<string>();
   private callManager: CallManager | null = null;
   private identity: PoolIdentity | null = null;
   private e2e: ChatEncryption | null = null;
@@ -120,6 +124,7 @@ class WebSocketTransport {
   private pendingE2E: { messageType: EncryptedMessageType; plaintext: Uint8Array; isPrivateChat: boolean; peerId: string }[] = [];
   /** People we have already told the user about, so one bad key is one line in the chat. */
   private undecryptableNoticed = new Set<string>();
+  private unreadableNoticed = new Set<string>();
   /** Sealed frames that came ready while the socket was down. */
   private unsentFrames: { data: Uint8Array; targetPeerIds: string[] | null }[] = [];
   /** Bumped by every connect and disconnect, so a slow step can tell it was overtaken. */
@@ -162,6 +167,12 @@ class WebSocketTransport {
     }
     if (generation !== this.generation) return;
 
+    // The app keeps the host key from the first join and refuses another: a pool's host can't change.
+    if (!identity.hostKeyMatches(invitation.transport.hostIdentityKey)) {
+      this.failWith('This invitation names a different host than the one you joined this pool with, so it was refused. Nothing was sent. Ask the host for a new invitation.');
+      return;
+    }
+
     this.invitation = invitation;
     this.serverUrl = serverUrl;
     this.identity = identity;
@@ -184,10 +195,9 @@ class WebSocketTransport {
       // Its own copy of the invite key, which it clears once the host has enrolled this member.
       invite: { inviteKey: invitation.transport.inviteKey.slice(), hostIdentityKey: invitation.transport.hostIdentityKey },
       enrolled: identity.enrolled,
-      onEnrolled: () => {
-        invitation.transport.inviteKey.fill(0);
-        void identity.markEnrolled();
-      },
+      onEnrolled: () => void identity.markEnrolled(),
+      // Enrolled before or just now, nobody needs the invite key after a grant.
+      onGranted: () => invitation.transport.inviteKey.fill(0),
       send: (data, targets) => this.forwardRaw(data, targets),
       deliver: (data, sender) => this.handleAppFrame(data, sender),
       onStatusChange: (status) => useConnectionStore.getState().setSecurity(status),
@@ -229,7 +239,8 @@ class WebSocketTransport {
     };
 
     this.ws.onmessage = (event: MessageEvent) => {
-      if (typeof event.data === 'string') {
+      // Refused before parsing. Base64 inside JSON only ever shrinks when decoded, so this holds for the frame too.
+      if (typeof event.data === 'string' && event.data.length <= MAX_INBOUND_FRAME_BYTES) {
         this.handleMessage(event.data);
       }
     };
@@ -254,13 +265,16 @@ class WebSocketTransport {
   }
 
   private handleMessage(raw: string): void {
-    let frame: ServerFrame;
+    // A frame from the relay is as untrusted as a peer's: one that fails drops, and nothing else does.
     try {
-      frame = JSON.parse(raw) as ServerFrame;
+      const frame = JSON.parse(raw) as ServerFrame | null;
+      if (frame && typeof frame === 'object' && frame.data && typeof frame.data === 'object') this.dispatchFrame(frame);
     } catch {
-      return;
+      // Dropped.
     }
+  }
 
+  private dispatchFrame(frame: ServerFrame): void {
     switch (frame.frame_type) {
       case 'auth_challenge':
         this.handleAuthChallenge(frame.data as AuthChallengeData);
@@ -269,7 +283,7 @@ class WebSocketTransport {
         this.handleServerHello(frame.data as ServerHelloData);
         break;
       case 'join_accepted':
-        this.handleJoinAccepted(frame.data as JoinAcceptedData);
+        this.handleJoinAccepted(frame.data);
         break;
       case 'join_rejected':
         this.handleJoinRejected(frame.data as JoinRejectedData);
@@ -292,11 +306,11 @@ class WebSocketTransport {
       case 'heartbeat_pong':
         this.handleHeartbeatPong(frame.data as HeartbeatPongData);
         break;
-      case 'session_resumed':
-        this.handleSessionResumed(frame.data as SessionResumedData);
-        break;
       case 'pool_host_status':
         this.handlePoolHostStatus(frame.data as PoolHostStatusData);
+        break;
+      default:
+        // Includes `session_resumed`: this client never asks to resume, so it can't be an answer.
         break;
     }
   }
@@ -316,25 +330,26 @@ class WebSocketTransport {
 
   /** ProofOfWork in RelayWireCrypto.swift: a relay must not be able to pin a core for ever. */
   private solvePow(challenge: { challenge: string; difficulty: number }): void {
-    if (this.powInFlight) return;
+    if (this.powTask) return;
     const challengeBytes = base64DecodeStrict(challenge.challenge);
     if (!challengeBytes || challengeBytes.length !== POW_CHALLENGE_LENGTH || !(challenge.difficulty <= POW_MAX_DIFFICULTY)) {
       this.failWith('The relay server sent a proof-of-work challenge this client refuses. The server may be misconfigured.');
       return;
     }
     const generation = this.generation;
-    this.powInFlight = true;
     useConnectionStore.getState().setStatus('connecting');
     useConnectionStore.getState().setPowProgress(0);
 
     // The worker works in hex; the server speaks base64.
     const challengeHex = Array.from(challengeBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    solvePowAsync(
+    const task = solvePowAsync(
       challengeHex,
       challenge.difficulty,
       (nonce) => useConnectionStore.getState().setPowProgress(nonce),
       POW_TIME_BUDGET_MS,
-    ).then((result) => {
+    );
+    this.powTask = task;
+    task.result.then((result) => {
       if (generation !== this.generation) return;
       const solutionBytes = new Uint8Array(result.solution.match(/.{2}/g)!.map(b => parseInt(b, 16)));
       this.powSolution = {
@@ -348,7 +363,7 @@ class WebSocketTransport {
       useConnectionStore.getState().setPowProgress(null);
       this.failWith(`PoW failed: ${err instanceof Error ? err.message : 'Unknown'}`);
     }).finally(() => {
-      this.powInFlight = false;
+      if (this.powTask === task) this.powTask = null;
     });
   }
 
@@ -400,14 +415,14 @@ class WebSocketTransport {
     });
   }
 
-  private handleJoinAccepted(data: JoinAcceptedData): void {
+  private handleJoinAccepted(data: unknown): void {
     const { invitation, identity, security } = this;
     if (!invitation || !identity || !security) return;
+    const accepted = parseJoinAccepted(data);
+    if (!accepted) return;
 
-    // Held against what the invitation and our own key say, before anything is sent or believed.
     // The relay names the host by its identity key, so a relay claiming another host fails here.
-    const samePool = data.pool_info.pool_id.toLowerCase() === invitation.poolId.toLowerCase();
-    if (!samePool || data.peer_id !== identity.peerId || !security.connected(data.pool_info.host_peer_id)) {
+    if (!joinAcceptedMatches(accepted, { poolId: invitation.poolId, localPeerId: identity.peerId }) || !security.connected(accepted.pool.hostPeerId)) {
       this.tearDownSession();
       this.failWith("This pool's host could not be verified: the invitation does not match the host on the server. Nothing was sent. Ask the host for a new invitation.");
       return;
@@ -415,34 +430,20 @@ class WebSocketTransport {
 
     this.joinedThisSession = true;
     void identity.markJoined();
+    void identity.pinHostKey(invitation.transport.hostIdentityKey);
 
     useConnectionStore.getState().setJoinAccepted({
-      sessionToken: data.session_token,
-      peerId: data.peer_id,
-      poolId: data.pool_info.pool_id,
+      sessionToken: accepted.sessionToken,
+      peerId: accepted.peerId,
+      poolId: accepted.pool.poolId,
     });
     useConnectionStore.getState().setHostOffline(false);
     useConnectionStore.getState().setSecurity(security.status);
     this.hostWasOffline = false;
     this.startSecurityTimer();
 
-    usePoolStore.getState().setPoolInfo({
-      poolId: data.pool_info.pool_id,
-      name: data.pool_info.name,
-      hostPeerId: data.pool_info.host_peer_id,
-      maxPeers: data.pool_info.max_peers,
-      currentPeers: data.pool_info.current_peers,
-    });
-
-    const peers: Peer[] = data.peers.map((p) => ({
-      peerId: p.peer_id,
-      displayName: p.display_name,
-      publicKey: p.public_key,
-      connectedAt: p.connected_at,
-      avatarEmoji: '😀',
-      avatarColorIndex: 0,
-    }));
-    usePoolStore.getState().setPeers(peers);
+    usePoolStore.getState().setPoolInfo(accepted.pool);
+    usePoolStore.getState().setPeers(accepted.peers.map((peer) => ({ ...peer, avatarEmoji: '😀', avatarColorIndex: 0 })));
 
     // All of this waits inside the security layer until the host has given us the secret.
     this.broadcastKeyExchange();
@@ -457,20 +458,14 @@ class WebSocketTransport {
   }
 
   private handlePeerJoined(data: PeerJoinedData): void {
-    const peer: Peer = {
-      peerId: data.peer.peer_id,
-      displayName: data.peer.display_name,
-      publicKey: data.peer.public_key,
-      connectedAt: data.peer.connected_at,
-      avatarEmoji: '😀',
-      avatarColorIndex: 0,
-    };
-    usePoolStore.getState().addPeer(peer);
+    const parsed = parsePeerInfo(data.peer);
+    if (!parsed) return;
+    usePoolStore.getState().addPeer({ ...parsed, avatarEmoji: '😀', avatarColorIndex: 0 });
 
     // Send key exchange to new peer
-    this.sendKeyExchangeToPeer(data.peer.peer_id);
+    this.sendKeyExchangeToPeer(parsed.peerId);
     // Send profile update to new peer
-    this.sendProfileUpdateToPeer(data.peer.peer_id);
+    this.sendProfileUpdateToPeer(parsed.peerId);
   }
 
   private handlePeerLeft(data: PeerLeftData): void {
@@ -508,71 +503,71 @@ class WebSocketTransport {
     // ACK immediately
     this.send('ack', { sequence: data.sequence });
 
+    if (typeof data.data !== 'string' || typeof data.from_peer_id !== 'string') return;
     const frame = base64DecodeStrict(data.data);
     if (frame) void this.security?.receive(frame, data.from_peer_id);
   }
 
   /** One app frame, out of the outer layer. `sender` is who the relay says sent it. */
   private async handleAppFrame(data: Uint8Array, sender: string): Promise<void> {
-    let poolMsg: PoolMessage;
-    try {
-      poolMsg = JSON.parse(textDecoder.decode(data)) as PoolMessage;
-    } catch {
-      return; // Silently drop malformed messages
-    }
-    // There are no mesh hops on a relay: a message's sender is the peer the relay names, or a lie.
-    if (poolMsg.senderID !== sender) return;
-    await this.processPoolMessage(poolMsg, sender);
+    const action = classifyAppFrame(data, sender, {
+      hostPeerId: usePoolStore.getState().poolInfo?.hostPeerId ?? null,
+      localPeerId: useConnectionStore.getState().localPeerId,
+    });
+    if (action) await this.runAction(action, sender);
   }
 
-  private async processPoolMessage(msg: PoolMessage, fromPeerId: string): Promise<void> {
-    switch (msg.type) {
+  private async runAction(action: InboundAction, fromPeerId: string): Promise<void> {
+    switch (action.kind) {
       case 'key_exchange':
-        await this.handleKeyExchange(msg, fromPeerId);
+        await this.handleKeyExchange(action.payload, fromPeerId);
         break;
-      case 'profile_update':
-        this.handleProfileUpdate(msg);
+      case 'profile':
+        usePoolStore.getState().updatePeerProfile(action.peerId, action.profile);
         break;
-      case 'peer_info':
-        this.handlePeerInfoMessage(msg, fromPeerId);
+      case 'pool_closed':
+        this.leaveWithReason('The host closed this pool.');
         break;
-      case 'system':
-        this.handleSystemMessage(msg, fromPeerId);
+      case 'removed':
+        this.leaveWithReason('The host removed you from this pool.');
         break;
-      case 'game_control':
-        this.handleGameControl(msg);
+      case 'encrypted':
+        await this.handleEncrypted(action, fromPeerId);
         break;
-      case 'game_state':
-        this.handleGameState(msg);
+      case 'game_invite':
+        if (GAMES_ENABLED) return; // Not reachable: games validate invites before they turn on.
+        this.declineGameInvite(action.invite, fromPeerId);
         break;
-      case 'game_action':
-        this.handleGameAction(msg);
-        break;
-      case 'custom':
-        await this.handleCustomMessage(msg, fromPeerId);
-        break;
-      default:
-        // Includes `chat`: Pool Chat refuses unencrypted chat, and so does this client.
+      case 'game_frame':
+        if (GAMES_ENABLED) this.handleGameFrame(action.type, action.message as unknown as PoolMessage);
         break;
     }
   }
 
-  private async handleKeyExchange(msg: PoolMessage, fromPeerId: string): Promise<void> {
+  private handleGameFrame(type: string, message: PoolMessage): void {
+    if (type === 'game_control') this.handleGameControl(message);
+    else if (type === 'game_state') this.handleGameState(message);
+    else if (type === 'game_action') this.handleGameAction(message);
+  }
+
+  /** So the host isn't left waiting on an answer, and the person here knows why nothing happened. */
+  private declineGameInvite(invite: GameInvite, fromPeerId: string): void {
+    if (this.declinedInvitations.has(invite.invitationID)) return;
+    this.declinedInvitations.add(invite.invitationID);
+    const localPeerId = useConnectionStore.getState().localPeerId;
+    if (!localPeerId) return;
+    this.sendPoolMessage('game_control', buildGameDecline(invite, localPeerId, usePoolStore.getState().userProfile.displayName), [fromPeerId], true);
+    this.addSystemNotice(`${this.displayName(fromPeerId)} invited you to a game. Games aren't available on the web yet, so it was declined. Use the StealthOS app to play.`);
+  }
+
+  private async handleKeyExchange(payload: KeyExchangePayload, fromPeerId: string): Promise<void> {
     const e2e = this.e2e;
     if (!e2e) return;
-    let payload: KeyExchangePayload;
-    try {
-      payload = JSON.parse(textDecoder.decode(base64Decode(msg.payload))) as KeyExchangePayload;
-    } catch {
-      return; // Invalid key exchange
-    }
-    // A key exchange speaks for its sender alone.
-    if (payload.senderPeerID !== fromPeerId) return;
 
     const result = await e2e.acceptKeyExchange(payload, fromPeerId);
     const name = this.displayName(fromPeerId);
     if (result.outcome === 'keyChanged') {
-      this.addSystemNotice(`${name}'s security key changed. If you didn't expect this, check with them another way.`);
+      this.addSystemNotice(`${name}'s security key changed. Compare your security code with them: open your private chat with them and tap the lock.`);
     } else if (result.outcome === 'replayRefused') {
       this.addSystemNotice(`Someone showed an old security key for ${name}. It was refused, and your chat with them is still protected.`);
     }
@@ -580,53 +575,12 @@ class WebSocketTransport {
 
     const key = e2e.keyFor(fromPeerId);
     if (key) useChatStore.getState().setPeerSymmetricKey(fromPeerId, key);
+    useChatStore.getState().setPeerSecurity(fromPeerId, await e2e.securityInfo(fromPeerId));
     this.undecryptableNoticed.delete(fromPeerId);
 
     // A peer that started over has lost our key, as a host that restarted has.
     if (result.shouldAnswer) this.sendKeyExchangeToPeer(fromPeerId);
     await this.flushPendingE2E(fromPeerId);
-  }
-
-  private handleProfileUpdate(msg: PoolMessage): void {
-    try {
-      const payloadJson = textDecoder.decode(base64Decode(msg.payload));
-      const payload = JSON.parse(payloadJson) as ProfileUpdatePayload;
-      // Only from its owner, as ConnectionPoolManager.injectReceivedMessage requires.
-      if (payload.peerID !== msg.senderID) return;
-      usePoolStore.getState().updatePeerProfile(payload.peerID, payload.profile);
-    } catch {
-      // Invalid profile update
-    }
-  }
-
-  private handlePeerInfoMessage(msg: PoolMessage, fromPeerId: string): void {
-    // A roster entry counts only if the relay says the host sent it.
-    if (fromPeerId !== usePoolStore.getState().poolInfo?.hostPeerId) return;
-    try {
-      const payloadJson = textDecoder.decode(base64Decode(msg.payload));
-      const payload = JSON.parse(payloadJson) as PeerInfoPayload;
-      if (payload.profile) {
-        usePoolStore.getState().updatePeerProfile(payload.peerID, payload.profile);
-      }
-    } catch {
-      // Invalid peer info
-    }
-  }
-
-  /** A removal or pool close counts only if the relay says the host sent it. */
-  private handleSystemMessage(msg: PoolMessage, fromPeerId: string): void {
-    if (fromPeerId !== usePoolStore.getState().poolInfo?.hostPeerId) return;
-    let payload: SystemPayload;
-    try {
-      payload = JSON.parse(textDecoder.decode(base64Decode(msg.payload))) as SystemPayload;
-    } catch {
-      return;
-    }
-    if (payload.event === 'pool_closed') {
-      this.leaveWithReason('The host closed this pool.');
-    } else if (payload.event === 'removed_from_pool' && payload.targetPeerID === useConnectionStore.getState().localPeerId) {
-      this.leaveWithReason('The host removed you from this pool.');
-    }
   }
 
   private leaveWithReason(reason: string): void {
@@ -656,9 +610,8 @@ class WebSocketTransport {
     });
   }
 
-  private async decryptFrom(encryptedData: string, peerId: string): Promise<Uint8Array | null> {
-    const combined = base64DecodeStrict(encryptedData);
-    if (!combined || !this.e2e) return null;
+  private async decryptFrom(combined: Uint8Array, peerId: string): Promise<Uint8Array | null> {
+    if (!this.e2e) return null;
     const plaintext = await this.e2e.decrypt(combined, peerId);
     if (!plaintext && !this.undecryptableNoticed.has(peerId)) {
       this.undecryptableNoticed.add(peerId);
@@ -667,32 +620,23 @@ class WebSocketTransport {
     return plaintext;
   }
 
-  private async handleCustomMessage(msg: PoolMessage, fromPeerId: string): Promise<void> {
-    // iOS PoolChat sends everything as type "custom" with an EncryptedChatPayload. Nothing here is
-    // ever taken in the clear: what doesn't decrypt under this peer's key doesn't exist.
-    let payload: Partial<EncryptedChatPayload>;
-    try {
-      payload = JSON.parse(textDecoder.decode(base64Decode(msg.payload))) as Partial<EncryptedChatPayload>;
-    } catch {
-      return; // Invalid custom message
-    }
-    if (typeof payload.encryptedData !== 'string' || payload.senderPeerID !== fromPeerId) return;
-
-    switch (payload.messageType) {
+  private async handleEncrypted(action: Extract<InboundAction, { kind: 'encrypted' }>, fromPeerId: string): Promise<void> {
+    // Nothing here is ever taken in the clear: what doesn't decrypt under this peer's key doesn't exist.
+    switch (action.messageType) {
       case 'chat_message':
-        await this.handleEncryptedChat(payload.encryptedData, msg, fromPeerId);
+        await this.handleEncryptedChat(action.encryptedData, action.timestampMillis, fromPeerId);
         break;
       case 'reaction':
-        await this.handleEncryptedReaction(payload.encryptedData, fromPeerId);
+        await this.handleEncryptedReaction(action.encryptedData, fromPeerId);
         break;
       case 'poll_vote':
-        await this.handleEncryptedPollVote(payload.encryptedData, fromPeerId);
+        await this.handleEncryptedPollVote(action.encryptedData, fromPeerId);
         break;
       case 'call_signal':
-        await this.handleIncomingCallSignal(payload.encryptedData, fromPeerId);
+        await this.handleIncomingCallSignal(action.encryptedData, fromPeerId);
         break;
       case 'media_frame':
-        await this.handleIncomingMediaFrame(payload.encryptedData, fromPeerId);
+        await this.handleIncomingMediaFrame(action.encryptedData, fromPeerId);
         break;
       default:
         // media_frame_v2 needs per-call keys; history_sync and clear_history are not handled here.
@@ -700,96 +644,69 @@ class WebSocketTransport {
     }
   }
 
-  private async handleEncryptedChat(encryptedData: string, msg: PoolMessage, fromPeerId: string): Promise<void> {
+  private async handleEncryptedChat(encryptedData: Uint8Array, timestamp: number, fromPeerId: string): Promise<void> {
     const plaintext = await this.decryptFrom(encryptedData, fromPeerId);
     if (!plaintext) return;
-
-    let chat: EncryptedChatMessage & { messageID?: string };
-    let isPrivate = false;
-    try {
-      const parsed = JSON.parse(textDecoder.decode(plaintext)) as Record<string, unknown>;
-      // iOS wraps in PrivateChatPayload: { chatPayload: {..., text: "Hello"}, isPrivate }
-      if (parsed.chatPayload && typeof parsed.chatPayload === 'object') {
-        chat = parsed.chatPayload as EncryptedChatMessage & { messageID?: string };
-        isPrivate = parsed.isPrivate === true;
-      } else {
-        chat = parsed as unknown as EncryptedChatMessage;
+    const chat = parseDecryptedChat(plaintext);
+    if (!chat) {
+      if (!this.unreadableNoticed.has(fromPeerId)) {
+        this.unreadableNoticed.add(fromPeerId);
+        this.addSystemNotice(`A message from ${this.displayName(fromPeerId)} couldn't be read by this page, so it isn't shown.`);
       }
-    } catch {
       return;
     }
 
     const message: ChatMessage = {
-      id: chat.messageID ?? chat.id ?? msg.id,
+      ...chat,
       senderID: fromPeerId,
-      senderName: msg.senderName,
-      contentType: chat.contentType ?? 'text',
-      timestamp: (msg.timestamp + APPLE_EPOCH_OFFSET) * 1000,
-      text: chat.text,
-      imageData: chat.imageData,
-      voiceData: chat.voiceData,
-      voiceDuration: chat.voiceDuration,
-      emoji: chat.emoji,
-      pollData: chat.pollData,
-      reactions: chat.reactions ?? {},
-      replyTo: chat.replyTo,
-      mentions: chat.mentions ?? [],
-      senderAvatarEmoji: chat.senderAvatarEmoji,
-      senderAvatarColorIndex: chat.senderAvatarColorIndex,
+      // Who sent it is who the roster says, never what the message says.
+      senderName: this.displayName(fromPeerId),
+      timestamp,
       isEncrypted: true,
-      isPrivate,
     };
 
-    if (isPrivate) {
+    if (chat.isPrivate) {
       useChatStore.getState().addPrivateMessage(fromPeerId, message);
     } else {
       useChatStore.getState().addGroupMessage(message);
     }
   }
 
-  private async handleEncryptedReaction(encryptedData: string, fromPeerId: string): Promise<void> {
+  private async handleEncryptedReaction(encryptedData: Uint8Array, fromPeerId: string): Promise<void> {
     const plaintext = await this.decryptFrom(encryptedData, fromPeerId);
-    if (!plaintext) return;
-    try {
-      const reaction = JSON.parse(textDecoder.decode(plaintext)) as { messageID: string; emoji: string; peerID: string; isAdding: boolean };
-      const chatState = useChatStore.getState();
-      const reactionIdLower = reaction.messageID.toLowerCase();
-      // Who reacted is who the relay says sent this, never what it claims.
-      if (chatState.groupMessages.some(m => m.id.toLowerCase() === reactionIdLower)) {
-        chatState.addReaction(reaction.messageID, reaction.emoji, fromPeerId, true);
+    const reaction = plaintext && parseDecryptedReaction(plaintext);
+    if (!reaction) return;
+    const chatState = useChatStore.getState();
+    const idLower = reaction.messageID.toLowerCase();
+    // Who reacted is who the relay says sent this, never what it claims.
+    if (chatState.groupMessages.some(m => m.id.toLowerCase() === idLower)) {
+      chatState.addReaction(reaction.messageID, reaction.emoji, fromPeerId, true);
+      return;
+    }
+    for (const [peerId, msgs] of Object.entries(chatState.privateMessages)) {
+      if (msgs.some(m => m.id.toLowerCase() === idLower)) {
+        chatState.addReaction(reaction.messageID, reaction.emoji, fromPeerId, false, peerId);
         return;
       }
-      for (const [peerId, msgs] of Object.entries(chatState.privateMessages)) {
-        if (msgs.some(m => m.id.toLowerCase() === reactionIdLower)) {
-          chatState.addReaction(reaction.messageID, reaction.emoji, fromPeerId, false, peerId);
-          return;
-        }
-      }
-    } catch {
-      // Invalid reaction
     }
   }
 
-  private async handleEncryptedPollVote(encryptedData: string, fromPeerId: string): Promise<void> {
+  private async handleEncryptedPollVote(encryptedData: Uint8Array, fromPeerId: string): Promise<void> {
     const plaintext = await this.decryptFrom(encryptedData, fromPeerId);
-    if (!plaintext) return;
-    try {
-      const vote = JSON.parse(textDecoder.decode(plaintext)) as { messageID: string; option: string; voterID: string };
-      const chatState = useChatStore.getState();
-      const voteIdLower = vote.messageID.toLowerCase();
-      // Who voted is who the relay says sent this, never what it claims.
-      if (chatState.groupMessages.some(m => m.id.toLowerCase() === voteIdLower)) {
-        chatState.updatePollVote(vote.messageID, vote.option, fromPeerId, true);
+    const vote = plaintext && parseDecryptedPollVote(plaintext);
+    if (!vote) return;
+    const chatState = useChatStore.getState();
+    const idLower = vote.messageID.toLowerCase();
+    // Who voted is who the relay says sent this, never what it claims.
+    if (chatState.groupMessages.some(m => m.id.toLowerCase() === idLower)) {
+      chatState.updatePollVote(vote.messageID, vote.option, fromPeerId, true);
+      return;
+    }
+    for (const [peerId, msgs] of Object.entries(chatState.privateMessages)) {
+      if (msgs.some(m => m.id.toLowerCase() === idLower)) {
+        chatState.updatePollVote(vote.messageID, vote.option, fromPeerId, false, peerId);
         return;
       }
-      for (const [peerId, msgs] of Object.entries(chatState.privateMessages)) {
-        if (msgs.some(m => m.id.toLowerCase() === voteIdLower)) {
-          chatState.updatePollVote(vote.messageID, vote.option, fromPeerId, false, peerId);
-          return;
-        }
-      }
-    } catch {
-      // Invalid poll vote
     }
   }
 
@@ -1392,14 +1309,8 @@ class WebSocketTransport {
     void data;
   }
 
-  private handleSessionResumed(data: SessionResumedData): void {
-    useConnectionStore.getState().setStatus('connected');
-    for (const frame of data.missed_messages) {
-      this.handleMessage(JSON.stringify(frame));
-    }
-  }
-
   private handlePoolHostStatus(data: PoolHostStatusData): void {
+    if (typeof data.online !== 'boolean') return;
     useConnectionStore.getState().setHostOffline(!data.online);
     if (!data.online) {
       this.hostWasOffline = true;
@@ -1694,6 +1605,8 @@ class WebSocketTransport {
   /** Ends the connection and drops every key in memory for it. */
   private tearDownSession(): void {
     this.generation++;
+    this.powTask?.cancel();
+    this.powTask = null;
     this.stopHeartbeat();
     this.stopSecurityTimer();
     if (this.reconnectTimer !== null) {
@@ -1715,6 +1628,8 @@ class WebSocketTransport {
     this.pendingE2E = [];
     this.unsentFrames = [];
     this.undecryptableNoticed.clear();
+    this.unreadableNoticed.clear();
+    this.declinedInvitations.clear();
     useConnectionStore.getState().reset();
   }
 
@@ -1817,27 +1732,35 @@ class WebSocketTransport {
     }
   }
 
-  private async handleIncomingCallSignal(encryptedB64: string, fromPeerId: string): Promise<void> {
-    const plaintext = await this.decryptFrom(encryptedB64, fromPeerId);
-    if (!plaintext) return;
-    let signal: CallSignal;
-    try { signal = JSON.parse(textDecoder.decode(plaintext)) as CallSignal; } catch { return; }
+  private async handleIncomingCallSignal(encrypted: Uint8Array, fromPeerId: string): Promise<void> {
+    const plaintext = await this.decryptFrom(encrypted, fromPeerId);
+    const signal = plaintext && parseDecryptedCallSignal(plaintext);
+    if (!signal) return;
 
     if (!CALLS_ENABLED) {
       if (signal.signalType !== 'offer') return;
       // Decline so the caller isn't left ringing, and say why here.
-      await this.sendCallSignal({ ...signal, signalType: 'reject', timestamp: appleTimestampNow() }, [fromPeerId]);
+      await this.sendCallSignal({
+        callID: signal.callID,
+        signalType: 'reject',
+        callerPeerID: signal.callerPeerID,
+        callerDisplayName: signal.callerDisplayName,
+        calleePeerIDs: signal.calleePeerIDs,
+        isVideoCall: signal.isVideoCall,
+        timestamp: appleTimestampNow(),
+        mediaControl: null,
+      }, [fromPeerId]);
       this.addSystemNotice(`${this.displayName(fromPeerId)} tried to call you. Calls aren't available on the web yet, so the call was declined. Use the StealthOS app for calls.`);
       return;
     }
-    this.ensureCallManager()?.handleSignal(signal, fromPeerId);
+    this.ensureCallManager()?.handleSignal(signal as unknown as CallSignal, fromPeerId);
   }
 
-  private async handleIncomingMediaFrame(encryptedB64: string, fromPeerId: string): Promise<void> {
+  private async handleIncomingMediaFrame(encrypted: Uint8Array, fromPeerId: string): Promise<void> {
     if (!CALLS_ENABLED) return;
     const cm = this.ensureCallManager();
     if (!cm) return;
-    const bytes = await this.decryptFrom(encryptedB64, fromPeerId);
+    const bytes = await this.decryptFrom(encrypted, fromPeerId);
     if (bytes) cm.handleMediaFrameBytes(bytes, fromPeerId);
   }
 }

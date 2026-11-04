@@ -4,6 +4,7 @@ import { usePoolStore } from '../stores/pool.ts';
 import { useConnectionStore } from '../stores/connection.ts';
 import { useGameStore } from '../stores/game.ts';
 import { transport } from '../transport/websocket.ts';
+import { GAMES_ENABLED } from '../protocol/features.ts';
 import PeerAvatar from '../components/PeerAvatar.tsx';
 import ProfileSetup from '../components/ProfileSetup.tsx';
 import ThemeToggle from '../components/ThemeToggle.tsx';
@@ -160,13 +161,15 @@ function LobbyView({ onNavigateChat, onNavigateGames, onReturnToGame }: LobbyVie
           <button
             type="button"
             onClick={onNavigateGames}
-            className="rounded-2xl p-5 flex flex-col items-center justify-center gap-3 active:scale-[0.96] transition-transform aspect-[4/3]"
-            style={{ backgroundColor: 'var(--bg-secondary)' }}
+            disabled={!GAMES_ENABLED}
+            className="rounded-2xl p-5 flex flex-col items-center justify-center gap-3 active:scale-[0.96] transition-transform aspect-[4/3] disabled:active:scale-100"
+            style={{ backgroundColor: 'var(--bg-secondary)', opacity: GAMES_ENABLED ? 1 : 0.6 }}
           >
             <div className="h-14 w-14 rounded-2xl flex items-center justify-center bg-[#BF5AF2]">
               <Gamepad2 className="h-7 w-7 text-white" />
             </div>
             <p className="text-[16px] font-semibold" style={{ color: 'var(--text-primary)' }}>Games</p>
+            {!GAMES_ENABLED && <p className="text-[11px] text-center" style={{ color: 'var(--text-secondary)' }}>Not available on the web yet</p>}
           </button>
         </div>
 

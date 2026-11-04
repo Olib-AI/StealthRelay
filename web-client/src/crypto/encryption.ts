@@ -4,7 +4,7 @@
 // then AES-256-GCM as `nonce(12) || ciphertext || tag(16)`, in base64 inside the JSON.
 
 import { base64DecodeStrict, base64Encode } from '../utils/base64.ts';
-import { be64, bytesEqual, compareBytes, concatBytes, isAllZero, lengthPrefixed, utf8 } from '../utils/bytes.ts';
+import { be64, bytesEqual, compareBytes, concatBytes, isAllZero, lengthPrefixed, raw, utf8 } from '../utils/bytes.ts';
 import type { KeyExchangePayload } from '../protocol/messages.ts';
 import {
   aesGcmOpenCombined,
@@ -14,6 +14,7 @@ import {
   generateEd25519,
   generateX25519,
   hkdfToAesKey,
+  hkdfToHmacKey,
   sha256,
   x25519SharedSecret,
 } from './webcrypto.ts';
@@ -48,7 +49,23 @@ export function continuityStatement(
   );
 }
 
-export async function deriveChatKey(privateKey: CryptoKey, ownPublicKey: Uint8Array, peerPublicKey: Uint8Array): Promise<CryptoKey> {
+/** First 8 bytes, uppercase hex pairs joined by ':', the format of the app's codes. */
+function formatCode(bytes: Uint8Array): string {
+  return Array.from(bytes.subarray(0, 8), (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(':');
+}
+
+/** ChatEncryptionService.fingerprint: what the app shows as a person's key. */
+export async function keyFingerprint(publicKey: Uint8Array): Promise<string> {
+  return formatCode(await sha256(publicKey));
+}
+
+export interface ChatKeys {
+  key: CryptoKey;
+  /** ChatEncryptionService.sharedKeyFingerprint: HMAC-SHA256(chat key, "fingerprint-check"). */
+  safetyCode: string;
+}
+
+export async function deriveChatKey(privateKey: CryptoKey, ownPublicKey: Uint8Array, peerPublicKey: Uint8Array): Promise<ChatKeys> {
   const shared = await x25519SharedSecret(privateKey, peerPublicKey);
   const [first, second] = compareBytes(ownPublicKey, peerPublicKey) <= 0
     ? [ownPublicKey, peerPublicKey]
@@ -56,7 +73,10 @@ export async function deriveChatKey(privateKey: CryptoKey, ownPublicKey: Uint8Ar
   const salt = await sha256(concatBytes(first, second));
   const info = concatBytes(utf8('E2E-Encryption-v1'), first, second);
   try {
-    return await hkdfToAesKey(shared, salt, info);
+    const key = await hkdfToAesKey(shared, salt, info);
+    const hmac = await hkdfToHmacKey(shared, salt, info);
+    const code = await crypto.subtle.sign('HMAC', hmac, raw(utf8('fingerprint-check')));
+    return { key, safetyCode: formatCode(new Uint8Array(code)) };
   } finally {
     shared.fill(0);
   }
@@ -88,6 +108,12 @@ interface Vouch {
   counter: number;
 }
 
+export interface PeerSecurityInfo {
+  safetyCode: string;
+  theirKey: string;
+  yourKey: string;
+}
+
 export interface LocalDeviceSigner {
   publicKey: Uint8Array;
   sign: (message: Uint8Array) => Promise<Uint8Array>;
@@ -98,6 +124,7 @@ export class ChatEncryption {
   private readonly keyAgreement: RawPublicKeyPair;
   private readonly signing: RawPublicKeyPair;
   private readonly peerKeys = new Map<string, CryptoKey>();
+  private readonly safetyCodes = new Map<string, string>();
   private readonly knownPeerKeys = new Map<string, Uint8Array>();
   private readonly knownDeviceKeys = new Map<string, Uint8Array>();
   private readonly lastVouched = new Map<string, { deviceKey: Uint8Array; counter: number; chatKey: Uint8Array }>();
@@ -175,7 +202,7 @@ export class ChatEncryption {
     }
 
     // Derive before recording anything, so a key the platform rejects changes no state.
-    let derived: CryptoKey;
+    let derived: ChatKeys;
     try {
       derived = await deriveChatKey(this.keyAgreement.privateKey, this.keyAgreement.publicKey, chatKey);
     } catch {
@@ -204,7 +231,8 @@ export class ChatEncryption {
       this.lastVouched.set(peerId, { deviceKey: vouch.deviceKey, counter: vouch.counter, chatKey });
     }
 
-    this.peerKeys.set(peerId, derived);
+    this.peerKeys.set(peerId, derived.key);
+    this.safetyCodes.set(peerId, derived.safetyCode);
     return { outcome, accepted: true, shouldAnswer: !hadKeyBefore || (existing !== undefined && !bytesEqual(existing, chatKey)) };
   }
 
@@ -220,9 +248,18 @@ export class ChatEncryption {
     return this.peerKeys.get(peerId);
   }
 
+  /** What the security-code screen shows. `null` until the key exchange with them has finished. */
+  async securityInfo(peerId: string): Promise<PeerSecurityInfo | null> {
+    const safetyCode = this.safetyCodes.get(peerId);
+    const theirKey = this.knownPeerKeys.get(peerId);
+    if (!safetyCode || !theirKey || !this.peerKeys.has(peerId)) return null;
+    return { safetyCode, theirKey: await keyFingerprint(theirKey), yourKey: await keyFingerprint(this.keyAgreement.publicKey) };
+  }
+
   /** Their session ended. What they showed so far says nothing about their next key's rank. */
   removePeer(peerId: string): void {
     this.peerKeys.delete(peerId);
+    this.safetyCodes.delete(peerId);
     this.departed.add(peerId);
   }
 

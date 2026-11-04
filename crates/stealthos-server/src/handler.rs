@@ -247,12 +247,9 @@ impl MessageHandler {
     ///    for at least `host_offline_ttl` regardless of guest count, the
     ///    pool is destroyed.
     ///
-    /// Pools whose host is currently online are never touched here —
-    /// the existing `cleanup_idle_pools` task continues to handle that
-    /// case via `pool_idle_timeout`. This split keeps host-online policy
-    /// (today: empty pool dies after 5 minutes) decoupled from
-    /// host-offline policy (today: empty pool dies after 5 minutes,
-    /// non-empty after 24 hours).
+    /// Pools whose host is currently online are never touched, here or anywhere else: a host
+    /// waiting for its first guest is in its pool, and it could not be told if the pool went.
+    /// Offline, an empty pool goes after 5 minutes and a non-empty one after 24 hours.
     ///
     /// Guests of an evicted pool receive `kicked { reason: ... }` plus a
     /// WebSocket close frame so they don't interpret the eviction as a
@@ -3275,8 +3272,7 @@ impl MessageHandler {
             .then_some((pool, pool_id))
     }
 
-    /// Forget the tokens nobody can use any more. A pool dropped as idle leaves its tokens behind,
-    /// as the registry does not know this index.
+    /// Forget the tokens nobody can use any more.
     fn purge_dead_tokens(&self) {
         for pool in self.pool_registry.snapshot_pools() {
             pool.cleanup_expired_invitations();
@@ -4177,13 +4173,75 @@ mod tests {
         );
     }
 
+    /// Housekeeping used to remove a pool that stood empty for five minutes while its host stayed
+    /// connected. The host still showed Hosting; its yes to the next person went nowhere.
+    #[tokio::test]
+    async fn host_alone_past_any_idle_time_still_admits() {
+        let mut h = setup_harness();
+        h.handler.handle_disconnect(h.guest_conn);
+        let (_id, _pk, pk_b64) = fresh_identity();
+        let new_conn = ConnectionId(123);
+        let mut new_rx = register_connection(&h.handler, new_conn);
+        let pool = h.pool_registry.get_pool(h.pool_id).expect("pool");
+        pool.add_invitation_commitment(
+            [0x11; 16],
+            [0u8; 32],
+            chrono::Utc::now().timestamp() + 300,
+            1,
+        );
+        h.handler.pending_joins.insert(
+            pk_b64.clone(),
+            PendingJoin {
+                connection_id: new_conn,
+                display_name: "Newcomer".to_owned(),
+                pool_id: h.pool_id,
+                token_id: [0x11; 16],
+                created_at: tokio::time::Instant::now(),
+            },
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        h.handler.periodic_cleanup();
+        assert!(
+            h.pool_registry
+                .get_pool_for_connection(h.host_conn)
+                .is_some(),
+            "a connected host is in its pool"
+        );
+
+        let approve = ServerFrame::JoinApproval {
+            client_public_key: pk_b64,
+            approved: true,
+            reason: None,
+            session_token: Some(h.host_session_token.clone()),
+        };
+        let raw = serde_json::to_string(&approve).unwrap();
+        h.handler
+            .handle_message(h.host_conn, SocketAddr::from(([127, 0, 0, 1], 0)), &raw)
+            .await
+            .expect("dispatch");
+
+        let frames = drain_frames(&mut new_rx);
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::JoinAccepted { .. }))),
+            "the person is let in: {frames:?}"
+        );
+        assert!(
+            drain_frames(&mut h.host_rx)
+                .iter()
+                .any(|f| matches!(f, Some(ServerFrame::PeerJoined { .. }))),
+            "and the host hears it"
+        );
+    }
+
     #[tokio::test]
     async fn pool_not_destroyed_on_empty_when_host_online() {
         // Empty pool with host ONLINE must not be touched by the
         // host-offline eviction sweep, regardless of how aggressive the
         // TTLs are. This is the "today's behavior must not regress"
-        // sanity check for the host-online path. (The unrelated
-        // pool_idle_timeout cleanup runs in a different task.)
+        // sanity check for the host-online path.
         let h = setup_harness();
         // Drop the only guest so the pool is empty.
         h.handler.handle_disconnect(h.guest_conn);

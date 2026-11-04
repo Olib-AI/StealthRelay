@@ -65,10 +65,6 @@ max_pools = 100
 # Maximum peers allowed in a single pool.
 max_pool_size = 16
 
-# Seconds of pool inactivity before automatic cleanup (applies only when the
-# host is currently online; default 5 minutes).
-pool_idle_timeout = 300
-
 # Seconds the host may remain offline before the pool is unconditionally
 # destroyed. The pool's bound Ed25519 identity is preserved for the entire
 # window, so the host can reconnect via a fresh `host_auth` and rebind to the

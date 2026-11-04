@@ -399,7 +399,7 @@ See [`config/default.toml`](config/default.toml) for the annotated configuration
 |---------|---------|-------------|
 | `pool.max_pools` | `100` | Maximum number of active pools on this relay |
 | `pool.max_pool_size` | `16` | Maximum peers allowed in a single pool |
-| `pool.pool_idle_timeout` | `300` | Seconds a pool may stand with no guests before automatic cleanup (5 min), unless it has an unexpired invitation |
+| `pool.pool_idle_timeout` | `300` | No longer used, and accepted so that existing configs load. A pool lasts as long as its host is connected |
 
 ### Crypto
 

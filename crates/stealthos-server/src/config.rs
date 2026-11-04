@@ -88,10 +88,10 @@ pub struct PoolSection {
     /// Maximum peers per pool.
     #[serde(default = "default_max_pool_size")]
     pub max_pool_size: usize,
-    /// Seconds of pool inactivity before automatic cleanup. Applies only
-    /// to pools whose host is currently *online*; the host-offline path
-    /// is governed by [`Self::host_offline_ttl_secs`] and
-    /// [`Self::empty_grace_secs`] below.
+    /// No longer used, and still accepted so that existing config files load. It removed a pool
+    /// that stood empty while its host stayed connected, and that host heard nothing. A pool now
+    /// lasts as long as its host is connected, then as [`Self::host_offline_ttl_secs`] and
+    /// [`Self::empty_grace_secs`] below say.
     #[serde(default = "default_pool_idle_timeout")]
     pub pool_idle_timeout: u64,
     /// Maximum number of seconds the host may stay offline before the

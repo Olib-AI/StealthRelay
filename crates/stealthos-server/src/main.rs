@@ -349,7 +349,6 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     // 6. Housekeeping task is spawned after handler creation (step 7b).
-    let pool_idle_timeout = Duration::from_secs(config.pool.pool_idle_timeout);
     let host_offline_ttl = Duration::from_secs(config.pool.host_offline_ttl_secs);
     let empty_grace = Duration::from_secs(config.pool.empty_grace_secs);
 
@@ -441,10 +440,9 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     };
 
     // 7b. Spawn housekeeping task now that handler exists.
-    //     Cleans: idle pools, expired invitations, stale rate limiter entries,
+    //     Cleans: expired invitations, stale rate limiter entries,
     //     expired pending joins, and throttler records.
     let housekeeping_handler = Arc::clone(&handler);
-    let housekeeping_pool_reg = state.pool_registry.clone();
     let housekeeping_shutdown = state.shutdown_rx.clone();
 
     let housekeeping_handle = tokio::spawn(async move {
@@ -454,7 +452,6 @@ async fn run_server(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    housekeeping_pool_reg.cleanup_idle_pools(pool_idle_timeout);
                     housekeeping_handler.periodic_cleanup();
                 }
                 _ = shutdown.changed() => {
